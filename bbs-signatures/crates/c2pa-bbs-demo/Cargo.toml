@@ -1,0 +1,33 @@
+[package]
+name = "c2pa-bbs-demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+base64 = "0.21"
+hex = "0.4"
+coset = "0.3"
+ciborium = "0.2"
+pairing_crypto = { git = "https://github.com/mattrglobal/pairing_crypto", rev = "5c35d52d108d41d6f7b752855473dd82f87d0710" }
+
+[dependencies.c2pa]
+version = "0.33"
+features = ["unstable_api", "file_io"]
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+
+[[bin]]
+name = "c2pa-bbs-sign"
+path = "src/bin/sign.rs"
+
+[[bin]]
+name = "c2pa-bbs-verify"
+path = "src/bin/verify.rs"

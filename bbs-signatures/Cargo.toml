@@ -1,0 +1,5 @@
+[workspace]
+members = [
+    "crates/c2pa-bbs-demo",
+]
+resolver = "2"

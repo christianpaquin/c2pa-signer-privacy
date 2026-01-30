@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["C2PA Privacy Demo"]
+
+[workspace.dependencies]
+# C2PA manifest handling
+c2pa = { version = "0.33", features = ["file_io", "unstable_api"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+hex = "0.4"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+
+# Crypto primitives (for hashing, signatures before circuit)
+sha2 = "0.10"
+p256 = { version = "0.13", features = ["ecdsa"] }
+x509-cert = "0.2"
+der = "0.7"
+num-bigint = "0.4"
+coset = "0.3"
+ciborium = "0.2"
+
+# ZK proving (native Rust - replaces snarkjs)
+ark-circom = "0.5"
+ark-std = "0.5"
+ark-bn254 = "0.5"
+ark-groth16 = "0.5"
+ark-relations = "0.5"
+ark-serialize = "0.5"
+ark-snark = "0.5"
+ark-crypto-primitives = { version = "0.5", features = ["snark"] }
+# Use wasmer with cranelift backend
+wasmer = { version = "4", default-features = false, features = ["sys", "cranelift"] }
+num-traits = "0.2"
+
+# Testing
+tempfile = "3.10"
+assert_cmd = "2.0"
+predicates = "3.1"

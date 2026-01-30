@@ -1,0 +1,45 @@
+# Rust build artifacts
+target/
+Cargo.lock
+
+# Node.js
+node_modules/
+package-lock.json
+
+# ZK circuit build artifacts (large files - regenerate with setup)
+zk-proofs/circuits/build/*.r1cs
+zk-proofs/circuits/build/*.pk
+zk-proofs/circuits/build/*.vk
+zk-proofs/circuits/build/*.zkey
+zk-proofs/circuits/build/*.wtns
+zk-proofs/circuits/build/*.sym
+zk-proofs/circuits/build/*_js/
+zk-proofs/circuits/build/*_cpp/
+
+# Keep small verifying key (968 bytes) but exclude from pattern above
+!zk-proofs/circuits/build/*_native.vk
+
+# Keep the ptau file reference but not the actual file (too large)
+zk-proofs/circuits/*.ptau
+
+# circom-ecdsa-p256 build/scratch artifacts
+zk-proofs/circuits/circom-ecdsa-p256/scratch/
+zk-proofs/circuits/circom-ecdsa-p256/script_outputs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+/tmp/
+*.tmp
+
+# Debug output
+*.log

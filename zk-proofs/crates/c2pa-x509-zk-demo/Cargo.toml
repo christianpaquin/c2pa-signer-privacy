@@ -1,0 +1,63 @@
+[package]
+name = "c2pa-x509-zk-demo"
+version.workspace = true
+edition = "2021"  # Not 2024 for compatibility
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "c2pa-x509-zk-editor"
+path = "src/bin/editor.rs"
+
+[[bin]]
+name = "c2pa-x509-zk-verify"
+path = "src/bin/verify.rs"
+
+[[bin]]
+name = "c2pa-x509-zk-sign"
+path = "src/bin/sign.rs"
+
+[[bin]]
+name = "c2pa-x509-zk-setup"
+path = "src/bin/setup.rs"
+
+[build-dependencies]
+cc = "1.0"
+
+[dependencies]
+c2pa.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+hex.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+sha2.workspace = true
+p256.workspace = true
+x509-cert.workspace = true
+der.workspace = true
+num-bigint.workspace = true
+tempfile.workspace = true
+coset.workspace = true
+ciborium.workspace = true
+
+# Native ZK proving
+ark-circom.workspace = true
+ark-std.workspace = true
+ark-bn254.workspace = true
+ark-groth16.workspace = true
+ark-relations.workspace = true
+ark-serialize.workspace = true
+ark-snark.workspace = true
+ark-crypto-primitives.workspace = true
+wasmer.workspace = true
+num-traits.workspace = true
+
+# Async runtime for wasmer-wasix
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true

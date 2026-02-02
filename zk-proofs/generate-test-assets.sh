@@ -105,9 +105,12 @@ if command -v c2patool &> /dev/null; then
     info "=== Creating C2PA-Signed Asset ==="
     
     if [[ -f "$FIXTURES_DIR/cards.png" ]]; then
-        # Create a simple manifest definition
+        # Create a simple manifest definition with signing credentials
         cat > "$FIXTURES_DIR/manifest.json" << EOF
 {
+    "alg": "es256",
+    "private_key": "$RESOURCES_DIR/signer.key",
+    "sign_cert": "$RESOURCES_DIR/chain.pem",
     "claim_generator": "c2pa-x509-zk-demo/test-signer",
     "title": "Test Image for ZK Anonymizer",
     "assertions": [
@@ -131,8 +134,6 @@ EOF
         c2patool "$FIXTURES_DIR/cards.png" \
             -m "$FIXTURES_DIR/manifest.json" \
             -o "$FIXTURES_DIR/signed-cards.png" \
-            --signer-chain "$RESOURCES_DIR/chain.pem" \
-            --private-key "$RESOURCES_DIR/signer.key" \
             --force
         
         info "Signed asset created: $FIXTURES_DIR/signed-cards.png"

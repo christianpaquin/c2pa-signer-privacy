@@ -1,50 +1,56 @@
-# BBS Signatures Demo
+# BBS Signatures for C2PA
 
-This project implements **Strategy 1 – BBS-based signer privacy** from the v2 plan. It demonstrates how to build and verify C2PA manifests whose signatures are replaced by a selective-disclosure BBS/BBS+ proof over the C2PA claim hash.
+This project implements privacy-preserving signatures for C2PA manifests using BBS signatures with selective disclosure. It allows verification of content authenticity while hiding the signer's identity.
 
-**Status: ✅ Complete** — End-to-end sign/verify flow is fully functional with 4 passing integration tests.
+## Overview
 
-## Components
+BBS signatures support **selective disclosure** (reveal only chosen attributes) and **unlinkable proofs** (same signer, different verifications cannot be correlated). This implementation:
 
-- **Rust crate `c2pa-bbs-demo`** (workspace root)
-  - `c2pa-bbs-sign`: CLI that builds C2PA manifests containing a `bbs-signer-proof` assertion.
-  - `c2pa-bbs-verify`: CLI that validates the proof, the revealed attributes, and the claim hash binding.
-- **Example assets** and scripts for running the sign/verify flow end-to-end.
+- Signs C2PA manifests with a `bbs-signer-proof` assertion
+- Reveals `issuer` and `policy` attributes while hiding `editor_id` and `device_id`
+- Binds the C2PA claim hash into the proof
 
 ## Quick Start
 
 ```bash
-# Build everything
-cargo build --workspace
+# Build
+cargo build --release
 
-# Sign an asset with BBS signer privacy
-cargo run -p c2pa-bbs-demo --bin c2pa-bbs-sign -- \
+# Sign an asset
+cargo run --release --bin c2pa-bbs-sign -- \
   --input fixtures/cards.png \
   --output /tmp/signed.png \
   --issuer "MyOrg" \
   --policy "trusted-editor-v1"
 
 # Verify the signed asset
-cargo run -p c2pa-bbs-demo --bin c2pa-bbs-verify -- \
+cargo run --release --bin c2pa-bbs-verify -- \
   --input /tmp/signed.png
 
-# Run all integration tests
-cargo test -p c2pa-bbs-demo --test integration
+# Run tests
+cargo test --release
 ```
 
-## Sample Asset
+## CLI Tools
 
-- `fixtures/cards.png` — test image copied from the [microsoft/c2pa-extension-validator](https://github.com/microsoft/c2pa-extension-validator) media fixtures (`test/media/cards.png`).
-- Use it with the CLIs via `--input fixtures/cards.png` to verify the signing and verification flows without hunting for your own media.
+| Binary | Description |
+|--------|-------------|
+| `c2pa-bbs-sign` | Create C2PA manifest with BBS signer privacy |
+| `c2pa-bbs-verify` | Verify BBS signed assets |
 
 ## Data Model
 
-BBS credential attributes:
-- `issuer` and `policy` are revealed.
-- `editor_id` and `device_id` remain hidden.
-- `claim_hash` (from `c2pa-rs`) is bound inside the proof as an external message.
+### Credential Attributes
 
-Manifest assertion prototype:
+| Attribute | Disclosed | Purpose |
+|-----------|-----------|---------|
+| `claim_hash` | ✅ Yes | SHA-256 hash of C2PA claim (binding to content) |
+| `issuer` | ✅ Yes | Organization name |
+| `policy` | ✅ Yes | Trust policy identifier |
+| `editor_id` | ❌ No | Individual editor identifier (hidden) |
+| `device_id` | ❌ No | Device/hardware identifier (hidden) |
+
+### Manifest Assertion Format
 
 ```json
 {
@@ -56,44 +62,44 @@ Manifest assertion prototype:
   },
   "claim_hash": "<hex>",
   "proof": "<base64-bbs-proof>",
-  "scheme": "bbs+"
+  "scheme": "bbs"
 }
 ```
 
-## BBS Library Choice
+### COSE Integration
 
-We depend on [MATTR's `pairing_crypto`](external/pairing_crypto) (commit `5c35d52`) for all BBS/BBS+ primitives. That crate tracks the current IRTF CFRG draft (`draft-irtf-cfrg-bbs-signatures-03`) and gives us:
-- Deterministic demo key material for rapid prototyping.
-- A reference BLS12-381 + SHA-256 ciphersuite with signature + proof derivation APIs.
-- Matching proof verification logic we can reuse in the `c2pa-bbs-verify` CLI once the manifest plumbing lands.
+- Custom algorithm: `alg = -65535`
+- Critical header: `crit = ["c2pa-bbs"]`
+- BBS public key embedded in assertion for verifier self-sufficiency
 
-## Implementation Stages
+## Cryptographic Details
 
-1. **Workspace scaffolding**
-   - Create a Cargo workspace with shared dependencies on `c2pa` and a BBS/BBS+ crate (e.g., `bbs` or `ursa`).
-   - Define shared types for credential schemas, proofs, and manifest assertions.
-2. **Signing flow (`c2pa-bbs-sign`)**
-   - Compute the C2PA claim hash using `c2pa-rs`.
-   - Generate or load a BBS credential + signature.
-   - Produce a selective-disclosure proof revealing `issuer` and `policy` while binding `claim_hash`.
-   - Embed the assertion and write the manifest.
-3. **Verification flow (`c2pa-bbs-verify`)**
-   - Recompute the claim hash for the asset.
-   - Extract the `bbs-signer-proof` assertion and validate the proof against the known BBS public key.
-   - Display the revealed attributes and verification status.
-4. **Docs and demos**
-   - Provide example assets and walkthroughs comparing the privacy-preserving flow to standard C2PA signatures.
+The BBS approach replaces the standard COSE/ECDSA signature with a BBS signature that supports selective disclosure. A credential containing multiple attributes (issuer, policy, editor ID, device ID, claim hash) is signed once, then a derived proof reveals only the chosen attributes while cryptographically hiding the rest. Each proof derivation uses fresh randomness, making proofs unlinkable: the same credential can generate multiple proofs that cannot be correlated. This provides both attribute-level privacy and protection against tracking.
 
-## Completed Work
+### How BBS Works
 
-- ✅ Compute real C2PA claim hashes (via `c2pa-rs`) and wire them into the proof binding.
-- ✅ Implement manifest embedding/extraction helpers that swap in the `bbs-signer-proof` assertion.
-- ✅ Custom COSE algorithm (`alg = -65535`) with `crit = ["c2pa-bbs"]` header.
-- ✅ BBS public key embedded in assertion for verifier self-sufficiency.
-- ✅ Integration tests covering round-trip, attribute matching, and error cases.
+A BBS signature is created over a vector of messages (attributes). When deriving a proof:
+- The holder selects which messages to reveal
+- The derived proof cryptographically demonstrates that hidden values were included in the original signature
+- Each proof derivation uses fresh randomness, producing different bytes (unlinkable)
 
-## Future Work
+### BBS Library
 
-- Replace the static demo key with a proper VC hierarchy (DID + credential subject).
-- Engage with C2PA spec authors about a formal experimental algorithm registry.
-- Parameterize the CLIs to accept custom BBS key material.
+This implementation uses [MATTR's `pairing_crypto`](https://github.com/mattrglobal/pairing_crypto), which tracks the IRTF CFRG draft (`draft-irtf-cfrg-bbs-signatures-03`) and provides:
+- BLS12-381 + SHA-256 ciphersuite
+- Signature and proof derivation APIs
+- Proof verification
+
+### Limitations
+
+The prototype uses a self-asserted BBS key pair. A production system would anchor the BBS public key to a Verifiable Credential (VC) chain, binding the key to an issuer identity.
+
+## Test Assets
+
+- `fixtures/cards.png` — Test image from [microsoft/c2pa-extension-validator](https://github.com/microsoft/c2pa-extension-validator)
+
+## References
+
+- [BBS Signatures (IETF Draft)](https://datatracker.ietf.org/doc/draft-irtf-cfrg-bbs-signatures/)
+- [MATTR pairing_crypto](https://github.com/mattrglobal/pairing_crypto)
+- [Design Document](docs/bbs-c2pa-design.md)

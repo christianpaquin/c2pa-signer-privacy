@@ -41,5 +41,15 @@ Thumbs.db
 /tmp/
 *.tmp
 
+# Generated test assets
+zk-proofs/fixtures/manifest.json
+zk-proofs/fixtures/signed-cards.png
+
+# Generated PKI artifacts (private keys, serials, CSRs)
+zk-proofs/crates/c2pa-x509-zk-demo/resources/*.key
+zk-proofs/crates/c2pa-x509-zk-demo/resources/*.srl
+zk-proofs/crates/c2pa-x509-zk-demo/resources/*.csr
+zk-proofs/crates/c2pa-x509-zk-demo/resources/*.ext
+
 # Debug output
 *.log

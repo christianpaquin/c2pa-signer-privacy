@@ -37,7 +37,7 @@ const DEMO_CA_CERT: &[u8] = include_bytes!("../resources/demo-bbs-ca.der");
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimHash(pub String);
 
-/// Proof bytes emitted by the BBS/BBS+ library. Stored as base64 in manifests.
+/// Proof bytes emitted by the BBS library. Stored as base64 in manifests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProofBlob(pub String);
 
@@ -87,7 +87,7 @@ impl BbsSignerProofAssertion {
 
 pub const ASSERTION_TYPE: &str = "bbs-signer-proof";
 pub const ASSERTION_VERSION: &str = "0.1";
-pub const DEFAULT_SCHEME: &str = "bbs+";
+pub const DEFAULT_SCHEME: &str = "bbs";
 
 pub fn embed_bbs_assertion_into_manifest(asset_path: &str, output_path: &str, assertion: BbsSignerProofAssertion) -> Result<()> {
     let mut manifest = Manifest::new(CLAIM_GENERATOR);
@@ -242,7 +242,7 @@ struct BbsProofSigner {
     public_key: Vec<u8>,
 }
 
-/// Private-use COSE algorithm value for BBS+ (BLS12-381, SHA-256).
+/// Private-use COSE algorithm value for BBS (BLS12-381, SHA-256).
 const BBS_COSE_ALG: i64 = -65535;
 /// Critical header label for BBS extension.
 const CRIT_LABEL: &str = "c2pa-bbs";
@@ -264,7 +264,7 @@ impl BbsProofSigner {
 
         // c2pa-bbs extension map
         let bbs_ext = CborValue::Map(vec![
-            (CborValue::Text("scheme".into()), CborValue::Text("bbs+".into())),
+            (CborValue::Text("scheme".into()), CborValue::Text("bbs".into())),
             (CborValue::Text("version".into()), CborValue::Text("0.1".into())),
             (CborValue::Text("public_key".into()), CborValue::Bytes(self.public_key.clone())),
         ]);

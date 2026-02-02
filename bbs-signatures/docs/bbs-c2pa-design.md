@@ -10,7 +10,7 @@ Strategy 1 replaces the standard COSE claim signature (ECDSA, RSA, or EdDSA over
 
 Authority references:
 - C2PA v2.2 specification sections 10 (Claims), 11 (Manifests), 13 (Digital Signatures), 14 (Trust Model), and 15 (Validation).
-- MATTR `pairing_crypto` BBS/BBS+ implementation targeting the CFRG draft (`draft-irtf-cfrg-bbs-signatures-03`).
+- MATTR `pairing_crypto` BBS implementation targeting the CFRG draft (`draft-irtf-cfrg-bbs-signatures-03`).
 
 ## Constraints & Assumptions
 
@@ -36,11 +36,11 @@ Authority references:
 ### 1. Custom COSE Algorithm Identifier (Implemented)
 
 The signer now builds a proper COSE_Sign1 structure with:
-- `alg = -65535` (private-use value for BBS+)
+- `alg = -65535` (private-use value for BBS)
 - `crit = ["c2pa-bbs"]` so conformant parsers know an extension is required
 - `x5chain` containing the demo certificate chain (for c2pa-rs compatibility)
 - `c2pa-bbs = <CBOR map>` with:
-  - `scheme`: `"bbs+"`
+  - `scheme`: `"bbs"`
   - `version`: `"0.1"`  
   - `public_key`: raw bytes of the BBS public key (48 bytes BLS12-381 G1)
 
@@ -56,7 +56,7 @@ Add a custom assertion referenced in `created_assertions`:
 {
   "type": "bbs-signer-proof",
   "version": "0.1",
-  "scheme": "bbs+",
+  "scheme": "bbs",
   "public_attributes": {
     "issuer": "ExampleOrg",
     "policy": "trusted-editor-v1"

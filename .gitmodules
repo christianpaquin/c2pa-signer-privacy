@@ -1,6 +1,7 @@
 [submodule "external/pairing_crypto"]
 	path = external/pairing_crypto
 	url = https://github.com/mattrglobal/pairing_crypto
+	branch = draft-latest
 [submodule "zk-proofs/circuits/circom-ecdsa-p256"]
 	path = zk-proofs/circuits/circom-ecdsa-p256
 	url = https://github.com/privacy-scaling-explorations/circom-ecdsa-p256

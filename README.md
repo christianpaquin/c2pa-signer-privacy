@@ -1,6 +1,6 @@
 # C2PA Signer Privacy
 
-This project explores privacy-preserving signature schemes for [C2PA](https://c2pa.org/) (Coalition for Content Provenance and Authenticity) manifests. The goal is to allow verification of content authenticity while protecting the identity of individual signers.
+This project explores privacy-preserving signature schemes for [C2PA](https://c2pa.org/) (Coalition for Content Provenance and Authenticity) manifests, as described in this [blog post](https://christianpaquin.github.io/2026-02-27-privacy-for-c2pa-signers.html). The goal is to allow verification of content authenticity while protecting the identity of individual signers.
 
 ## Approaches
 
@@ -26,6 +26,10 @@ Two proof-of-concept implementations demonstrate different privacy strategies:
 | **Randomized proofs** | ✅ Different bytes each time | ❌ Deterministic |
 
 > **Note on unlinkability**: Both approaches hide the signer's identity from verifiers. BBS proofs are randomized (same content can be distributed multiple times without correlation), while Groth16 proofs are deterministic (same inputs → same proof).
+
+## Dependencies
+
+Both subprojects depend on the [`c2pa` Rust library](https://github.com/contentauth/c2pa-rs) (v0.33) for C2PA manifest handling (reading, writing, and validating manifests).
 
 ## Project Structure
 

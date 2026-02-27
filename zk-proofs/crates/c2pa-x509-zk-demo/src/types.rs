@@ -13,6 +13,10 @@ pub struct ManifestData {
     pub ca_certs_der: Vec<Vec<u8>>,
     /// The original COSE signature bytes
     pub cose_signature: Vec<u8>,
+    /// Unix timestamp (seconds since epoch) of when the photo was taken.
+    /// Used as the `photoTimestamp` public input for the validity-period check.
+    /// Defaults to 0 if not available from the manifest metadata.
+    pub photo_timestamp: u64,
 }
 
 /// Parameters for trusted CA verification

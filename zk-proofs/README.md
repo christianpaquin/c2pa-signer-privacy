@@ -13,7 +13,7 @@ The verifier can confirm the asset was signed by *someone* with a certificate fr
 
 ## Quick Start
 
-> **Note**: These commands work without building circuits first. The editor uses "placeholder mode" which generates valid manifest structures with placeholder proofs. To generate real ZK proofs, complete the [Building Circuits](#building-circuits) setup first.
+> **Note**: The steps below use `--placeholder`, which generates valid manifest structures without running the ZK circuit. This works immediately after `cargo build`. To generate real ZK proofs, complete the [Building Circuits](#building-circuits) setup first, then drop the `--placeholder` flag from Step 2 (proof generation takes ~8–10 minutes).
 
 ```bash
 # Build
@@ -28,18 +28,21 @@ cargo run --release --bin c2pa-x509-zk-sign -- \
   --ca fixtures/certs/ca-cert.pem
 
 # 2. Anonymize: Replace signature with ZK proof
+#    Use --placeholder until the circuit setup is complete (see Building Circuits below)
 cargo run --release --bin c2pa-x509-zk-editor -- \
   --input /tmp/signed.png \
   --output /tmp/anon.png \
   --ca fixtures/certs/ca-cert.pem \
-  --signer-key fixtures/certs/signer-key.pem
+  --signer-key fixtures/certs/signer-key.pem \
+  --placeholder
 
 # 3. Verify the anonymized asset
+#    (will print a placeholder warning until a real proof is embedded)
 cargo run --release --bin c2pa-x509-zk-verify -- \
   --input /tmp/anon.png \
   --ca fixtures/certs/ca-cert.pem
 
-# Run tests
+# Run all integration tests (also use placeholder mode internally)
 cargo test --release
 ```
 
@@ -56,9 +59,8 @@ cargo test --release
 ```
 zk-proofs/
 ├── circuits/                       # Circom ZK circuits
-│   ├── c2pa_signer_proof.circom    # Main proof circuit
-│   ├── x509_parse.circom           # Certificate parsing
-│   ├── x509_issue_and_possession.circom
+│   ├── x509_issue_and_possession.circom  # Main proof circuit
+│   ├── x509_parse.circom           # Certificate parsing (ASN.1 scaffold, TODO)
 │   ├── circom-ecdsa-p256/          # P-256 ECDSA verification library
 │   └── build/                      # Compiled circuits and keys
 ├── crates/
@@ -70,42 +72,73 @@ zk-proofs/
 
 ## Cryptographic Details
 
-The ZK approach uses a Groth16 zkSNARK to prove that the signer possesses a valid certificate issued by a trusted CA, without revealing which certificate. The circuit performs full P-256 ECDSA signature verification (~2M constraints), making proof generation slow (~5 minutes) but verification fast (11ms). The proof binds the signer's public key to the CA via a hash commitment, and proves knowledge of a valid ECDSA signature over the C2PA claim hash.
+The ZK approach uses a Groth16 zkSNARK to prove that the signer possesses a valid certificate issued by a trusted CA, without revealing which certificate. The primary circuit performs two P-256 ECDSA signature verifications (~2M constraints each, ~4M total), making proof generation slow (~5–10 minutes) but verification fast (11ms). The proof cryptographically binds the signer's private key to a CA-issued certificate, and proves that the certificate was valid when the photo was taken.
 
 ### ZK Proof Statement
 
 **Public inputs:**
-- `issuerHash[4]`: SHA-256 hash of CA public key (4 × 64-bit limbs)
-- `claimHash[6]`: C2PA claim hash (6 × 43-bit registers)
-- `signerPubkey[2][6]`: Signer's P-256 public key (X, Y coordinates)
+- `caPubKeyX[6]`, `caPubKeyY[6]`: Trusted CA's P-256 public key (X, Y, each as 6 × 43-bit registers)
+- `claimHash[6]`: C2PA claim hash SHA-256 (6 × 43-bit registers)
+- `photoTimestamp`: Unix timestamp of when the photo was captured
 
 **Private inputs (witness):**
-- `claimSigR[6]`, `claimSigS[6]`: ECDSA signature (r, s) over claim hash
+- `certDer[1500]`: Raw DER-encoded signer certificate bytes (zero-padded to 1500 bytes)
+- `certLen`: Actual byte count of the certificate
+- `certSigR[6]`, `certSigS[6]`: CA's ECDSA signature over the TBSCertificate
+- `claimSigR[6]`, `claimSigS[6]`: Signer's ECDSA signature over `claimHash`
+- `certNotBefore`, `certNotAfter`: Certificate validity bounds (Unix timestamps)
 
 **Relations proved:**
-1. The signer's public key is bound to a certificate issued by the CA (via issuerHash)
-2. A valid ECDSA signature exists over the claim hash using the signer's private key
+1. `x509_parse.circom` extracts the TBSCertificate hash and SPKI from `certDer` in-circuit — the certificate structure is enforced by the proof itself
+2. `caPubKeyX/Y` verifies the CA signature over the parsed TBSCertificate — the cert was issued by the trusted CA
+3. The parsed subject public key verifies the signer's signature over `claimHash` — the prover holds the corresponding private key
+4. `certNotBefore ≤ photoTimestamp ≤ certNotAfter` — the cert was valid when the photo was taken
+
+**Pending (required for production soundness):**
+- Full `x509_parse.circom` implementation (ASN.1 DER parsing in-circuit) — currently a scaffold
+- RFC 5280 field validation (version, algorithm OID, key-usage extensions)
+- Optional: revocation check via short-lived certs or an accumulator commitment
+
+**Why in-circuit cert parsing matters:**
+Passing raw `certDer` bytes into the circuit and parsing them inside the ZK proof is the architecturally sound design. An alternative (pre-computing `tbsCertHash` off-circuit) creates a key-mixing attack: a malicious prover could combine cert A's CA signature with an unrelated key pair B, bypassing issuance verification entirely. In-circuit parsing closes this soundness gap.
+
+### Constraint Count Reduction (Efficient ECDSA)
+
+The current circuit uses `ECDSAVerifyNoPubkeyCheck` twice, which performs two double-scalar-multiplications (u₁·G + u₂·Q) each with ~1M constraints, totalling ~2M for each signature verification.
+
+The **Efficient ECDSA** technique (sometimes called the "NOPE" circuit) reformulates verification so that only one scalar multiplication is done inside the circuit.  A helper point T = (−s/r)·R + (hash/r)·G is computed off-circuit and handed in as an additional witness; the circuit then proves T + subjectPubkey·(r/s) equals the expected point.  This roughly halves the constraint count per signature — reducing the total from ~4M to ~2M.
+
+Applying this optimisation is left as future work; see the [Efficient ECDSA write-up](https://personaelabs.org/posts/efficient-ecdsa-1/) by Personae Labs for details.
 
 ### Circuit Architecture
 
 ```
-c2pa_signer_proof.circom
-├── x509_parse.circom              # Extract public key from DER certificate
-├── x509_issue_and_possession.circom  # Verify CA signature + key possession
-└── circom-ecdsa-p256/             # P-256 ECDSA signature verification
-    ├── ecdsa.circom               # Main ECDSA verify
-    ├── secp256r1.circom           # Curve operations
-    └── bigint.circom              # 256-bit arithmetic
+circuits/
+├── x509_issue_and_possession.circom  # Main proof circuit (used by Rust prover)
+│   ├── x509_parse.circom             # ASN.1 cert parser scaffold (TODO)
+│   └── circom-ecdsa-p256/            # P-256 ECDSA verification (×2)
+│       ├── ecdsa.circom              # ECDSAVerifyNoPubkeyCheck
+│       ├── p256.circom               # Curve operations
+│       └── bigint arithmetic         # 256-bit register arithmetic
+│
+└── x509_parse.circom                 # X.509 DER parser (ASN.1 scaffold, TODO)
 ```
+
+`x509_issue_and_possession.circom` is the sole proof circuit. It accepts the raw DER
+certificate bytes and parses them in-circuit via `x509_parse.circom`, ensuring that
+the CA signature, the subject public key, and the validity period are all bound to the
+same certificate — preventing key-mixing attacks that would otherwise be possible if
+fields were pre-computed off-circuit.
 
 ### Circuit Statistics
 
-| Metric | Value |
-|--------|-------|
-| Constraints | ~2,000,000 |
-| Proving key size | 363 MB |
-| Verifying key size | 968 bytes |
-| Proof size | ~1 KB |
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Constraints | ~4,000,000 | Two `ECDSAVerifyNoPubkeyCheck` calls (~2M each) |
+| Constraints (with Efficient ECDSA) | ~2,000,000 | See optimisation note above |
+| Proving key size | ~726 MB | Scales with constraint count |
+| Verifying key size | 968 bytes | Constant for Groth16 |
+| Proof size | ~1 KB | Constant for Groth16 |
 
 ### Performance
 
@@ -114,7 +147,7 @@ c2pa_signer_proof.circom
 | Circuit compilation | ~10 min | One-time |
 | Trusted setup | ~36 sec | One-time, native Rust |
 | Witness generation | ~2 sec | Per-proof |
-| Proof generation | ~4-5 min | Per-proof |
+| Proof generation | ~8-10 min | Per-proof (two ECDSA verifications) |
 | Verification | **11 ms** | Fast |
 
 ### COSE Integration
@@ -141,7 +174,7 @@ curl -O https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_21.pta
 mv powersOfTau28_hez_final_21.ptau pot21_final.ptau
 
 # Compile circuit (~5-10 minutes)
-circom c2pa_signer_proof.circom --r1cs --wasm --sym -l . -l node_modules -o build/
+circom x509_issue_and_possession.circom --r1cs --wasm --sym -l . -l node_modules -o build/
 ```
 
 ### 2. Run trusted setup (native Rust)
@@ -184,6 +217,16 @@ Before circuits are fully built, the editor generates placeholder proofs. The ve
 ## References
 
 - [Groth16 zkSNARK](https://eprint.iacr.org/2016/260)
-- [circom-ecdsa-p256](https://github.com/privacy-scaling-explorations/circom-ecdsa-p256)
 - [ark-circom](https://github.com/arkworks-rs/circom-compat)
 - [ark-groth16](https://github.com/arkworks-rs/groth16)
+- [Efficient ECDSA — Personae Labs](https://personaelabs.org/posts/efficient-ecdsa-1/)
+
+## Credits
+
+### circom-ecdsa-p256
+
+The P-256 ECDSA circuit templates (`ECDSAVerifyNoPubkeyCheck`, `ECDSAPrivToPub`, and the underlying
+big-integer and elliptic-curve arithmetic) are taken from
+[**circom-ecdsa-p256**](https://github.com/privacy-scaling-explorations/circom-ecdsa-p256)
+by 0xPARC / Privacy Scaling Explorations, licensed under ISC.
+The library is included as a git submodule at `circuits/circom-ecdsa-p256/`.

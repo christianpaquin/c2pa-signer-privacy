@@ -80,5 +80,3 @@ template ExtractRDN(maxBytes, oidLen) {
 
     valueLen <== 0;
 }
-
-component main = X509Parse(1500);

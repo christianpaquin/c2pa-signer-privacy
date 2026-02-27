@@ -79,10 +79,10 @@ async fn main() -> Result<()> {
     let ca_key_id = compute_key_id(&ca_params.ca_cert_der);
     println!("  CA Key ID: {ca_key_id}");
 
-    // Check if native setup is complete (use c2pa_signer_proof circuit)
+    // Check if native setup is complete (use x509_issue_and_possession circuit)
     let native_paths = NativeCircuitPaths::default_for_circuit(
         &args.circuits_dir,
-        "c2pa_signer_proof",
+        "x509_issue_and_possession",
     );
 
     // Use placeholder mode if explicitly requested or if setup is not complete
@@ -131,16 +131,10 @@ async fn main() -> Result<()> {
             &signer_key,
             &ca_params.ca_cert_der,
         )?;
-        
-        // Extract signer's public key from certificate
-        let signer_pubkey = extract_signer_pubkey(&manifest_data.leaf_cert_der)?;
-        
-        // Convert to circuit format
-        let circuit_inputs = circuit::proof_inputs_to_circuit(
-            &proof_inputs,
-            &issuer_dn,
-            &signer_pubkey,
-        )?;
+
+        // Convert to circuit format — parses the leaf cert internally to
+        // extract tbsCertHash, certSig, subjectPubkey, and validity dates.
+        let circuit_inputs = circuit::proof_inputs_to_circuit(&proof_inputs)?;
 
         println!("Generating native ZK proof (this may take ~30 seconds)...");
         let proof = circuit_native::generate_proof_native(&circuit_inputs, &native_paths)?;
@@ -195,29 +189,3 @@ fn parse_ec_private_key_pem(pem: &str) -> Result<Vec<u8>> {
         .map_err(|e| anyhow!("invalid base64 in PEM: {e}"))
 }
 
-/// Extract signer's public key from certificate
-fn extract_signer_pubkey(cert_der: &[u8]) -> Result<circuit::PublicKeyComponents> {
-    use der::Decode;
-    use x509_cert::Certificate;
-    use p256::PublicKey;
-    use p256::elliptic_curve::sec1::ToEncodedPoint;
-    
-    let cert = Certificate::from_der(cert_der)
-        .map_err(|e| anyhow!("failed to parse certificate: {e}"))?;
-    
-    let spki = &cert.tbs_certificate.subject_public_key_info;
-    let pk_bytes = spki.subject_public_key.as_bytes()
-        .ok_or_else(|| anyhow!("public key not byte-aligned"))?;
-    
-    let public_key = PublicKey::from_sec1_bytes(pk_bytes)
-        .map_err(|e| anyhow!("failed to parse P-256 public key: {e}"))?;
-    
-    let point = public_key.to_encoded_point(false);
-    let x = point.x().ok_or_else(|| anyhow!("missing x coordinate"))?;
-    let y = point.y().ok_or_else(|| anyhow!("missing y coordinate"))?;
-    
-    Ok(circuit::PublicKeyComponents {
-        x: hex::encode(x),
-        y: hex::encode(y),
-    })
-}

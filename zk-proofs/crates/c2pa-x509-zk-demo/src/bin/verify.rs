@@ -99,7 +99,7 @@ fn main() -> Result<()> {
 
     let native_paths = NativeCircuitPaths::default_for_circuit(
         &args.circuits_dir,
-        "c2pa_signer_proof",
+        "x509_issue_and_possession",
     );
 
     if !native_paths.setup_complete() {

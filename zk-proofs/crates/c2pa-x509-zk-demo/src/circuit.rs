@@ -11,21 +11,43 @@ use std::process::Command;
 /// Circuit parameters for P-256: n=43 bits, k=6 registers
 const N_BITS: usize = 43;
 const K_REGISTERS: usize = 6;
+const MAX_CERT_BYTES: usize = 1500;
 
-/// Inputs to the ZK circuit in the format expected by snarkjs
+/// Inputs to the ZK circuit in the format expected by snarkjs / ark-circom.
+///
+/// Field names use camelCase to match the Circom signal names exactly.
+/// Public inputs: caPubKeyX, caPubKeyY, claimHash, photoTimestamp.
+/// Private inputs (witness): all others.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CircuitInputs {
-    /// Issuer DN hash as 4x64-bit chunks (public)
-    pub issuer_hash: [String; 4],
+    // --- Public inputs ---
+    /// Trusted CA's P-256 public key X coordinate as k n-bit registers (public)
+    pub ca_pub_key_x: [String; K_REGISTERS],
+    /// Trusted CA's P-256 public key Y coordinate as k n-bit registers (public)
+    pub ca_pub_key_y: [String; K_REGISTERS],
     /// C2PA claim hash as k registers of n bits (public)
     pub claim_hash: [String; K_REGISTERS],
-    /// Signer's public key X coordinate as k registers (public)
-    pub signer_pubkey: [[String; K_REGISTERS]; 2],
-    /// Signature r component as k registers (private)
+    /// Unix timestamp of when the photo was taken (public, decimal string)
+    pub photo_timestamp: String,
+
+    // --- Private inputs (witness) ---
+    /// DER-encoded certificate bytes, zero-padded to MAX_CERT_BYTES (private)
+    pub cert_der: Vec<String>,
+    /// Actual byte length of certDer (private, decimal string)
+    pub cert_len: String,
+    /// CA's ECDSA signature r over TBSCertificate (private)
+    pub cert_sig_r: [String; K_REGISTERS],
+    /// CA's ECDSA signature s over TBSCertificate (private)
+    pub cert_sig_s: [String; K_REGISTERS],
+    /// Signer's ECDSA signature r over claimHash (private)
     pub claim_sig_r: [String; K_REGISTERS],
-    /// Signature s component as k registers (private)
+    /// Signer's ECDSA signature s over claimHash (private)
     pub claim_sig_s: [String; K_REGISTERS],
+    /// Certificate validity start as Unix timestamp (private, decimal string)
+    pub cert_not_before: String,
+    /// Certificate validity end as Unix timestamp (private, decimal string)
+    pub cert_not_after: String,
 }
 
 /// Inputs to the ZK circuit (Rust-native format before conversion)
@@ -35,10 +57,12 @@ pub struct ProofInputs {
     pub cert_der: Vec<u8>,
     /// ECDSA signature over claim_hash using leaf private key (private)
     pub sig_over_claim: SignatureComponents,
-    /// C2PA claim hash - 32 bytes (public)
+    /// C2PA claim hash — 32 bytes (public)
     pub claim_hash: Vec<u8>,
-    /// CA public key for verifying cert issuance (public)
+    /// Trusted CA public key (public)
     pub ca_pubkey: PublicKeyComponents,
+    /// Unix timestamp when the photo was taken (public)
+    pub photo_timestamp: u64,
 }
 
 /// Public outputs from the ZK circuit
@@ -122,26 +146,14 @@ impl CircuitPaths {
     }
 }
 
-/// Convert a 32-byte hash to 4x64-bit decimal strings (for issuerHash)
-fn hash_to_4x64(hash: &[u8; 32]) -> [String; 4] {
-    let mut result = ["0".to_string(), "0".to_string(), "0".to_string(), "0".to_string()];
-    for i in 0..4 {
-        let mut val: u64 = 0;
-        for j in 0..8 {
-            val |= (hash[i * 8 + j] as u64) << (8 * (7 - j));
-        }
-        result[i] = val.to_string();
-    }
-    result
-}
-
-/// Convert a 32-byte value to k registers of n bits (for circom BigInt format)
+/// Convert a 32-byte value to k registers of n bits (circom BigInt format).
+/// Registers are least-significant first.
 fn bytes_to_registers(bytes: &[u8; 32]) -> [String; K_REGISTERS] {
     use num_bigint::BigUint;
-    
+
     let val = BigUint::from_bytes_be(bytes);
     let mask = (BigUint::from(1u64) << N_BITS) - 1u64;
-    
+
     let mut result: [String; K_REGISTERS] = Default::default();
     let mut temp = val;
     for i in 0..K_REGISTERS {
@@ -152,49 +164,109 @@ fn bytes_to_registers(bytes: &[u8; 32]) -> [String; K_REGISTERS] {
     result
 }
 
-/// Convert ProofInputs to CircuitInputs format
-pub fn proof_inputs_to_circuit(
-    inputs: &ProofInputs,
-    issuer_dn: &str,
-    signer_pubkey: &PublicKeyComponents,
-) -> Result<CircuitInputs> {
-    use sha2::{Sha256, Digest};
-    
-    // Hash the issuer DN
-    let issuer_hash_bytes: [u8; 32] = Sha256::digest(issuer_dn.as_bytes()).into();
-    let issuer_hash = hash_to_4x64(&issuer_hash_bytes);
-    
-    // Convert claim hash (must be 32 bytes)
-    let claim_hash_arr: [u8; 32] = inputs.claim_hash.clone().try_into()
-        .map_err(|_| anyhow!("claim hash must be 32 bytes"))?;
+/// Parse a DER-encoded ECDSA signature `SEQUENCE { INTEGER r, INTEGER s }` as
+/// found in an X.509 certificate's signatureValue BitString.
+fn parse_ecdsa_der_sig(sig_bytes: &[u8]) -> Result<([u8; 32], [u8; 32])> {
+    let sig = p256::ecdsa::Signature::from_der(sig_bytes)
+        .map_err(|e| anyhow!("failed to parse DER ECDSA signature: {e}"))?;
+    let (r, s) = sig.split_bytes();
+    Ok((r.into(), s.into()))
+}
+
+/// Convert an x509-cert `Time` value to a Unix timestamp (seconds since epoch).
+fn validity_time_to_unix(time: &x509_cert::time::Time) -> Result<u64> {
+    use x509_cert::time::Time;
+    let system_time: std::time::SystemTime = match time {
+        Time::UtcTime(t) => std::time::SystemTime::try_from(*t)
+            .map_err(|_| anyhow!("UtcTime out of SystemTime range"))?,
+        Time::GeneralTime(t) => std::time::SystemTime::try_from(*t)
+            .map_err(|_| anyhow!("GeneralizedTime out of SystemTime range"))?,
+    };
+    system_time
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d: std::time::Duration| d.as_secs())
+        .map_err(|e| anyhow!("certificate time before Unix epoch: {e}"))
+}
+
+/// Convert `ProofInputs` to `CircuitInputs` by parsing the leaf certificate
+/// and encoding all values in the format expected by the Circom circuit.
+///
+/// The raw DER bytes are passed to the circuit directly (zero-padded to
+/// MAX_CERT_BYTES) so that X509Parse can extract the TBS hash, SPKI, and
+/// validity bounds inside the circuit — eliminating the key-mixing attack where
+/// a prover could use cert A's TBS hash with key pair B.
+pub fn proof_inputs_to_circuit(inputs: &ProofInputs) -> Result<CircuitInputs> {
+    use der::Decode;
+    use x509_cert::Certificate;
+
+    let leaf_cert = Certificate::from_der(&inputs.cert_der)
+        .map_err(|e| anyhow!("failed to parse leaf certificate: {e}"))?;
+
+    // ---- Raw certificate bytes (zero-padded to MAX_CERT_BYTES) --------------
+    // Each byte is a separate field element (decimal string).
+    if inputs.cert_der.len() > MAX_CERT_BYTES {
+        anyhow::bail!(
+            "certificate is {} bytes, exceeds MAX_CERT_BYTES ({})",
+            inputs.cert_der.len(), MAX_CERT_BYTES
+        );
+    }
+    let cert_len = inputs.cert_der.len().to_string();
+    let mut cert_der_padded: Vec<String> = inputs.cert_der
+        .iter()
+        .map(|b| b.to_string())
+        .collect();
+    cert_der_padded.resize(MAX_CERT_BYTES, "0".to_string());
+
+    // ---- CA signature over TBSCertificate -----------------------------------
+    // The signatureValue BitString in the X.509 Certificate contains a
+    // DER-encoded ECDSA SEQUENCE { INTEGER r, INTEGER s }.
+    let cert_sig_bytes = leaf_cert.signature.as_bytes()
+        .ok_or_else(|| anyhow!("certificate signatureValue is not byte-aligned"))?;
+    let (cert_r, cert_s) = parse_ecdsa_der_sig(cert_sig_bytes)?;
+    let cert_sig_r = bytes_to_registers(&cert_r);
+    let cert_sig_s = bytes_to_registers(&cert_s);
+
+    // ---- Validity dates -----------------------------------------------------
+    let cert_not_before = validity_time_to_unix(
+        &leaf_cert.tbs_certificate.validity.not_before,
+    )?.to_string();
+    let cert_not_after = validity_time_to_unix(
+        &leaf_cert.tbs_certificate.validity.not_after,
+    )?.to_string();
+
+    // ---- CA (issuer) public key — public input ------------------------------
+    let ca_pk_x: [u8; 32] = hex::decode(&inputs.ca_pubkey.x)?
+        .try_into().map_err(|_| anyhow!("CA pubkey X must be 32 bytes"))?;
+    let ca_pk_y: [u8; 32] = hex::decode(&inputs.ca_pubkey.y)?
+        .try_into().map_err(|_| anyhow!("CA pubkey Y must be 32 bytes"))?;
+    let ca_pub_key_x = bytes_to_registers(&ca_pk_x);
+    let ca_pub_key_y = bytes_to_registers(&ca_pk_y);
+
+    // ---- Claim hash and claim signature -------------------------------------
+    let claim_hash_arr: [u8; 32] = inputs.claim_hash.clone()
+        .try_into().map_err(|_| anyhow!("claim hash must be 32 bytes"))?;
     let claim_hash = bytes_to_registers(&claim_hash_arr);
-    
-    // Convert signature components
-    let sig_r_bytes: [u8; 32] = hex::decode(&inputs.sig_over_claim.r)?
-        .try_into().map_err(|_| anyhow!("sig r must be 32 bytes"))?;
-    let sig_s_bytes: [u8; 32] = hex::decode(&inputs.sig_over_claim.s)?
-        .try_into().map_err(|_| anyhow!("sig s must be 32 bytes"))?;
-    
-    let claim_sig_r = bytes_to_registers(&sig_r_bytes);
-    let claim_sig_s = bytes_to_registers(&sig_s_bytes);
-    
-    // Convert public key
-    let pk_x_bytes: [u8; 32] = hex::decode(&signer_pubkey.x)?
-        .try_into().map_err(|_| anyhow!("pubkey x must be 32 bytes"))?;
-    let pk_y_bytes: [u8; 32] = hex::decode(&signer_pubkey.y)?
-        .try_into().map_err(|_| anyhow!("pubkey y must be 32 bytes"))?;
-    
-    let signer_pubkey_regs = [
-        bytes_to_registers(&pk_x_bytes),
-        bytes_to_registers(&pk_y_bytes),
-    ];
-    
+
+    let claim_r: [u8; 32] = hex::decode(&inputs.sig_over_claim.r)?
+        .try_into().map_err(|_| anyhow!("claim sig r must be 32 bytes"))?;
+    let claim_s: [u8; 32] = hex::decode(&inputs.sig_over_claim.s)?
+        .try_into().map_err(|_| anyhow!("claim sig s must be 32 bytes"))?;
+    let claim_sig_r = bytes_to_registers(&claim_r);
+    let claim_sig_s = bytes_to_registers(&claim_s);
+
     Ok(CircuitInputs {
-        issuer_hash,
+        ca_pub_key_x,
+        ca_pub_key_y,
         claim_hash,
-        signer_pubkey: signer_pubkey_regs,
+        photo_timestamp: inputs.photo_timestamp.to_string(),
+        cert_der: cert_der_padded,
+        cert_len,
+        cert_sig_r,
+        cert_sig_s,
         claim_sig_r,
         claim_sig_s,
+        cert_not_before,
+        cert_not_after,
     })
 }
 
@@ -325,10 +397,11 @@ pub fn verify_proof(
     }
 }
 
-/// Prepare circuit inputs from manifest data and signer's private key
-/// 
-/// In a real deployment, this would be done on the signer's device
-/// where they have access to their private key.
+/// Prepare `ProofInputs` from manifest data and the signer's private key.
+///
+/// In a real deployment, this runs on the signer's device where they have
+/// access to their private key.  The resulting `ProofInputs` is passed to
+/// `proof_inputs_to_circuit` to produce the witness for the ZK prover.
 pub fn prepare_inputs(
     manifest_data: &crate::ManifestData,
     signer_private_key: &[u8],
@@ -338,39 +411,39 @@ pub fn prepare_inputs(
     use p256::SecretKey;
     use der::Decode;
     use x509_cert::Certificate;
-    
-    // Parse CA cert to extract public key
+
+    // Parse the CA certificate to extract its public key.
+    // This becomes `issuerPublicKey` in the circuit (a public input).
     let ca_cert = Certificate::from_der(ca_cert_der)
         .map_err(|e| anyhow!("failed to parse CA certificate: {e}"))?;
-    
-    // Extract CA public key components
-    let ca_spki = &ca_cert.tbs_certificate.subject_public_key_info;
-    let ca_pubkey = extract_p256_pubkey_components(ca_spki)?;
-    
-    // Parse the SEC1/DER encoded private key to extract the signing key
-    // Try SEC1 format first (EC PRIVATE KEY), then PKCS#8 (PRIVATE KEY)
+    let ca_pubkey =
+        extract_p256_pubkey_components(&ca_cert.tbs_certificate.subject_public_key_info)?;
+
+    // Parse the signer's private key (SEC1 DER or raw 32-byte scalar).
     let signing_key = if signer_private_key.len() == 32 {
-        // Raw 32-byte scalar
         SigningKey::from_bytes(signer_private_key.into())
             .map_err(|e| anyhow!("invalid raw private key: {e}"))?
     } else {
-        // SEC1 DER format - parse using SecretKey
         let secret_key = SecretKey::from_sec1_der(signer_private_key)
             .map_err(|e| anyhow!("failed to parse SEC1 private key: {e}"))?;
         SigningKey::from(secret_key)
     };
-    
-    // IMPORTANT: Use prehash signing since claim_hash is already a SHA-256 hash.
-    // The circuit expects the signature to be over the raw hash value.
-    let signature: Signature = signing_key.sign_prehash(&manifest_data.claim_hash)
+
+    // Sign the C2PA claim hash with the signer's private key.
+    // The circuit proves possession of this key by verifying the resulting
+    // signature against the subject public key from the leaf certificate.
+    // Use prehash signing — claim_hash is already a SHA-256 digest.
+    let signature: Signature = signing_key
+        .sign_prehash(&manifest_data.claim_hash)
         .map_err(|e| anyhow!("failed to sign claim hash: {e}"))?;
-    let sig_components = signature_to_components(&signature)?;
-    
+    let sig_over_claim = signature_to_components(&signature)?;
+
     Ok(ProofInputs {
         cert_der: manifest_data.leaf_cert_der.clone(),
-        sig_over_claim: sig_components,
+        sig_over_claim,
         claim_hash: manifest_data.claim_hash.clone(),
         ca_pubkey,
+        photo_timestamp: manifest_data.photo_timestamp,
     })
 }
 

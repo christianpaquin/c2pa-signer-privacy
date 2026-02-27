@@ -260,44 +260,91 @@ pub fn verify_proof_native(
     Ok(valid)
 }
 
-/// Set circuit inputs on the builder
+/// Set circuit inputs on the builder using the x509_issue_and_possession signal layout.
 fn set_circuit_inputs(builder: &mut CircomBuilder<Fr>, inputs: &CircuitInputs) -> Result<()> {
-    // issuerHash[4]
-    for val in inputs.issuer_hash.iter() {
+    // caPubKeyX[6] — trusted CA public key X, public input
+    for val in inputs.ca_pub_key_x.iter() {
         let bigint: BigInt = val.parse()
-            .map_err(|e| anyhow!("invalid issuer_hash value: {e}"))?;
-        builder.push_input("issuerHash", bigint);
+            .map_err(|e| anyhow!("invalid caPubKeyX value: {e}"))?;
+        builder.push_input("caPubKeyX", bigint);
     }
-    
-    // claimHash[6]
+
+    // caPubKeyY[6] — trusted CA public key Y, public input
+    for val in inputs.ca_pub_key_y.iter() {
+        let bigint: BigInt = val.parse()
+            .map_err(|e| anyhow!("invalid caPubKeyY value: {e}"))?;
+        builder.push_input("caPubKeyY", bigint);
+    }
+
+    // claimHash[6] — public input
     for val in inputs.claim_hash.iter() {
         let bigint: BigInt = val.parse()
-            .map_err(|e| anyhow!("invalid claim_hash value: {e}"))?;
+            .map_err(|e| anyhow!("invalid claimHash value: {e}"))?;
         builder.push_input("claimHash", bigint);
     }
-    
-    // signerPubkey[2][6] - flattened
-    for vals in inputs.signer_pubkey.iter() {
-        for val in vals.iter() {
-            let bigint: BigInt = val.parse()
-                .map_err(|e| anyhow!("invalid signer_pubkey value: {e}"))?;
-            builder.push_input("signerPubkey", bigint);
-        }
+
+    // photoTimestamp — public input (single field element)
+    {
+        let bigint: BigInt = inputs.photo_timestamp.parse()
+            .map_err(|e| anyhow!("invalid photoTimestamp value: {e}"))?;
+        builder.push_input("photoTimestamp", bigint);
     }
-    
-    // claimSigR[6]
+
+    // certDer[1500] — raw certificate bytes, zero-padded, private input
+    for val in inputs.cert_der.iter() {
+        let bigint: BigInt = val.parse()
+            .map_err(|e| anyhow!("invalid certDer byte value: {e}"))?;
+        builder.push_input("certDer", bigint);
+    }
+
+    // certLen — private input (single field element)
+    {
+        let bigint: BigInt = inputs.cert_len.parse()
+            .map_err(|e| anyhow!("invalid certLen value: {e}"))?;
+        builder.push_input("certLen", bigint);
+    }
+
+    // certSigR[6] — private input
+    for val in inputs.cert_sig_r.iter() {
+        let bigint: BigInt = val.parse()
+            .map_err(|e| anyhow!("invalid certSigR value: {e}"))?;
+        builder.push_input("certSigR", bigint);
+    }
+
+    // certSigS[6] — private input
+    for val in inputs.cert_sig_s.iter() {
+        let bigint: BigInt = val.parse()
+            .map_err(|e| anyhow!("invalid certSigS value: {e}"))?;
+        builder.push_input("certSigS", bigint);
+    }
+
+    // claimSigR[6] — private input
     for val in inputs.claim_sig_r.iter() {
         let bigint: BigInt = val.parse()
-            .map_err(|e| anyhow!("invalid claim_sig_r value: {e}"))?;
+            .map_err(|e| anyhow!("invalid claimSigR value: {e}"))?;
         builder.push_input("claimSigR", bigint);
     }
-    
-    // claimSigS[6]
+
+    // claimSigS[6] — private input
     for val in inputs.claim_sig_s.iter() {
         let bigint: BigInt = val.parse()
-            .map_err(|e| anyhow!("invalid claim_sig_s value: {e}"))?;
+            .map_err(|e| anyhow!("invalid claimSigS value: {e}"))?;
         builder.push_input("claimSigS", bigint);
     }
-    
+
+    // certNotBefore — private input (single field element)
+    {
+        let bigint: BigInt = inputs.cert_not_before.parse()
+            .map_err(|e| anyhow!("invalid certNotBefore value: {e}"))?;
+        builder.push_input("certNotBefore", bigint);
+    }
+
+    // certNotAfter — private input (single field element)
+    {
+        let bigint: BigInt = inputs.cert_not_after.parse()
+            .map_err(|e| anyhow!("invalid certNotAfter value: {e}"))?;
+        builder.push_input("certNotAfter", bigint);
+    }
+
     Ok(())
 }

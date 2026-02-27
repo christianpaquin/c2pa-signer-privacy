@@ -61,6 +61,13 @@ pub fn extract_manifest_data(asset_path: &Path) -> Result<ManifestData> {
         leaf_cert_der,
         ca_certs_der,
         cose_signature,
+        // Use the current time as a conservative photo_timestamp.
+        // A real implementation would read this from the manifest's
+        // creation date claim or EXIF metadata.
+        photo_timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
     })
 }
 

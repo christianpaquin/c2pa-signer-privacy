@@ -13,7 +13,7 @@ The verifier can confirm the asset was signed by *someone* with a certificate fr
 
 ## Quick Start
 
-> **Note**: The steps below use `--placeholder`, which generates valid manifest structures without running the ZK circuit. This works immediately after `cargo build`. To generate real ZK proofs, complete the [Building Circuits](#building-circuits) setup first, then drop the `--placeholder` flag from Step 2 (proof generation takes ~8–10 minutes).
+> **Prerequisites**: Complete the [Building Circuits](#building-circuits) setup before running these commands — you need the compiled circuit and trusted setup keys. For testing without that setup, see [Placeholder Mode](#placeholder-mode).
 
 ```bash
 # Build
@@ -27,23 +27,17 @@ cargo run --release --bin c2pa-x509-zk-sign -- \
   --key fixtures/certs/signer-key.pem \
   --ca fixtures/certs/ca-cert.pem
 
-# 2. Anonymize: Replace signature with ZK proof
-#    Use --placeholder until the circuit setup is complete (see Building Circuits below)
+# 2. Anonymize: Replace signature with a real Groth16 ZK proof (~8–10 minutes)
 cargo run --release --bin c2pa-x509-zk-editor -- \
   --input /tmp/signed.png \
   --output /tmp/anon.png \
   --ca fixtures/certs/ca-cert.pem \
-  --signer-key fixtures/certs/signer-key.pem \
-  --placeholder
+  --signer-key fixtures/certs/signer-key.pem
 
 # 3. Verify the anonymized asset
-#    (will print a placeholder warning until a real proof is embedded)
 cargo run --release --bin c2pa-x509-zk-verify -- \
   --input /tmp/anon.png \
   --ca fixtures/certs/ca-cert.pem
-
-# Run all integration tests (also use placeholder mode internally)
-cargo test --release
 ```
 
 ## CLI Tools
@@ -158,35 +152,35 @@ fields were pre-computed off-circuit.
 
 ## Building Circuits
 
-### 1. Compile the Circom circuit
+### 1. Compile circuit and run trusted setup
 
 ```bash
+# All commands run from the zk-proofs/ directory
+
 # Initialize submodules (if not already done)
 git submodule update --init --recursive
 
-cd circuits
+# Install circuit JS dependencies
+npm install --prefix circuits
 
-# Install dependencies
-npm install
-
-# Download Powers of Tau (1.4GB)
-curl -O https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_21.ptau
-mv powersOfTau28_hez_final_21.ptau pot21_final.ptau
+# Download Powers of Tau (1.4GB, needed for snarkjs-based setup)
+curl -o circuits/pot21_final.ptau \
+  https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_21.ptau
 
 # Compile circuit (~5-10 minutes)
-circom x509_issue_and_possession.circom --r1cs --wasm --sym -l . -l node_modules -o build/
-```
+circom circuits/x509_issue_and_possession.circom \
+  --r1cs --wasm --sym \
+  -l circuits \
+  -l circuits/node_modules \
+  -o circuits/build/
 
-### 2. Run trusted setup (native Rust)
-
-The native setup using `ark-groth16` is much faster than snarkjs (~36 seconds vs 2-4 hours):
-
-```bash
-# from zk-proofs/
+# Run trusted setup — must run from zk-proofs/, not circuits/
 cargo run --release --bin c2pa-x509-zk-setup -- --circuits-dir circuits
 ```
 
 This generates the proving and verifying keys in `circuits/build/`.
+
+> **Note**: The native Rust setup (`ark-groth16`) takes ~36 seconds. The equivalent snarkjs setup would take 2–4 hours.
 
 ## Certificate Requirements
 
@@ -203,7 +197,37 @@ Generate test certificates and a signed test asset:
 
 ## Placeholder Mode
 
-Before circuits are fully built, the editor generates placeholder proofs. The verifier detects these and prints a warning. This allows testing the manifest structure without running the circuit setup.
+If you haven't completed the circuit setup, the editor can embed a placeholder proof instead of a real ZK proof. This lets you exercise the full manifest pipeline — sign, anonymize, verify — immediately after `cargo build`, without waiting for circuit compilation (~10 min) and trusted setup (~36 sec).
+
+The verifier will detect a placeholder and print a warning rather than a clean pass. This is intentional: placeholder mode is for development and structural testing only.
+
+```bash
+cargo build --release
+
+# 1. Sign
+cargo run --release --bin c2pa-x509-zk-sign -- \
+  --input fixtures/cards.png \
+  --output /tmp/signed.png \
+  --cert fixtures/certs/signer-cert.pem \
+  --key fixtures/certs/signer-key.pem \
+  --ca fixtures/certs/ca-cert.pem
+
+# 2. Anonymize with placeholder proof (no circuit setup required)
+cargo run --release --bin c2pa-x509-zk-editor -- \
+  --input /tmp/signed.png \
+  --output /tmp/anon.png \
+  --ca fixtures/certs/ca-cert.pem \
+  --signer-key fixtures/certs/signer-key.pem \
+  --placeholder
+
+# 3. Verify (will print a placeholder warning — expected)
+cargo run --release --bin c2pa-x509-zk-verify -- \
+  --input /tmp/anon.png \
+  --ca fixtures/certs/ca-cert.pem
+
+# The integration test suite also runs in placeholder mode:
+cargo test --release
+```
 
 ## Toolchain
 

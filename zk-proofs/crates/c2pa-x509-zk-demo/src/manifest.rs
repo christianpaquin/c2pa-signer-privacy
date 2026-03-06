@@ -46,16 +46,29 @@ pub fn extract_manifest_data(asset_path: &Path) -> Result<ManifestData> {
     let leaf_cert_der = certs[0].clone();
     let ca_certs_der = certs[1..].to_vec();
     
-    // For claim hash, we need to get it from the manifest
-    // c2pa-rs doesn't expose the claim hash directly, so we need to
-    // work around this. For now, we'll compute a hash of the claim CBOR.
-    // TODO: Use proper claim hash once c2pa-rs exposes it
-    let claim_hash = compute_claim_hash_workaround(manifest)?;
-    
-    // Get the raw signature bytes
-    // c2pa-rs doesn't expose this directly either
-    let cose_signature = Vec::new(); // Placeholder
-    
+    // C2PA claim hash — demo limitation
+    //
+    // In production, the ZK proof would be generated *at signing time*, giving
+    // the prover direct access to the claim bytes and their SHA-256 hash before
+    // or during the COSE signing step.  Doing so after signing requires access
+    // to the raw claim CBOR, which c2pa-rs 0.33 does not expose through its
+    // public API.
+    //
+    // For this demo we compute a deterministic surrogate claim hash from the
+    // leaf certificate and manifest identifiers.  This hash is self-consistent:
+    // the same value is embedded in the ZK proof (via `prepare_inputs`) and
+    // stored in the assertion's `claim_hash` field, so `verify.rs`'s public-
+    // signal binding check passes.  It does NOT equal the actual C2PA claim
+    // hash, so it does not provide spec-compliant content binding.
+    let claim_hash = compute_claim_hash_workaround(&leaf_cert_der, manifest)?;
+
+    // The original COSE signature bytes are not extracted here.  `prepare_inputs`
+    // does not use them — it re-signs `claim_hash` with the caller-supplied
+    // private key.  The field is retained in `ManifestData` for future use if
+    // extraction becomes possible (e.g. to skip re-signing and use the original
+    // signer's ECDSA components directly as circuit witnesses).
+    let cose_signature = Vec::new();
+
     Ok(ManifestData {
         claim_hash,
         leaf_cert_der,
@@ -102,25 +115,30 @@ fn parse_pem_chain(pem_chain: &str) -> Result<Vec<Vec<u8>>> {
     Ok(certs)
 }
 
-/// Workaround to compute claim hash when c2pa-rs doesn't expose it directly
-fn compute_claim_hash_workaround(manifest: &c2pa::Manifest) -> Result<Vec<u8>> {
+/// Demo surrogate claim hash.
+///
+/// Computes SHA-256 over the leaf certificate bytes followed by the manifest's
+/// label and title strings.  The result uniquely identifies the manifest +
+/// certificate combination as far as the demo is concerned.
+///
+/// This is NOT the C2PA spec claim hash (SHA-256 of the COSE-protected claim
+/// CBOR).  See `extract_manifest_data` for the rationale.
+fn compute_claim_hash_workaround(leaf_cert_der: &[u8], manifest: &c2pa::Manifest) -> Result<Vec<u8>> {
     use sha2::{Sha256, Digest};
     
-    // This is a workaround - in reality we need the actual claim CBOR bytes
-    // For now, hash the manifest title + assertions as a placeholder
     let mut hasher = Sha256::new();
+
+    // Bind to the leaf certificate — changes if the certificate changes.
+    hasher.update(leaf_cert_der);
     
+    // Bind to the manifest's stable identifiers.
+    if let Some(label) = manifest.label() {
+        hasher.update(label.as_bytes());
+    }
     if let Some(title) = manifest.title() {
         hasher.update(title.as_bytes());
     }
     
-    // Add label for uniqueness
-    if let Some(label) = manifest.label() {
-        hasher.update(label.as_bytes());
-    }
-    
-    // This is NOT the correct claim hash - just a placeholder
-    // The real implementation needs access to the raw claim CBOR
     Ok(hasher.finalize().to_vec())
 }
 

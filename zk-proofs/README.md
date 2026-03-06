@@ -28,11 +28,14 @@ cargo run --release --bin c2pa-x509-zk-sign -- \
   --ca fixtures/certs/ca-cert.pem
 
 # 2. Anonymize: Replace signature with a real Groth16 ZK proof (~8–10 minutes)
+# --cert supplies the original signer cert DER so the circuit sees the exact
+# bytes the CA signed (c2pa-rs may alter encoding when storing in the manifest).
 cargo run --release --bin c2pa-x509-zk-editor -- \
   --input /tmp/signed.png \
   --output /tmp/anon.png \
   --ca fixtures/certs/ca-cert.pem \
-  --signer-key fixtures/certs/signer-key.pem
+  --signer-key fixtures/certs/signer-key.pem \
+  --cert fixtures/certs/signer-cert.pem
 
 # 3. Verify the anonymized asset
 cargo run --release --bin c2pa-x509-zk-verify -- \
@@ -54,7 +57,7 @@ cargo run --release --bin c2pa-x509-zk-verify -- \
 zk-proofs/
 ├── circuits/                       # Circom ZK circuits
 │   ├── x509_issue_and_possession.circom  # Main proof circuit
-│   ├── x509_parse.circom           # Certificate parsing (ASN.1 scaffold, TODO)
+│   ├── x509_parse.circom           # X.509 DER parser (SelectByte, BytesToRegisters, X509Parse)
 │   ├── circom-ecdsa-p256/          # P-256 ECDSA verification library
 │   └── build/                      # Compiled circuits and keys
 ├── crates/
@@ -66,7 +69,7 @@ zk-proofs/
 
 ## Cryptographic Details
 
-The ZK approach uses a Groth16 zkSNARK to prove that the signer possesses a valid certificate issued by a trusted CA, without revealing which certificate. The primary circuit performs two P-256 ECDSA signature verifications (~2M constraints each, ~4M total), making proof generation slow (~5–10 minutes) but verification fast (11ms). The proof cryptographically binds the signer's private key to a CA-issued certificate, and proves that the certificate was valid when the photo was taken.
+The ZK approach uses a Groth16 zkSNARK to prove that the signer possesses a valid certificate issued by a trusted CA, without revealing which certificate. The primary circuit performs two P-256 ECDSA signature verifications plus in-circuit SHA-256 and UTCTime parsing (~12M constraints total), making proof generation slow (~10–15 minutes) but verification fast (11ms). The proof cryptographically binds the signer's private key to a CA-issued certificate, and proves that the certificate was valid when the photo was taken.
 
 ### ZK Proof Statement
 
@@ -78,44 +81,69 @@ The ZK approach uses a Groth16 zkSNARK to prove that the signer possesses a vali
 **Private inputs (witness):**
 - `certDer[1500]`: Raw DER-encoded signer certificate bytes (zero-padded to 1500 bytes)
 - `certLen`: Actual byte count of the certificate
+- `tbsOffset`, `tbsLen`: Byte offset and declared length of the TBSCertificate DER field
+- `spkiXOffset`: Byte offset of the 32-byte SPKI X coordinate within certDer
+- `notBeforeOffset`, `notAfterOffset`: Byte offsets of the UTCTime fields within certDer
+- `tbsHashPaddedLen`: Padded byte length of the TBS slice for SHA-256 (multiple of 64)
+- `tbsHashPaddedBytes[1536]`: TBS DER bytes with SHA-256 padding appended, zero-filled to 1536
 - `certSigR[6]`, `certSigS[6]`: CA's ECDSA signature over the TBSCertificate
 - `claimSigR[6]`, `claimSigS[6]`: Signer's ECDSA signature over `claimHash`
-- `certNotBefore`, `certNotAfter`: Certificate validity bounds (Unix timestamps)
 
 **Relations proved:**
 1. `x509_parse.circom` extracts the TBSCertificate hash and SPKI from `certDer` in-circuit — the certificate structure is enforced by the proof itself
 2. `caPubKeyX/Y` verifies the CA signature over the parsed TBSCertificate — the cert was issued by the trusted CA
 3. The parsed subject public key verifies the signer's signature over `claimHash` — the prover holds the corresponding private key
-4. `certNotBefore ≤ photoTimestamp ≤ certNotAfter` — the cert was valid when the photo was taken
+4. `parser.notBefore ≤ photoTimestamp ≤ parser.notAfter` — the cert was valid when the photo was taken (timestamps parsed in-circuit from certDer)
 
 **Pending (required for production soundness):**
-- Full `x509_parse.circom` implementation (ASN.1 DER parsing in-circuit) — currently a scaffold
 - RFC 5280 field validation (version, algorithm OID, key-usage extensions)
 - Optional: revocation check via short-lived certs or an accumulator commitment
 
 **Why in-circuit cert parsing matters:**
-Passing raw `certDer` bytes into the circuit and parsing them inside the ZK proof is the architecturally sound design. An alternative (pre-computing `tbsCertHash` off-circuit) creates a key-mixing attack: a malicious prover could combine cert A's CA signature with an unrelated key pair B, bypassing issuance verification entirely. In-circuit parsing closes this soundness gap.
+Passing raw `certDer` bytes into the circuit and parsing them inside the ZK proof is the architecturally sound design. An alternative (pre-computing fields off-circuit) creates a key-mixing attack: a malicious prover could combine cert A's CA signature with an unrelated key pair B, bypassing issuance verification entirely. In-circuit parsing closes this soundness gap.
 
-### Constraint Count Reduction (Efficient ECDSA)
+The in-circuit SHA-256 is implemented via `Sha256Bytes(1536)` from `@zk-email/circuits`.  The prover supplies `tbsHashPaddedBytes[1536]` (the TBS DER bytes with standard SHA-256 padding) and the circuit verifies that the first `4+tbsLen` bytes match `certDer[tbsOffset..]`, then hashes the buffer in-circuit and feeds the result into the CA ECDSA check.
 
-The current circuit uses `ECDSAVerifyNoPubkeyCheck` twice, which performs two double-scalar-multiplications (u₁·G + u₂·Q) each with ~1M constraints, totalling ~2M for each signature verification.
+### Constraint Count
 
-The **Efficient ECDSA** technique (sometimes called the "NOPE" circuit) reformulates verification so that only one scalar multiplication is done inside the circuit.  A helper point T = (−s/r)·R + (hash/r)·G is computed off-circuit and handed in as an additional witness; the circuit then proves T + subjectPubkey·(r/s) equals the expected point.  This roughly halves the constraint count per signature — reducing the total from ~4M to ~2M.
+Estimated for the updated circuit (in-circuit SHA-256 + UTCTime parsing added):
 
-Applying this optimisation is left as future work; see the [Efficient ECDSA write-up](https://personaelabs.org/posts/efficient-ecdsa-1/) by Personae Labs for details.
+| Component | Constraints |
+|---|-----------|
+| `ECDSAVerifyNoPubkeyCheck` × 2 (Steps 2 + 4) | ~3,945,000 |
+| `X509Parse` TBS binding (1536 × `SelectByte` + 1536 × `LessEqThan`) | ~4,320,000 |
+| `Sha256Bytes(1536)` | ~720,000 |
+| SPKI extraction (64 × `SelectByte`) | ~90,000 |
+| UTCTime parsing (2 × `UTCTimeToUnix`) | ~500 |
+| Validity period range checks (`Num2Bits(32)` × 2) | ~70 |
+| **Total (estimated)** | **~9,076,000** |
+
+For a production multi-party trusted setup (MPC ceremony) this circuit class would require a **2²⁴** (~16.7M) Powers of Tau file.  **For this demo no ptau download is needed** — `ark-groth16` performs a local single-party setup directly from the `.r1cs` file.
+
+**Future optimisation:** The `SelectByte` calls for TBS binding (the dominant cost) can be replaced with `VarShiftLeft` from `@zk-email/circuits/utils/array.circom`, reducing the TBS binding cost from ~4.3M constraints to ~500K constraints (~5.5M total, within a pot23-class ceremony for production use).
+
+### Potential Optimisation: Efficient ECDSA
+
+The **Efficient ECDSA** technique (sometimes called the "NOPE" circuit, from [Personae Labs](https://personaelabs.org/posts/efficient-ecdsa-1/)) eliminates the fixed-base G scalar multiplication from signature verification by computing it off-circuit and supplying the result as a witness T.  This would reduce each `ECDSAVerifyNoPubkeyCheck` (~1.3M constraints) to roughly ~700K constraints.
+
+**However, this optimisation is not straightforwardly applicable to Step 2 (CA signature verification).**  If T is an unconstrained private witness, a prover can forge a passing check by computing T = (r, y) − u₂·Q for any point (r, y) on P-256, without access to the CA's private key.  Making T a public commitment would fix the soundness issue but would allow a verifier to link multiple proofs that use the same certificate (T = (hash/s)·G is deterministic per cert+signature pair).
+
+For Step 4 (claim signature), the soundness concern is managed at the system level — only legitimate key holders receive CA-signed certs — so efficient ECDSA could be applied there.  The saving (~600K constraints) would not change the pot24 ceremony class requirement for a production multi-party setup.
+
+Applying this optimisation is left as future work when the soundness and privacy tradeoffs have been fully evaluated.
 
 ### Circuit Architecture
 
 ```
 circuits/
 ├── x509_issue_and_possession.circom  # Main proof circuit (used by Rust prover)
-│   ├── x509_parse.circom             # ASN.1 cert parser scaffold (TODO)
+│   ├── x509_parse.circom             # X.509 DER parser (fully implemented)
 │   └── circom-ecdsa-p256/            # P-256 ECDSA verification (×2)
 │       ├── ecdsa.circom              # ECDSAVerifyNoPubkeyCheck
 │       ├── p256.circom               # Curve operations
 │       └── bigint arithmetic         # 256-bit register arithmetic
 │
-└── x509_parse.circom                 # X.509 DER parser (ASN.1 scaffold, TODO)
+└── x509_parse.circom                 # X.509 DER parser — SelectByte, BytesToRegisters, X509Parse
 ```
 
 `x509_issue_and_possession.circom` is the sole proof circuit. It accepts the raw DER
@@ -128,11 +156,13 @@ fields were pre-computed off-circuit.
 
 | Metric | Value | Notes |
 |--------|-------|-------|
-| Constraints | ~4,000,000 | Two `ECDSAVerifyNoPubkeyCheck` calls (~2M each) |
-| Constraints (with Efficient ECDSA) | ~2,000,000 | See optimisation note above |
-| Proving key size | ~726 MB | Scales with constraint count |
+| Constraints | **12,073,163** (measured) | Two ECDSA verifs (~3.9M) + TBS binding (~4.3M) + SHA-256 (~720K) + parsing + UTCTime |
+| Constraints (with VarShiftLeft TBS binding) | ~5,500,000 | Replace 1536 × SelectByte with VarShiftLeft from @zk-email/circuits |
+| Constraints (with Efficient ECDSA for Step 4) | ~8,476,000 | See optimisation note above — soundness caveat applies |
+| Proving key size | ~3 GB (est.) | Not generated in this demo; only local snarkjs setup key |
 | Verifying key size | 968 bytes | Constant for Groth16 |
 | Proof size | ~1 KB | Constant for Groth16 |
+| Production ceremony class | pot24 (~16.7M constraints) | Not needed for this demo — `ark-groth16` runs local setup |
 
 ### Performance
 
@@ -160,27 +190,28 @@ fields were pre-computed off-circuit.
 # Initialize submodules (if not already done)
 git submodule update --init --recursive
 
-# Install circuit JS dependencies
+# Install circuit JS dependencies (circomlib, circom-ecdsa-p256 deps)
 npm install --prefix circuits
 
-# Download Powers of Tau (1.4GB, needed for snarkjs-based setup)
-curl -o circuits/pot21_final.ptau \
-  https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_21.ptau
-
-# Compile circuit (~5-10 minutes)
+# Compile circuit (~5-10 minutes, produces .r1cs and .wasm)
+mkdir -p circuits/build
 circom circuits/x509_issue_and_possession.circom \
   --r1cs --wasm --sym \
   -l circuits \
   -l circuits/node_modules \
   -o circuits/build/
 
-# Run trusted setup — must run from zk-proofs/, not circuits/
+# Run trusted setup (~36 seconds) — generates proving and verifying keys
+# Must run from zk-proofs/, not circuits/
 cargo run --release --bin c2pa-x509-zk-setup -- --circuits-dir circuits
 ```
 
 This generates the proving and verifying keys in `circuits/build/`.
 
-> **Note**: The native Rust setup (`ark-groth16`) takes ~36 seconds. The equivalent snarkjs setup would take 2–4 hours.
+> **Note**: The native Rust prover (`ark-groth16`) generates its own circuit-specific keys
+> directly from the compiled `.r1cs` + `.wasm` files using a local random seed.  No
+> external Powers of Tau ceremony file is needed — `ark-groth16::generate_random_parameters_with_reduction`
+> handles the setup in one ~36-second pass.
 
 ## Certificate Requirements
 
@@ -236,7 +267,7 @@ cargo test --release
 | Circuit language | Circom | 2.1+ |
 | Proving system | Groth16 on BN254 | — |
 | Rust prover | ark-circom + ark-groth16 | 0.5 |
-| Powers of Tau | Hermez ptau | 2²¹ |
+| Powers of Tau | Not needed — `ark-groth16` generates keys locally | — |
 
 ## References
 

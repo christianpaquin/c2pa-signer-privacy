@@ -195,8 +195,7 @@ pub fn generate_proof_native(
     
     // Set circuit inputs
     set_circuit_inputs(&mut builder, circuit_inputs)?;
-    
-    // Build the circuit with inputs
+
     let circom = builder.build()
         .map_err(|e| anyhow!("failed to build circuit with witness: {e}"))?;
     
@@ -332,18 +331,57 @@ fn set_circuit_inputs(builder: &mut CircomBuilder<Fr>, inputs: &CircuitInputs) -
         builder.push_input("claimSigS", bigint);
     }
 
-    // certNotBefore — private input (single field element)
+    // certNotBefore / certNotAfter — REMOVED: now computed in-circuit by
+    // UTCTimeToUnix inside X509Parse.  Only offsets are needed.
+
+    // tbsOffset — private DER structural hint
     {
-        let bigint: BigInt = inputs.cert_not_before.parse()
-            .map_err(|e| anyhow!("invalid certNotBefore value: {e}"))?;
-        builder.push_input("certNotBefore", bigint);
+        let bigint: BigInt = inputs.tbs_offset.parse()
+            .map_err(|e| anyhow!("invalid tbsOffset value: {e}"))?;
+        builder.push_input("tbsOffset", bigint);
     }
 
-    // certNotAfter — private input (single field element)
+    // tbsLen — private DER structural hint
     {
-        let bigint: BigInt = inputs.cert_not_after.parse()
-            .map_err(|e| anyhow!("invalid certNotAfter value: {e}"))?;
-        builder.push_input("certNotAfter", bigint);
+        let bigint: BigInt = inputs.tbs_len.parse()
+            .map_err(|e| anyhow!("invalid tbsLen value: {e}"))?;
+        builder.push_input("tbsLen", bigint);
+    }
+
+    // spkiXOffset — private DER structural hint
+    {
+        let bigint: BigInt = inputs.spki_x_offset.parse()
+            .map_err(|e| anyhow!("invalid spkiXOffset value: {e}"))?;
+        builder.push_input("spkiXOffset", bigint);
+    }
+
+    // notBeforeOffset — byte offset of notBefore UTCTime tag (0x17) in certDer
+    {
+        let bigint: BigInt = inputs.not_before_offset.parse()
+            .map_err(|e| anyhow!("invalid notBeforeOffset value: {e}"))?;
+        builder.push_input("notBeforeOffset", bigint);
+    }
+
+    // notAfterOffset — byte offset of notAfter UTCTime tag (0x17) in certDer
+    {
+        let bigint: BigInt = inputs.not_after_offset.parse()
+            .map_err(|e| anyhow!("invalid notAfterOffset value: {e}"))?;
+        builder.push_input("notAfterOffset", bigint);
+    }
+
+    // tbsHashPaddedLen — padded byte length for Sha256Bytes(1536)
+    {
+        let bigint: BigInt = inputs.tbs_hash_padded_len.parse()
+            .map_err(|e| anyhow!("invalid tbsHashPaddedLen value: {e}"))?;
+        builder.push_input("tbsHashPaddedLen", bigint);
+    }
+
+    // tbsHashPaddedBytes[1536] — SHA-256-padded TBS bytes; circuit hashes
+    // these in-circuit via Sha256Bytes(1536) inside X509Parse.
+    for val in inputs.tbs_padded_bytes.iter() {
+        let bigint: BigInt = val.parse()
+            .map_err(|e| anyhow!("invalid tbsHashPaddedBytes value: {e}"))?;
+        builder.push_input("tbsHashPaddedBytes", bigint);
     }
 
     Ok(())

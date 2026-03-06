@@ -17,8 +17,9 @@ pub mod types;
 
 // Re-exports
 pub use circuit::{
-    CircuitInputs, CircuitPaths, ProofInputs, ProofOutputs, PublicKeyComponents, 
-    SignatureComponents, SnarkProof, proof_inputs_to_circuit,
+    CircuitInputs, CircuitPaths, ProofInputs, ProofOutputs, PublicKeyComponents,
+    SignatureComponents, SnarkProof, bytes_to_registers, pubkey_registers_from_der,
+    proof_inputs_to_circuit,
 };
 pub use circuit_native::{
     NativeCircuitPaths, NativeProof, native_setup, 

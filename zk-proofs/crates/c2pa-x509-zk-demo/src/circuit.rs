@@ -44,10 +44,27 @@ pub struct CircuitInputs {
     pub claim_sig_r: [String; K_REGISTERS],
     /// Signer's ECDSA signature s over claimHash (private)
     pub claim_sig_s: [String; K_REGISTERS],
-    /// Certificate validity start as Unix timestamp (private, decimal string)
-    pub cert_not_before: String,
-    /// Certificate validity end as Unix timestamp (private, decimal string)
-    pub cert_not_after: String,
+    // --- Private inputs — DER structural hints (verified by X509Parse) ---
+    /// Byte offset of the TBSCertificate SEQUENCE tag within certDer (private)
+    pub tbs_offset: String,
+    /// Declared byte-length value from the TBS DER header (private)
+    pub tbs_len: String,
+    /// Byte offset of the 32-byte X coordinate in the SPKI EC point (private)
+    pub spki_x_offset: String,
+    /// Byte offset of the notBefore UTCTime tag (0x17) within certDer (private)
+    pub not_before_offset: String,
+    /// Byte offset of the notAfter UTCTime tag (0x17) within certDer (private)
+    pub not_after_offset: String,
+    /// SHA-256 padded byte length of the TBS slice (multiple of 64, private)
+    pub tbs_hash_padded_len: String,
+
+    // --- Private inputs — SHA-256-padded TBS bytes (for in-circuit hash) ---
+    /// TBS bytes with SHA-256 padding appended, zero-padded to 1536 bytes.
+    /// The circuit runs Sha256Bytes(1536) over this buffer in-circuit.
+    /// Each entry is a decimal string (byte value 0–255).
+    /// Length must equal MAX_TBS_PADDED (1536).
+    #[serde(rename = "tbsHashPaddedBytes")]
+    pub tbs_padded_bytes: Vec<String>,
 }
 
 /// Inputs to the ZK circuit (Rust-native format before conversion)
@@ -146,9 +163,159 @@ impl CircuitPaths {
     }
 }
 
+/// Find the byte offset of the TBSCertificate SEQUENCE within a DER certificate.
+///
+/// A Certificate is: SEQUENCE { TBSCertificate, AlgorithmIdentifier, BIT STRING }
+/// The TBSCertificate starts immediately after the outer SEQUENCE tag + length bytes.
+fn compute_tbs_offset(cert_der: &[u8]) -> Result<usize> {
+    if cert_der.len() < 4 || cert_der[0] != 0x30 {
+        anyhow::bail!("certificate is not a DER SEQUENCE (got 0x{:02x})", cert_der.first().unwrap_or(&0));
+    }
+    let tbs_start = match cert_der[1] {
+        0x82 => 4usize,  // 0x82 HH LL: 3 length bytes + 1 tag byte
+        0x81 => 3usize,  // 0x81 LL:    2 length bytes + 1 tag byte
+        b if b <= 0x7f => 2usize,  // 1-byte length + 1 tag byte
+        b => anyhow::bail!("unsupported outer SEQUENCE length form: 0x{:02x}", b),
+    };
+    if cert_der.get(tbs_start) != Some(&0x30) {
+        anyhow::bail!(
+            "expected TBSCertificate SEQUENCE (0x30) at offset {}, got 0x{:02x}",
+            tbs_start,
+            cert_der.get(tbs_start).unwrap_or(&0)
+        );
+    }
+    Ok(tbs_start)
+}
+
+/// Parse the declared byte length of TBSCertificate from its DER header.
+fn compute_tbs_len(cert_der: &[u8], tbs_offset: usize) -> Result<usize> {
+    let len_byte = cert_der.get(tbs_offset + 1).copied()
+        .ok_or_else(|| anyhow!("certificate too short for TBS length byte"))?;
+    let tbs_len = match len_byte {
+        0x82 => {
+            let msb = *cert_der.get(tbs_offset + 2)
+                .ok_or_else(|| anyhow!("certificate too short for TBS length MSB"))? as usize;
+            let lsb = *cert_der.get(tbs_offset + 3)
+                .ok_or_else(|| anyhow!("certificate too short for TBS length LSB"))? as usize;
+            msb * 256 + lsb
+        }
+        0x81 => {
+            *cert_der.get(tbs_offset + 2)
+                .ok_or_else(|| anyhow!("certificate too short for TBS length"))? as usize
+        }
+        b if b <= 0x7f => b as usize,
+        b => anyhow::bail!("unsupported TBS length encoding: 0x{:02x}", b),
+    };
+    Ok(tbs_len)
+}
+
+/// Find `notBeforeOffset`: byte offset of the first UTCTime (0x17) tag inside
+/// the Validity SEQUENCE of the TBSCertificate.
+///
+/// RFC 5280 §4.1.2.5 Validity = SEQUENCE { notBefore Time, notAfter Time }.
+/// We search forward from `tbs_offset + 4` (skip TBS tag+len) for the first
+/// 0x17 tag that is followed by length byte 0x0D (13, the fixed UTCTime length).
+fn compute_not_before_offset(cert_der: &[u8], tbs_offset: usize) -> Result<usize> {
+    // Start after the TBS DER header (tag 0x30, 0x82, HH, LL = 4 bytes).
+    let search_start = tbs_offset + 4;
+    for i in search_start..cert_der.len().saturating_sub(1) {
+        if cert_der[i] == 0x17 && cert_der[i + 1] == 0x0D {
+            return Ok(i);
+        }
+    }
+    anyhow::bail!("notBefore UTCTime tag (0x17 0x0D) not found in TBSCertificate");
+}
+
+/// Find `notAfterOffset`: byte offset of the second UTCTime (0x17) tag after
+/// the notBefore field.
+fn compute_not_after_offset(cert_der: &[u8], not_before_offset: usize) -> Result<usize> {
+    // Skip past the notBefore tag (0x17) + length (0x0D) + 13 content bytes = 15 bytes.
+    let search_start = not_before_offset + 15;
+    for i in search_start..cert_der.len().saturating_sub(1) {
+        if cert_der[i] == 0x17 && cert_der[i + 1] == 0x0D {
+            return Ok(i);
+        }
+    }
+    anyhow::bail!("notAfter UTCTime tag (0x17 0x0D) not found after notBefore");
+}
+
+/// Build the SHA-256-padded TBS byte buffer consumed by Sha256Bytes(1536).
+///
+/// SHA-256 padding: append 0x80, then zero bytes, then the 8-byte big-endian
+/// bit count, such that the total length is a multiple of 64.  We cap at 1536
+/// bytes because that is the `maxTbsPadded` value in the Circom circuit.
+///
+/// Returns `(padded_bytes, padded_len)` where:
+/// - `padded_bytes` is a 1536-element Vec of byte values (u8)
+/// - `padded_len` is the first multiple of 64 that fits the TBS + SHA-256 padding
+fn compute_tbs_sha256_padding(
+    cert_der: &[u8],
+    tbs_offset: usize,
+    tbs_len: usize,
+) -> Result<(Vec<u8>, usize)> {
+    const MAX_TBS_PADDED: usize = 1536;
+
+    // TBS DER region: tag(1) + 0x82(1) + HH(1) + LL(1) + content(tbs_len)
+    let tbs_der_len = 4 + tbs_len;
+    let tbs_end = tbs_offset + tbs_der_len;
+    if tbs_end > cert_der.len() {
+        anyhow::bail!(
+            "TBS region {}..{} exceeds certificate length {}",
+            tbs_offset, tbs_end, cert_der.len()
+        );
+    }
+    let tbs_bytes = &cert_der[tbs_offset..tbs_end];
+
+    // SHA-256 padding: message || 0x80 || zero_bytes || 8-byte-big-endian-bit-count
+    // Total length must be a multiple of 64.
+    let msg_bit_len = (tbs_der_len as u64) * 8;
+    // +1 for 0x80, +8 for bit-length field
+    let min_padded = tbs_der_len + 1 + 8;
+    let padded_len = ((min_padded + 63) / 64) * 64;
+
+    if padded_len > MAX_TBS_PADDED {
+        anyhow::bail!(
+            "TBS padded length {} exceeds maxTbsPadded {}",
+            padded_len, MAX_TBS_PADDED
+        );
+    }
+
+    let mut buf = vec![0u8; MAX_TBS_PADDED];
+    buf[..tbs_der_len].copy_from_slice(tbs_bytes);
+    buf[tbs_der_len] = 0x80;
+    // Zero bytes are already in place.
+    // Write 8-byte big-endian bit count at padded_len - 8.
+    let bit_len_bytes = msg_bit_len.to_be_bytes();
+    buf[padded_len - 8..padded_len].copy_from_slice(&bit_len_bytes);
+
+    Ok((buf, padded_len))
+}
+
+/// Find the byte offset of the EC public key X coordinate within `cert_der`.
+///
+/// Searches for the uncompressed EC point marker byte (0x04) followed by the
+/// known 32-byte X coordinate.  Returns the offset of the first X byte
+/// (i.e., one past the 0x04 marker).
+fn compute_spki_x_offset(cert_der: &[u8], x_bytes: &[u8; 32]) -> Result<usize> {
+    // Build: [0x04, x[0], x[1], ..., x[31]]
+    let mut needle = [0u8; 33];
+    needle[0] = 0x04;
+    needle[1..].copy_from_slice(x_bytes);
+    cert_der
+        .windows(33)
+        .position(|w| w == needle)
+        .map(|pos| pos + 1) // +1: X bytes start after the 0x04 marker
+        .ok_or_else(|| anyhow!("EC public key X coordinate not found in certificate DER"))
+}
+
 /// Convert a 32-byte value to k registers of n bits (circom BigInt format).
-/// Registers are least-significant first.
-fn bytes_to_registers(bytes: &[u8; 32]) -> [String; K_REGISTERS] {
+///
+/// Registers are least-significant first (LSB register 0, MSB register k-1).
+/// This matches the internal encoding of `ECDSAVerifyNoPubkeyCheck` and is
+/// used both to build circuit witnesses and to reconstruct expected public
+/// input values from byte-level data (e.g. CA public key, claim hash) for
+/// post-verification binding checks.
+pub fn bytes_to_registers(bytes: &[u8; 32]) -> [String; K_REGISTERS] {
     use num_bigint::BigUint;
 
     let val = BigUint::from_bytes_be(bytes);
@@ -164,6 +331,42 @@ fn bytes_to_registers(bytes: &[u8; 32]) -> [String; K_REGISTERS] {
     result
 }
 
+/// Extract the subject P-256 public key from a DER-encoded X.509 certificate
+/// and return it as two k-register arrays in the cicom BigInt format used by
+/// `ECDSAVerifyNoPubkeyCheck`.
+///
+/// Returns `(x_registers, y_registers)` where each array has `K_REGISTERS`
+/// decimal-string limbs (LSB-first, n bits each).
+///
+/// Used by the verifier to reconstruct the expected `caPubKeyX/Y` public
+/// signals from the trusted CA DER certificate, so it can confirm the proof's
+/// embedded public inputs match the CA the operator actually trusts.
+#[allow(deprecated)] // generic-array 0.x as_slice() — harmless until dependency upgrade
+pub fn pubkey_registers_from_der(cert_der: &[u8]) -> Result<([String; K_REGISTERS], [String; K_REGISTERS])> {
+    use der::Decode;
+    use x509_cert::Certificate;
+    use p256::PublicKey;
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+
+    let cert = Certificate::from_der(cert_der)
+        .map_err(|e| anyhow!("failed to parse X.509 certificate: {e}"))?;
+
+    let pk_bytes = cert.tbs_certificate.subject_public_key_info
+        .subject_public_key
+        .as_bytes()
+        .ok_or_else(|| anyhow!("public key not byte-aligned"))?;
+
+    let pk = PublicKey::from_sec1_bytes(pk_bytes)
+        .map_err(|e| anyhow!("failed to parse P-256 public key from certificate: {e}"))?;
+    let point = pk.to_encoded_point(false);
+    let x: [u8; 32] = point.x().ok_or_else(|| anyhow!("missing x"))?.as_slice()
+        .try_into().map_err(|_| anyhow!("pk x not 32 bytes"))?;
+    let y: [u8; 32] = point.y().ok_or_else(|| anyhow!("missing y"))?.as_slice()
+        .try_into().map_err(|_| anyhow!("pk y not 32 bytes"))?;
+
+    Ok((bytes_to_registers(&x), bytes_to_registers(&y)))
+}
+
 /// Parse a DER-encoded ECDSA signature `SEQUENCE { INTEGER r, INTEGER s }` as
 /// found in an X.509 certificate's signatureValue BitString.
 fn parse_ecdsa_der_sig(sig_bytes: &[u8]) -> Result<([u8; 32], [u8; 32])> {
@@ -171,21 +374,6 @@ fn parse_ecdsa_der_sig(sig_bytes: &[u8]) -> Result<([u8; 32], [u8; 32])> {
         .map_err(|e| anyhow!("failed to parse DER ECDSA signature: {e}"))?;
     let (r, s) = sig.split_bytes();
     Ok((r.into(), s.into()))
-}
-
-/// Convert an x509-cert `Time` value to a Unix timestamp (seconds since epoch).
-fn validity_time_to_unix(time: &x509_cert::time::Time) -> Result<u64> {
-    use x509_cert::time::Time;
-    let system_time: std::time::SystemTime = match time {
-        Time::UtcTime(t) => std::time::SystemTime::try_from(*t)
-            .map_err(|_| anyhow!("UtcTime out of SystemTime range"))?,
-        Time::GeneralTime(t) => std::time::SystemTime::try_from(*t)
-            .map_err(|_| anyhow!("GeneralizedTime out of SystemTime range"))?,
-    };
-    system_time
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d: std::time::Duration| d.as_secs())
-        .map_err(|e| anyhow!("certificate time before Unix epoch: {e}"))
 }
 
 /// Convert `ProofInputs` to `CircuitInputs` by parsing the leaf certificate
@@ -226,13 +414,9 @@ pub fn proof_inputs_to_circuit(inputs: &ProofInputs) -> Result<CircuitInputs> {
     let cert_sig_r = bytes_to_registers(&cert_r);
     let cert_sig_s = bytes_to_registers(&cert_s);
 
-    // ---- Validity dates -----------------------------------------------------
-    let cert_not_before = validity_time_to_unix(
-        &leaf_cert.tbs_certificate.validity.not_before,
-    )?.to_string();
-    let cert_not_after = validity_time_to_unix(
-        &leaf_cert.tbs_certificate.validity.not_after,
-    )?.to_string();
+    // ---- Validity dates (off-circuit): removed — now computed in-circuit ----
+    // The circuit parses notBefore/notAfter UTCTime fields directly from certDer
+    // via UTCTimeToUnix inside X509Parse.  We only need the byte offsets here.
 
     // ---- CA (issuer) public key — public input ------------------------------
     let ca_pk_x: [u8; 32] = hex::decode(&inputs.ca_pubkey.x)?
@@ -254,6 +438,39 @@ pub fn proof_inputs_to_circuit(inputs: &ProofInputs) -> Result<CircuitInputs> {
     let claim_sig_r = bytes_to_registers(&claim_r);
     let claim_sig_s = bytes_to_registers(&claim_s);
 
+    // ---- DER structural hints for X509Parse -----------------------------------
+    // These are off-circuit byte offsets verified inside the circuit against
+    // the certDer bytes.  We compute them here by walking the raw DER.
+    let tbs_offset = compute_tbs_offset(&inputs.cert_der)?;
+    let tbs_len    = compute_tbs_len(&inputs.cert_der, tbs_offset)?;
+
+    // notBefore / notAfter UTCTime offsets for in-circuit date parsing.
+    let not_before_offset = compute_not_before_offset(&inputs.cert_der, tbs_offset)?;
+    let not_after_offset  = compute_not_after_offset(&inputs.cert_der, not_before_offset)?;
+
+    // SHA-256 padding for the TBS slice — Sha256Bytes(1536) operates on this
+    // pre-padded buffer in-circuit.
+    let (tbs_padded_raw, tbs_hash_padded_len) =
+        compute_tbs_sha256_padding(&inputs.cert_der, tbs_offset, tbs_len)?;
+    let tbs_padded_bytes: Vec<String> = tbs_padded_raw.iter().map(|b| b.to_string()).collect();
+
+    // To find spki_x_offset we need the raw X coordinate bytes, which we get
+    // from the parsed certificate's SPKI (already extracted as ca_pk_x above,
+    // but that's the *CA* key — here we need the *subject* key).
+    let subject_spki = &leaf_cert.tbs_certificate.subject_public_key_info;
+    let subject_pk_bytes = subject_spki.subject_public_key.as_bytes()
+        .ok_or_else(|| anyhow!("subject public key not byte-aligned"))?;
+    // subject_pk_bytes is the SEC 1 uncompressed point: 0x04 || X(32) || Y(32)
+    if subject_pk_bytes.len() < 65 || subject_pk_bytes[0] != 0x04 {
+        anyhow::bail!(
+            "expected 65-byte uncompressed P-256 point (0x04||X||Y), got {} bytes starting with 0x{:02x}",
+            subject_pk_bytes.len(), subject_pk_bytes[0]
+        );
+    }
+    let subject_x: [u8; 32] = subject_pk_bytes[1..33].try_into()
+        .map_err(|_| anyhow!("subject public key X is not 32 bytes"))?;
+    let spki_x_offset = compute_spki_x_offset(&inputs.cert_der, &subject_x)?;
+
     Ok(CircuitInputs {
         ca_pub_key_x,
         ca_pub_key_y,
@@ -265,8 +482,13 @@ pub fn proof_inputs_to_circuit(inputs: &ProofInputs) -> Result<CircuitInputs> {
         cert_sig_s,
         claim_sig_r,
         claim_sig_s,
-        cert_not_before,
-        cert_not_after,
+        tbs_offset: tbs_offset.to_string(),
+        tbs_len: tbs_len.to_string(),
+        spki_x_offset: spki_x_offset.to_string(),
+        not_before_offset: not_before_offset.to_string(),
+        not_after_offset: not_after_offset.to_string(),
+        tbs_hash_padded_len: tbs_hash_padded_len.to_string(),
+        tbs_padded_bytes,
     })
 }
 
@@ -318,7 +540,7 @@ pub fn generate_proof(
     }
     
     // Generate proof
-    println!("Generating proof (this may take ~30 seconds)...");
+    println!("Generating proof...");
     let status = Command::new("npx")
         .args(["snarkjs", "groth16", "prove"])
         .arg(&paths.proving_key)
@@ -476,4 +698,76 @@ fn signature_to_components(sig: &p256::ecdsa::Signature) -> Result<SignatureComp
         r: hex::encode(r),
         s: hex::encode(s),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that the TBS bytes and CA signature extracted from the test
+    /// certificate are consistent — i.e., SHA-256(TBS) verifies under the CA
+    /// public key.  If this test passes, the Rust-side circuit inputs are
+    /// correct and any proof-verification failure is a circuit bug.
+    #[test]
+    fn cert_inputs_verify_offcircuit() {
+        use sha2::{Sha256, Digest};
+        use p256::ecdsa::{VerifyingKey, Signature, signature::hazmat::PrehashVerifier};
+        use der::Decode;
+        use x509_cert::Certificate;
+
+        // Load test fixtures using CARGO_MANIFEST_DIR (zk-proofs/crates/c2pa-x509-zk-demo)
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let fixtures = manifest_dir.join("../../fixtures/certs");
+        let cert_der = std::fs::read(fixtures.join("signer-cert.der"))
+            .expect("signer-cert.der not found");
+        let ca_cert_der = std::fs::read(fixtures.join("ca-cert.der"))
+            .expect("ca-cert.der not found");
+
+        // ---- Compute structural hints ----------------------------------------
+        let tbs_offset = compute_tbs_offset(&cert_der).unwrap();
+        let tbs_len = compute_tbs_len(&cert_der, tbs_offset).unwrap();
+        let not_before_offset = compute_not_before_offset(&cert_der, tbs_offset).unwrap();
+        let not_after_offset = compute_not_after_offset(&cert_der, not_before_offset).unwrap();
+        let (_, tbs_hash_padded_len) =
+            compute_tbs_sha256_padding(&cert_der, tbs_offset, tbs_len).unwrap();
+
+        eprintln!("tbs_offset={tbs_offset}, tbs_len={tbs_len}");
+        eprintln!("not_before_offset={not_before_offset}, not_after_offset={not_after_offset}");
+        eprintln!("tbs_hash_padded_len={tbs_hash_padded_len}");
+        eprintln!("cert tag at tbs_offset: 0x{:02x}, len-type: 0x{:02x}",
+            cert_der[tbs_offset], cert_der[tbs_offset + 1]);
+
+        // ---- Print notBefore UTCTime bytes (first 14 bytes from offset) ------
+        let nb_bytes = &cert_der[not_before_offset..not_before_offset + 15];
+        eprintln!("notBefore raw: {:02x?}", nb_bytes);
+        let na_bytes = &cert_der[not_after_offset..not_after_offset + 15];
+        eprintln!("notAfter  raw: {:02x?}", na_bytes);
+
+        // ---- Verify CA signature off-circuit ---------------------------------
+        let tbs_bytes = &cert_der[tbs_offset..tbs_offset + 4 + tbs_len];
+        let tbs_hash: [u8; 32] = Sha256::digest(tbs_bytes).into();
+        eprintln!("SHA-256(TBS) = {:02x?}", &tbs_hash);
+
+        let cert = Certificate::from_der(&cert_der).unwrap();
+        let ca_cert = Certificate::from_der(&ca_cert_der).unwrap();
+
+        let ca_pk_bytes = ca_cert.tbs_certificate.subject_public_key_info
+            .subject_public_key.as_bytes().unwrap();
+        let ca_vk = VerifyingKey::from_sec1_bytes(ca_pk_bytes).unwrap();
+
+        let cert_sig_bytes = cert.signature.as_bytes().unwrap();
+        let (cert_r, cert_s) = parse_ecdsa_der_sig(cert_sig_bytes).unwrap();
+        eprintln!("certSigR = {:02x?}", &cert_r);
+        eprintln!("certSigS = {:02x?}", &cert_s);
+
+        let sig = Signature::from_scalars(
+            p256::FieldBytes::clone_from_slice(&cert_r),
+            p256::FieldBytes::clone_from_slice(&cert_s),
+        ).expect("failed to construct signature");
+
+        ca_vk.verify_prehash(&tbs_hash, &sig)
+            .expect("CA signature verification FAILED — circuit inputs are wrong");
+
+        eprintln!("✓ CA signature verification PASSED");
+    }
 }

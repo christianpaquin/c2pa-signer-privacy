@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use clap::Parser;
 use c2pa_bbs_demo::{
+    compute_claim_hash_for_embedded_asset,
     extract_bbs_assertion_from_manifest,
     verify_bbs_proof,
     PublicAttributes,
@@ -42,18 +43,13 @@ fn run(args: VerifyArgs) -> Result<()> {
 
     ensure_expected_attributes(&assertion.public_attributes, args.issuer.as_ref(), args.policy.as_ref())?;
 
-    // Use the claim_hash stored in the assertion rather than re-hashing the
-    // (now modified) asset file.  The BBS proof binds the hash at signing time;
-    // once we validate the proof we know this hash was committed to by the
-    // signer. Future work: compare against C2PA's DataHash exclusion range to
-    // confirm the non-manifest bytes still match.
-    let bound_hash = assertion.claim_hash.clone();
-    verify_bbs_proof(&assertion, &bound_hash)?;
+    let expected_hash = compute_claim_hash_for_embedded_asset(&args.input)?;
+    verify_bbs_proof(&assertion, &expected_hash)?;
 
     println!("BBS signer proof verified successfully.");
     println!("  issuer: {}", assertion.public_attributes.issuer);
     println!("  policy: {}", assertion.public_attributes.policy);
-    println!("  claim_hash: {}", bound_hash.0);
+    println!("  claim_hash: {}", expected_hash.0);
 
     Ok(())
 }

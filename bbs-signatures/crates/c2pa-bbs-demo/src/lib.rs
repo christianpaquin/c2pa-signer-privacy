@@ -24,6 +24,7 @@ use std::{
     io::BufReader,
     path::Path,
 };
+use tempfile::Builder as TempFileBuilder;
 
 const CLAIM_HASH_BINDING_DOMAIN: &[u8] = b"c2pa-bbs-claim-hash:";
 const DEMO_KEY_INFO: &[u8] = b"c2pa-bbs-demo-key-info";
@@ -54,6 +55,32 @@ pub struct HiddenAttributes {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssuedCredential {
+    pub version: String,
+    pub issuer_public_key: String,
+    pub public_attributes: PublicAttributes,
+    pub hidden_attributes: HiddenAttributes,
+    pub signature: String,
+}
+
+impl IssuedCredential {
+    pub fn new(
+        issuer_public_key: String,
+        public_attributes: PublicAttributes,
+        hidden_attributes: HiddenAttributes,
+        signature: String,
+    ) -> Self {
+        Self {
+            version: ASSERTION_VERSION.to_string(),
+            issuer_public_key,
+            public_attributes,
+            hidden_attributes,
+            signature,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BbsSignerProofAssertion {
     #[serde(rename = "type")]
     pub assertion_type: String,
@@ -62,8 +89,8 @@ pub struct BbsSignerProofAssertion {
     pub claim_hash: ClaimHash,
     pub proof: ProofBlob,
     pub scheme: String,
-    /// Base64-encoded BBS public key (BLS12-381 G1, 48 bytes).
-    pub public_key: String,
+    /// Base64-encoded issuer BBS public key (BLS12-381 G1, 48 bytes).
+    pub issuer_public_key: String,
 }
 
 impl BbsSignerProofAssertion {
@@ -71,7 +98,7 @@ impl BbsSignerProofAssertion {
         public_attributes: PublicAttributes,
         claim_hash: ClaimHash,
         proof: ProofBlob,
-        public_key: String,
+        issuer_public_key: String,
     ) -> Self {
         Self {
             assertion_type: ASSERTION_TYPE.to_string(),
@@ -80,7 +107,7 @@ impl BbsSignerProofAssertion {
             claim_hash,
             proof,
             scheme: DEFAULT_SCHEME.to_string(),
-            public_key,
+            issuer_public_key,
         }
     }
 }
@@ -111,8 +138,8 @@ pub fn embed_bbs_assertion_into_manifest(asset_path: &str, output_path: &str, as
 
     let proof_bytes = decode_proof(&assertion.proof)?;
     let pk_bytes = BASE64_STANDARD
-        .decode(&assertion.public_key)
-        .map_err(|e| anyhow!("invalid base64 public key: {e}"))?;
+        .decode(&assertion.issuer_public_key)
+        .map_err(|e| anyhow!("invalid base64 issuer public key: {e}"))?;
     let signer = BbsProofSigner::new(proof_bytes, pk_bytes);
 
     manifest
@@ -137,19 +164,17 @@ pub fn extract_bbs_assertion_from_manifest(asset_path: &str) -> Result<BbsSigner
 /// Result of BBS proof generation: the proof blob and the public key used.
 pub struct GeneratedProof {
     pub proof: ProofBlob,
-    /// Base64-encoded BBS public key.
-    pub public_key: String,
+    /// Base64-encoded issuer BBS public key.
+    pub issuer_public_key: String,
 }
 
-pub fn generate_bbs_proof(
+pub fn issue_demo_credential(
     public_attributes: &PublicAttributes,
     hidden_attributes: &HiddenAttributes,
-    claim_hash: &ClaimHash,
-) -> Result<GeneratedProof> {
-    let key_pair = DemoKeyPair::new()?;
+    ) -> Result<IssuedCredential> {
+    let key_pair = DemoIssuerKeyPair::new()?;
     let attribute_specs = collect_attribute_messages(public_attributes, hidden_attributes);
     let message_values = signing_messages(&attribute_specs);
-    let reveal_plan = build_reveal_plan(&attribute_specs);
 
     let signature = bls12_381_g1_sha_256::sign(&BbsSignRequest {
         secret_key: &key_pair.secret_key,
@@ -157,10 +182,38 @@ pub fn generate_bbs_proof(
         header: None,
         messages: Some(&message_values),
     })
-    .map_err(|err| anyhow!("BBS signing failed: {err:?}"))?;
+    .map_err(|err| anyhow!("BBS credential issuance failed: {err:?}"))?;
+
+    Ok(IssuedCredential::new(
+        BASE64_STANDARD.encode(key_pair.public_key),
+        public_attributes.clone(),
+        hidden_attributes.clone(),
+        BASE64_STANDARD.encode(signature),
+    ))
+}
+
+pub fn generate_bbs_proof_from_credential(
+    credential: &IssuedCredential,
+    claim_hash: &ClaimHash,
+) -> Result<GeneratedProof> {
+    let attribute_specs = collect_attribute_messages(
+        &credential.public_attributes,
+        &credential.hidden_attributes,
+    );
+    let reveal_plan = build_reveal_plan(&attribute_specs);
+    let signature_bytes = decode_credential_signature(&credential.signature)?;
+    let signature: [u8; 80] = signature_bytes
+        .try_into()
+        .map_err(|_| anyhow!("credential signature has wrong length"))?;
+    let issuer_public_key_bytes = BASE64_STANDARD
+        .decode(&credential.issuer_public_key)
+        .map_err(|e| anyhow!("invalid base64 issuer public key in credential: {e}"))?;
+    let issuer_public_key: [u8; BBS_BLS12381G1_PUBLIC_KEY_LENGTH] = issuer_public_key_bytes
+        .try_into()
+        .map_err(|_| anyhow!("issuer public key has wrong length"))?;
 
     let proof_bytes = bls12_381_g1_sha_256::proof_gen(&BbsProofGenRequest {
-        public_key: &key_pair.public_key,
+        public_key: &issuer_public_key,
         header: None,
         messages: Some(&reveal_plan),
         signature: &signature,
@@ -171,7 +224,7 @@ pub fn generate_bbs_proof(
 
     Ok(GeneratedProof {
         proof: ProofBlob(BASE64_STANDARD.encode(proof_bytes)),
-        public_key: BASE64_STANDARD.encode(key_pair.public_key),
+        issuer_public_key: credential.issuer_public_key.clone(),
     })
 }
 
@@ -183,19 +236,19 @@ pub fn verify_bbs_proof(
         bail!("claim hash mismatch between proof and asset");
     }
 
-    // Decode the public key from the assertion (base64 → 48 bytes).
+    // Decode the issuer public key from the assertion (base64 → 48 bytes).
     let pk_bytes = BASE64_STANDARD
-        .decode(&assertion.public_key)
-        .map_err(|e| anyhow!("invalid base64 public key in assertion: {e}"))?;
-    let public_key: [u8; BBS_BLS12381G1_PUBLIC_KEY_LENGTH] = pk_bytes
+        .decode(&assertion.issuer_public_key)
+        .map_err(|e| anyhow!("invalid base64 issuer public key in assertion: {e}"))?;
+    let issuer_public_key: [u8; BBS_BLS12381G1_PUBLIC_KEY_LENGTH] = pk_bytes
         .try_into()
-        .map_err(|_| anyhow!("public key has wrong length"))?;
+        .map_err(|_| anyhow!("issuer public key has wrong length"))?;
 
     let proof_bytes = decode_proof(&assertion.proof)?;
     let revealed_pairs = build_revealed_pairs(&assertion.public_attributes);
 
     let valid = bls12_381_g1_sha_256::proof_verify(&BbsProofVerifyRequest {
-        public_key: &public_key,
+        public_key: &issuer_public_key,
         header: None,
         presentation_header: Some(claim_binding(expected_claim_hash)),
         proof: &proof_bytes,
@@ -220,12 +273,34 @@ pub fn compute_claim_hash(asset_path: &str) -> Result<ClaimHash> {
     Ok(ClaimHash(hex::encode(digest)))
 }
 
-struct DemoKeyPair {
+pub fn compute_claim_hash_for_embedded_asset(asset_path: &str) -> Result<ClaimHash> {
+    let asset_path = Path::new(asset_path);
+    let suffix = asset_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| format!(".{ext}"))
+        .unwrap_or_default();
+
+    let temp_file = TempFileBuilder::new()
+        .prefix("c2pa-bbs-verify-")
+        .suffix(&suffix)
+        .tempfile()
+        .map_err(|err| anyhow!("failed to create temp file for verification: {err}"))?;
+
+    fs::copy(asset_path, temp_file.path())
+        .map_err(|err| anyhow!("failed to copy asset for verification: {err}"))?;
+    c2pa::jumbf_io::remove_jumbf_from_file(temp_file.path())
+        .map_err(|err| anyhow!("failed to remove embedded manifest for verification: {err}"))?;
+
+    compute_claim_hash(&temp_file.path().to_string_lossy())
+}
+
+struct DemoIssuerKeyPair {
     secret_key: [u8; BBS_BLS12381G1_SECRET_KEY_LENGTH],
     public_key: [u8; BBS_BLS12381G1_PUBLIC_KEY_LENGTH],
 }
 
-impl DemoKeyPair {
+impl DemoIssuerKeyPair {
     fn new() -> Result<Self> {
         let raw = KeyPair::new(&DEMO_IKM, DEMO_KEY_INFO)
             .ok_or_else(|| anyhow!("failed to derive deterministic demo key pair"))?;
@@ -266,7 +341,7 @@ impl BbsProofSigner {
         let bbs_ext = CborValue::Map(vec![
             (CborValue::Text("scheme".into()), CborValue::Text("bbs".into())),
             (CborValue::Text("version".into()), CborValue::Text("0.1".into())),
-            (CborValue::Text("public_key".into()), CborValue::Bytes(self.public_key.clone())),
+            (CborValue::Text("issuer_public_key".into()), CborValue::Bytes(self.public_key.clone())),
         ]);
 
         // Build the protected header manually to set the private-use algorithm.
@@ -407,4 +482,10 @@ fn decode_proof(proof: &ProofBlob) -> Result<Vec<u8>> {
     BASE64_STANDARD
         .decode(&proof.0)
         .map_err(|err| anyhow!("invalid base64 proof: {err}"))
+}
+
+fn decode_credential_signature(signature: &str) -> Result<Vec<u8>> {
+    BASE64_STANDARD
+        .decode(signature)
+        .map_err(|err| anyhow!("invalid base64 credential signature: {err}"))
 }

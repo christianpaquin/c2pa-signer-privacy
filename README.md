@@ -8,7 +8,7 @@ Two proof-of-concept implementations demonstrate different privacy strategies:
 
 | Approach | Description | Documentation |
 |----------|-------------|---------------|
-| **BBS Signatures** | Replace ECDSA with BBS signatures supporting selective disclosure and unlinkable proofs | [bbs-signatures/](bbs-signatures/README.md) |
+| **BBS Signatures** | Toy issuer/holder flow using BBS credentials, selective disclosure, and C2PA hash-bound presentations | [bbs-signatures/](bbs-signatures/README.md) |
 | **X.509 + ZK Proofs** | Keep standard X.509/ECDSA signing, add a post-processing step that replaces the signature with a zero-knowledge proof | [zk-proofs/](zk-proofs/README.md) |
 
 ## Comparison
@@ -38,7 +38,6 @@ c2pa-signer-privacy/
 ├── README.md                    # This file
 ├── bbs-signatures/              # BBS implementation
 │   ├── crates/c2pa-bbs-demo/    # CLI tools and library
-│   ├── docs/bbs-c2pa-design.md  # Design details
 │   └── fixtures/                # Test images
 ├── zk-proofs/                   # X.509 + ZK implementation  
 │   ├── circuits/                # Circom circuits

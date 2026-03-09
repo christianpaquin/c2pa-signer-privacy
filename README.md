@@ -23,9 +23,7 @@ Two proof-of-concept implementations demonstrate different privacy strategies:
 | **Verification time** | ~3ms | Fast once a proof exists |
 | **Setup required** | None | Trusted setup (one-time) |
 | **Proof size** | ~500 bytes | ~1KB |
-| **Randomized proofs** | ✅ Different bytes each time | ❌ Deterministic |
-
-> **Note on unlinkability**: Both approaches hide the signer's identity from verifiers. BBS proofs are randomized (same content can be distributed multiple times without correlation), while Groth16 proofs are deterministic (same inputs → same proof).
+| **Randomized proofs** | ✅ Different bytes each time | ✅ Different bytes each time |
 
 ## Dependencies
 

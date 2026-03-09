@@ -1,14 +1,14 @@
 //! Standard X.509/ECDSA Signer CLI
 //!
 //! Creates a standard C2PA signed asset using P-256 ECDSA.
-//! This produces the input for the anonymizing editor.
+//! This produces the input for the anonymizer.
 //!
 //! Usage:
 //!   c2pa-x509-zk-sign --input unsigned.png --output signed.png \
 //!       --cert signer.pem --key signer-key.pem --ca ca.pem
 
 use anyhow::{anyhow, Result};
-use c2pa::{create_signer, Manifest, SigningAlg};
+use c2pa::{create_signer, SigningAlg};
 use clap::Parser;
 use std::fs;
 use std::path::PathBuf;
@@ -68,16 +68,12 @@ fn main() -> Result<()> {
     )
     .map_err(|e| anyhow!("failed to create signer: {e}"))?;
 
-    // Build manifest
-    let mut manifest = Manifest::new(CLAIM_GENERATOR);
-    manifest
-        .set_label("c2pa-x509-zk-demo")
-        .set_claim_generator(CLAIM_GENERATOR);
-
-    // Set asset
-    manifest
-        .set_asset_from_path(&args.input)
-        .map_err(|e| anyhow!("failed to load asset: {e}"))?;
+    // Build manifest using Builder API
+    let definition = serde_json::json!({
+        "claim_generator_info": [{ "name": CLAIM_GENERATOR, "version": "0.1" }]
+    });
+    let mut builder = c2pa::Builder::from_json(&definition.to_string())
+        .map_err(|e| anyhow!("failed to create builder: {e}"))?;
 
     // Embed manifest
     if let Some(parent) = args.output.parent() {
@@ -86,8 +82,8 @@ fn main() -> Result<()> {
         }
     }
 
-    manifest
-        .embed(&args.input, &args.output, signer.as_ref())
+    builder
+        .sign_file(signer.as_ref(), &args.input, &args.output)
         .map_err(|e| anyhow!("failed to embed manifest: {e}"))?;
 
     println!("\n✅ Signed asset written to {:?}", args.output);

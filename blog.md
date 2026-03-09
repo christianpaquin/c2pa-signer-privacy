@@ -48,7 +48,7 @@ To achieve unlinkability between multiple signed assets, a signer could obtain a
 
 ### Unlinkable signatures
 
-Cryptographic unlinkable signatures allow creating privacy-supporting certified assets without disclosing the holder's full identity to verifiers. One of the leading algorithm candidates is [BBS](https://identity.foundation/bbs-signature/draft-irtf-cfrg-bbs-signatures.html), undergoing standardization in the IETF. In a BBS credential flow, an issuer signs a credential containing holder attributes, and the holder later derives a selective-disclosure proof for a verifier. Augmenting the C2PA specification to support BBS-enabled presentations[^3] would allow a manifest to reveal only selected attributes, while binding the presentation to the asset being certified.
+Cryptographic unlinkable signatures allow creating privacy-supporting certified assets without disclosing the holder's full identity to verifiers. One of the leading algorithm candidates is [BBS](https://identity.foundation/bbs-signature/draft-irtf-cfrg-bbs-signatures.html), undergoing standardization in the [IETF](https://datatracker.ietf.org/doc/draft-irtf-cfrg-bbs-signatures/). In a BBS credential flow, an issuer signs a credential containing holder attributes, and the holder later derives a selective-disclosure proof for a verifier. Augmenting the C2PA specification to support BBS-enabled presentations[^3] would allow a manifest to reveal only selected attributes, while binding the presentation to the asset being certified.
 
 
 ### Zero-knowledge proofs over X.509 certificates
@@ -67,7 +67,7 @@ This technique is very promising as it is compatible with the current C2PA speci
 | Pseudonymous certificates | ❌ | N/A (self-signed) | ✅ |
 | One-use certificates | ✅ | ❌ | ✅ |
 | Unlinkable signatures (BBS) | ✅ | ✅ | ❌ |
-| ZKP over X.509 | ✅ | ✅ | ⚠️ |
+| ZKP over X.509 | ✅ | ✅ | ⚠️[^4] |
 
 ## A prototype
 
@@ -87,6 +87,8 @@ Onward!
 
 [^1]: Notably, the International Press Telecommunications Council (IPTC) has created a list of [Verified News Publishers](https://iptc.org/verified-news-publishers-list/) to help the verifier ecosystem recognize known news media organizations.
 
-[^2]: One such approach, the [VerITAS system](https://eprint.iacr.org/2024/1066.pdf), has been prototyped by Standford researchers Trisha Datta, Binyi Chen, and Dan Boneh.
+[^2]: One such approach, the [VerITAS system](https://eprint.iacr.org/2024/1066.pdf), has been prototyped by Stanford researchers Trisha Datta, Binyi Chen, and Dan Boneh.
 
 [^3]: This could be achieved by either specifying a X.509 profile supporting BBS signatures, or allowing other credential types supporting BBS (e.g., Verifiable Credentials) to natively sign a C2PA manifest.
+
+[^4]: The initial signing step is fully spec-compliant (standard X.509/ECDSA), but the anonymized manifest uses a non-standard COSE algorithm and a custom assertion, which current verifiers cannot process without modifications.

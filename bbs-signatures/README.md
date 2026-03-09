@@ -164,7 +164,7 @@ This means the verifier now checks both the BBS disclosure proof and the integri
 
 ### BBS Library
 
-This implementation uses [MATTR's `pairing_crypto`](https://github.com/mattrglobal/pairing_crypto), which tracks the IRTF CFRG draft (`draft-irtf-cfrg-bbs-signatures-03`) and provides:
+This implementation uses [MATTR's `pairing_crypto`](https://github.com/mattrglobal/pairing_crypto) (`draft-latest` branch), which tracks the latest IRTF CFRG draft (`draft-irtf-cfrg-bbs-signatures-10`) and provides:
 - BLS12-381 + SHA-256 ciphersuite
 - Signature and proof derivation APIs
 - Proof verification

@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use c2pa::{hash_stream_by_alg, Manifest, Reader, SigningAlg, Signer};
+use c2pa::{hash_stream_by_alg, Builder, Reader, SigningAlg, Signer};
 use ciborium::Value as CborValue;
 use coset::{CoseSign1Builder, Header, TaggedCborSerializable};
 use pairing_crypto::bbs::{
@@ -117,16 +117,15 @@ pub const ASSERTION_VERSION: &str = "0.1";
 pub const DEFAULT_SCHEME: &str = "bbs";
 
 pub fn embed_bbs_assertion_into_manifest(asset_path: &str, output_path: &str, assertion: BbsSignerProofAssertion) -> Result<()> {
-    let mut manifest = Manifest::new(CLAIM_GENERATOR);
-    manifest
-        .set_label(MANIFEST_LABEL)
-        .set_claim_generator(CLAIM_GENERATOR);
+    let definition = serde_json::json!({
+        "claim_generator_info": [{ "name": CLAIM_GENERATOR, "version": "0.1" }],
+        "vendor": MANIFEST_LABEL
+    });
+    let mut builder = Builder::from_json(&definition.to_string())
+        .map_err(|err| anyhow!("failed to create builder: {err}"))?;
 
-    manifest
-        .set_asset_from_path(asset_path)
-        .map_err(|err| anyhow!("failed to derive asset metadata: {err}"))?;
-    manifest
-        .add_labeled_assertion(ASSERTION_TYPE, &assertion)
+    builder
+        .add_assertion(ASSERTION_TYPE, &assertion)
         .map_err(|err| anyhow!("failed to insert BBS assertion: {err}"))?;
 
     if let Some(parent) = Path::new(output_path).parent() {
@@ -142,8 +141,8 @@ pub fn embed_bbs_assertion_into_manifest(asset_path: &str, output_path: &str, as
         .map_err(|e| anyhow!("invalid base64 issuer public key: {e}"))?;
     let signer = BbsProofSigner::new(proof_bytes, pk_bytes);
 
-    manifest
-        .embed(asset_path, output_path, &signer)
+    builder
+        .sign_file(&signer, asset_path, output_path)
         .map_err(|err| anyhow!("failed to embed manifest: {err}"))?;
 
     Ok(())

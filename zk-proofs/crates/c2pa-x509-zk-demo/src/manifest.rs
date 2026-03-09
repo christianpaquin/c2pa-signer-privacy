@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, bail, Result};
 use base64::Engine;
-use c2pa::{hash_stream_by_alg, Reader, Manifest, Signer, SigningAlg};
+use c2pa::{hash_stream_by_alg, Reader, Builder, Signer, SigningAlg};
 use ciborium::Value as CborValue;
 use coset::{CoseSign1Builder, Header};
 use std::fs::{self, File};
@@ -141,13 +141,14 @@ pub fn rewrite_manifest_with_zk_proof(
     assertion: X509ZkSignerProofAssertion,
     cert_chain_der: Vec<Vec<u8>>,
 ) -> Result<()> {
-    // Create a new manifest with the ZK assertion
-    let mut manifest = Manifest::new(CLAIM_GENERATOR);
+    // Create a new manifest with the ZK assertion using the Builder API
+    let definition = serde_json::json!({
+        "claim_generator_info": [{ "name": CLAIM_GENERATOR, "version": "0.1" }]
+    });
+    let mut builder = Builder::from_json(&definition.to_string())
+        .map_err(|e| anyhow!("failed to create builder: {e}"))?;
     
-    manifest.set_asset_from_path(input_path)
-        .map_err(|e| anyhow!("failed to set asset: {e}"))?;
-    
-    manifest.add_labeled_assertion(ASSERTION_TYPE, &assertion)
+    builder.add_assertion(ASSERTION_TYPE, &assertion)
         .map_err(|e| anyhow!("failed to add ZK assertion: {e}"))?;
     
     // Create output directory if needed
@@ -164,7 +165,7 @@ pub fn rewrite_manifest_with_zk_proof(
     
     let signer = ZkProofSigner::new(proof_bytes, cert_chain_der);
     
-    manifest.embed(input_path, output_path, &signer)
+    builder.sign_file(&signer, input_path, output_path)
         .map_err(|e| anyhow!("failed to embed manifest: {e}"))?;
     
     Ok(())

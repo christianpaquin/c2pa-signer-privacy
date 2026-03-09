@@ -1,10 +1,10 @@
-//! X.509 ZK Anonymizing Editor CLI
+//! X.509 ZK Anonymizer CLI
 //!
 //! Takes a standard X.509-signed C2PA asset and replaces the signature
 //! with a ZK proof that the signer's cert was issued by a trusted CA.
 //!
 //! Usage:
-//!   c2pa-x509-zk-editor --input signed.jpg --output anon.jpg --ca root.pem
+//!   c2pa-x509-zk-anonymizer --input signed.jpg --output anon.jpg --ca root.pem
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
@@ -20,7 +20,7 @@ use c2pa_x509_zk_demo::{
 };
 
 #[derive(Parser, Debug)]
-#[command(name = "c2pa-x509-zk-editor")]
+#[command(name = "c2pa-x509-zk-anonymizer")]
 #[command(about = "Anonymize a C2PA asset by replacing X.509 signature with ZK proof")]
 struct Args {
     /// Path to the input asset (must have a valid C2PA X.509 signature)
@@ -62,7 +62,7 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    println!("=== C2PA X.509 ZK Anonymizing Editor ===\n");
+    println!("=== C2PA X.509 ZK Anonymizer ===\n");
 
     // Load trusted CA certificate
     println!("Loading CA certificate from {:?}...", args.ca);

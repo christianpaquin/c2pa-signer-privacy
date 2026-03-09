@@ -7,8 +7,8 @@ edition = "2021"  # Not 2024 for compatibility
 path = "src/lib.rs"
 
 [[bin]]
-name = "c2pa-x509-zk-editor"
-path = "src/bin/editor.rs"
+name = "c2pa-x509-zk-anonymizer"
+path = "src/bin/anonymizer.rs"
 
 [[bin]]
 name = "c2pa-x509-zk-verify"

@@ -14,11 +14,11 @@ hex = "0.4"
 coset = "0.3"
 ciborium = "0.2"
 tempfile = "3"
-pairing_crypto = { git = "https://github.com/mattrglobal/pairing_crypto", rev = "5c35d52d108d41d6f7b752855473dd82f87d0710" }
+pairing_crypto = { git = "https://github.com/mattrglobal/pairing_crypto", branch = "draft-latest" }
 
 [dependencies.c2pa]
-version = "0.33"
-features = ["unstable_api", "file_io"]
+version = "0.77"
+features = ["file_io"]
 
 [dev-dependencies]
 assert_cmd = "2"

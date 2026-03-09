@@ -102,7 +102,7 @@ fn main() -> Result<()> {
     if assertion.proof.starts_with("PLACEHOLDER") {
         eprintln!("\n⚠️  Proof is a placeholder - circuits not built yet");
         eprintln!("   Build circuits to generate real ZK proofs.");
-        std::process::exit(0);
+        std::process::exit(2);
     }
 
     // Verify the ZK proof
@@ -214,7 +214,7 @@ fn main() -> Result<()> {
 /// that c2pa-rs doesn't recognize. We need to disable signature verification
 /// and directly read the assertion.
 fn extract_zk_assertion_no_verify(path: &PathBuf) -> Result<X509ZkSignerProofAssertion> {
-    use c2pa::{Reader, settings};
+    use c2pa::{Reader, settings::Settings};
     
     // Disable signature verification for custom algorithms
     let settings_json = r#"{
@@ -222,7 +222,7 @@ fn extract_zk_assertion_no_verify(path: &PathBuf) -> Result<X509ZkSignerProofAss
             "verify_after_reading": false
         }
     }"#;
-    settings::load_settings_from_str(settings_json, "json")
+    Settings::from_string(settings_json, "json")
         .map_err(|e| anyhow::anyhow!("failed to load settings: {e}"))?;
     
     let reader = Reader::from_file(path)

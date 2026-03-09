@@ -33,7 +33,7 @@ fn run(args: VerifyArgs) -> Result<()> {
     // Disable c2pa's built-in COSE signature verification so we can extract the
     // manifest even though our custom BBS algorithm (-65535) is not recognized.
     // We perform our own BBS proof verification below.
-    c2pa::settings::load_settings_from_str(
+    c2pa::settings::Settings::from_string(
         r#"{ "verify": { "verify_after_reading": false } }"#,
         "json",
     )

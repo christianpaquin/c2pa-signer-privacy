@@ -1,5 +1,5 @@
 use assert_cmd::Command;
-use c2pa::{settings, Reader};
+use c2pa::{settings::Settings, Reader};
 use predicates::prelude::*;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -37,7 +37,7 @@ fn read_cert_chain_from_asset(asset_path: &Path, disable_verify: bool) -> Vec<Ve
                 "verify_after_reading": false
             }
         }"#;
-        settings::load_settings_from_str(settings_json, "json").expect("failed to disable verification");
+        Settings::from_string(settings_json, "json").expect("failed to disable verification");
     }
 
     let reader = Reader::from_file(asset_path).expect("failed to read asset manifest");
@@ -145,9 +145,9 @@ fn sign_creates_valid_asset() {
     assert!(output_path.exists());
 }
 
-/// Test the editor CLI creates an anonymized asset with placeholder proof
+/// Test the anonymizer CLI creates an anonymized asset with placeholder proof
 #[test]
-fn editor_creates_anonymized_asset_placeholder() {
+fn anonymizer_creates_anonymized_asset_placeholder() {
     let dir = tempdir().expect("failed to create temp dir");
     let signed_path = dir.path().join("signed.png");
     let anon_path = dir.path().join("anon.png");
@@ -167,7 +167,7 @@ fn editor_creates_anonymized_asset_placeholder() {
         .success();
 
     // Then anonymize it (use --placeholder for testing without full ZK setup)
-    Command::cargo_bin("c2pa-x509-zk-editor")
+    Command::cargo_bin("c2pa-x509-zk-anonymizer")
         .unwrap()
         .args([
             "--input", signed_path.to_str().unwrap(),
@@ -205,7 +205,7 @@ fn verify_recognizes_placeholder_proof() {
         .success();
 
     // Anonymize (use --placeholder for testing)
-    Command::cargo_bin("c2pa-x509-zk-editor")
+    Command::cargo_bin("c2pa-x509-zk-anonymizer")
         .unwrap()
         .args([
             "--input", signed_path.to_str().unwrap(),
@@ -217,7 +217,7 @@ fn verify_recognizes_placeholder_proof() {
         .assert()
         .success();
 
-    // Verify (should recognize placeholder)
+    // Verify (should recognize placeholder and exit non-zero)
     Command::cargo_bin("c2pa-x509-zk-verify")
         .unwrap()
         .args([
@@ -226,7 +226,7 @@ fn verify_recognizes_placeholder_proof() {
         ])
         .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
         .assert()
-        .success()
+        .failure()
         .stdout(predicate::str::contains("Issuer key ID matches trusted CA"))
         .stderr(predicate::str::contains("placeholder"));
 }
@@ -264,7 +264,7 @@ vDC/N6oNhHNHZIuQMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADQQBXkN3S
         .success();
 
     // Anonymize with real CA (use --placeholder for testing)
-    Command::cargo_bin("c2pa-x509-zk-editor")
+    Command::cargo_bin("c2pa-x509-zk-anonymizer")
         .unwrap()
         .args([
             "--input", signed_path.to_str().unwrap(),
@@ -309,7 +309,7 @@ fn verify_fails_for_tampered_asset() {
         .assert()
         .success();
 
-    Command::cargo_bin("c2pa-x509-zk-editor")
+    Command::cargo_bin("c2pa-x509-zk-anonymizer")
         .unwrap()
         .args([
             "--input", signed_path.to_str().unwrap(),
@@ -358,7 +358,7 @@ fn anonymized_manifest_preserves_original_cert_chain() {
         .assert()
         .success();
 
-    Command::cargo_bin("c2pa-x509-zk-editor")
+    Command::cargo_bin("c2pa-x509-zk-anonymizer")
         .unwrap()
         .args([
             "--input", signed_path.to_str().unwrap(),
@@ -412,7 +412,7 @@ fn full_e2e_with_real_zk_proof() {
 
     // Step 2: Anonymize with real ZK proof (no --placeholder flag)
     // Note: This step takes ~2-3 minutes due to ZK proof generation
-    Command::cargo_bin("c2pa-x509-zk-editor")
+    Command::cargo_bin("c2pa-x509-zk-anonymizer")
         .unwrap()
         .args([
             "--input", signed_path.to_str().unwrap(),

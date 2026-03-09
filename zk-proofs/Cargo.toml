@@ -10,7 +10,7 @@ authors = ["C2PA Privacy Demo"]
 
 [workspace.dependencies]
 # C2PA manifest handling
-c2pa = { version = "0.33", features = ["file_io", "unstable_api"] }
+c2pa = { version = "0.77", features = ["file_io"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

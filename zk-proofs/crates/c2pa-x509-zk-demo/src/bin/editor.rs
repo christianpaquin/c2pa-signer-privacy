@@ -40,6 +40,15 @@ struct Args {
     #[arg(long)]
     signer_key: Option<PathBuf>,
 
+    /// Path to the original signer certificate (PEM or DER).
+    /// c2pa-rs may re-encode the certificate when storing it in the manifest
+    /// (e.g. adding NULL parameters to AlgorithmIdentifiers), changing the
+    /// TBS bytes and invalidating the CA signature for the ZK proof.
+    /// Passing the original file ensures the circuit sees the exact DER the
+    /// CA signed.  Required when c2pa-rs alters the cert during storage.
+    #[arg(long)]
+    cert: Option<PathBuf>,
+
     /// Path to the Circom circuits build directory
     #[arg(long, default_value = "circuits")]
     circuits_dir: PathBuf,
@@ -69,7 +78,36 @@ async fn main() -> Result<()> {
 
     println!("  Leaf certificate: {} bytes", manifest_data.leaf_cert_der.len());
     println!("  CA certificates: {}", manifest_data.ca_certs_der.len());
-    println!("  Claim hash: {} bytes", manifest_data.claim_hash.len());
+    println!("  Asset binding digest: {} bytes", manifest_data.claim_hash.len());
+
+    // If the caller supplied the original cert file, override the extracted
+    // cert bytes.  c2pa-rs can re-encode a PEM cert when embedding it in the
+    // COSE structure (e.g. adding NULL parameters to AlgorithmIdentifiers),
+    // which changes the TBS bytes and invalidates the CA signature check
+    // inside the ZK circuit.  Using the on-disk bytes guarantees exactness.
+    let mut manifest_data = manifest_data;
+    if let Some(cert_path) = &args.cert {
+        let cert_bytes = if cert_path.extension().map(|e| e == "pem").unwrap_or(false) {
+            // PEM: decode to DER
+            let pem = std::fs::read_to_string(cert_path)
+                .map_err(|e| anyhow!("failed to read cert: {e}"))?;
+            let b64: String = pem
+                .lines()
+                .filter(|l| !l.starts_with("-----"))
+                .collect::<Vec<_>>()
+                .join("");
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.decode(b64)
+                .map_err(|e| anyhow!("invalid base64 in cert PEM: {e}"))?   
+        } else {
+            std::fs::read(cert_path)
+                .map_err(|e| anyhow!("failed to read cert: {e}"))?   
+        };
+        let orig_len = manifest_data.leaf_cert_der.len();
+        manifest_data.leaf_cert_der = cert_bytes;
+        eprintln!("[info] Overriding manifest cert ({orig_len}B) with {} from {:?}",
+            manifest_data.leaf_cert_der.len(), cert_path);
+    }
 
     // Extract issuer DN from leaf certificate
     let issuer_dn = extract_issuer_dn(&manifest_data.leaf_cert_der)?;
@@ -79,10 +117,10 @@ async fn main() -> Result<()> {
     let ca_key_id = compute_key_id(&ca_params.ca_cert_der);
     println!("  CA Key ID: {ca_key_id}");
 
-    // Check if native setup is complete (use c2pa_signer_proof circuit)
+    // Check if native setup is complete (use x509_issue_and_possession circuit)
     let native_paths = NativeCircuitPaths::default_for_circuit(
         &args.circuits_dir,
-        "c2pa_signer_proof",
+        "x509_issue_and_possession",
     );
 
     // Use placeholder mode if explicitly requested or if setup is not complete
@@ -91,11 +129,18 @@ async fn main() -> Result<()> {
     if use_placeholder {
         if !native_paths.setup_complete() {
             eprintln!("\n⚠️  Native ZK setup not complete!");
-            eprintln!("   Run the following to build circuits and setup:");
-            eprintln!("   cd circuits && ./build.sh");
-            eprintln!("   cargo run --release --bin c2pa-x509-zk-setup");
+            eprintln!("   Run the following from the zk-proofs/ directory:");
+            eprintln!("   1. npm install --prefix circuits");
+            eprintln!("   2. mkdir -p circuits/build");
+            eprintln!("   3. circom circuits/x509_issue_and_possession.circom \\");
+            eprintln!("        --r1cs --wasm --sym -l circuits -l circuits/node_modules -o circuits/build/");
+            eprintln!("   4. cargo run --release --bin c2pa-x509-zk-setup -- --circuits-dir circuits");
         }
         eprintln!("\n   Creating a placeholder assertion...\n");
+
+        let cert_chain_der = std::iter::once(manifest_data.leaf_cert_der.clone())
+            .chain(manifest_data.ca_certs_der.iter().cloned())
+            .collect();
 
         // Create placeholder assertion for testing the flow
         let assertion = X509ZkSignerProofAssertion::new(
@@ -109,7 +154,7 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&assertion)?);
 
         // Try to rewrite manifest (will fail until custom signer is implemented)
-        match rewrite_manifest_with_zk_proof(&args.input, &args.output, assertion) {
+        match rewrite_manifest_with_zk_proof(&args.input, &args.output, assertion, cert_chain_der) {
             Ok(()) => println!("\n✅ Anonymized asset written to {:?}", args.output),
             Err(e) => {
                 eprintln!("\n❌ Manifest rewrite not yet implemented: {e}");
@@ -131,18 +176,12 @@ async fn main() -> Result<()> {
             &signer_key,
             &ca_params.ca_cert_der,
         )?;
-        
-        // Extract signer's public key from certificate
-        let signer_pubkey = extract_signer_pubkey(&manifest_data.leaf_cert_der)?;
-        
-        // Convert to circuit format
-        let circuit_inputs = circuit::proof_inputs_to_circuit(
-            &proof_inputs,
-            &issuer_dn,
-            &signer_pubkey,
-        )?;
 
-        println!("Generating native ZK proof (this may take ~30 seconds)...");
+        // Convert to circuit format — parses the leaf cert internally to
+        // extract tbsCertHash, certSig, subjectPubkey, and validity dates.
+        let circuit_inputs = circuit::proof_inputs_to_circuit(&proof_inputs)?;
+
+        println!("Generating native ZK proof...");
         let proof = circuit_native::generate_proof_native(&circuit_inputs, &native_paths)?;
         let proof_base64 = proof.to_base64()?;
 
@@ -153,8 +192,12 @@ async fn main() -> Result<()> {
             proof_base64,
         );
 
+        let cert_chain_der = std::iter::once(manifest_data.leaf_cert_der.clone())
+            .chain(manifest_data.ca_certs_der.iter().cloned())
+            .collect();
+
         println!("Rewriting manifest with ZK proof...");
-        rewrite_manifest_with_zk_proof(&args.input, &args.output, assertion)?;
+        rewrite_manifest_with_zk_proof(&args.input, &args.output, assertion, cert_chain_der)?;
 
         println!("\n✅ Anonymized asset written to {:?}", args.output);
     }
@@ -195,29 +238,3 @@ fn parse_ec_private_key_pem(pem: &str) -> Result<Vec<u8>> {
         .map_err(|e| anyhow!("invalid base64 in PEM: {e}"))
 }
 
-/// Extract signer's public key from certificate
-fn extract_signer_pubkey(cert_der: &[u8]) -> Result<circuit::PublicKeyComponents> {
-    use der::Decode;
-    use x509_cert::Certificate;
-    use p256::PublicKey;
-    use p256::elliptic_curve::sec1::ToEncodedPoint;
-    
-    let cert = Certificate::from_der(cert_der)
-        .map_err(|e| anyhow!("failed to parse certificate: {e}"))?;
-    
-    let spki = &cert.tbs_certificate.subject_public_key_info;
-    let pk_bytes = spki.subject_public_key.as_bytes()
-        .ok_or_else(|| anyhow!("public key not byte-aligned"))?;
-    
-    let public_key = PublicKey::from_sec1_bytes(pk_bytes)
-        .map_err(|e| anyhow!("failed to parse P-256 public key: {e}"))?;
-    
-    let point = public_key.to_encoded_point(false);
-    let x = point.x().ok_or_else(|| anyhow!("missing x coordinate"))?;
-    let y = point.y().ok_or_else(|| anyhow!("missing y coordinate"))?;
-    
-    Ok(circuit::PublicKeyComponents {
-        x: hex::encode(x),
-        y: hex::encode(y),
-    })
-}

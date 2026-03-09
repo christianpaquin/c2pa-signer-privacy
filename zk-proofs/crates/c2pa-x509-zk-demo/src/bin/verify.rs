@@ -11,7 +11,9 @@ use clap::Parser;
 use std::path::PathBuf;
 
 use c2pa_x509_zk_demo::{
+    bytes_to_registers, pubkey_registers_from_der,
     circuit_native::{NativeCircuitPaths, NativeProof, verify_proof_native},
+    compute_manifest_stripped_asset_digest,
     compute_key_id,
     types::TrustedCaParams,
     X509ZkSignerProofAssertion, ASSERTION_TYPE,
@@ -76,6 +78,15 @@ fn main() -> Result<()> {
     }
     println!("\n✓ Issuer key ID matches trusted CA");
 
+    let expected_claim_hash = hex::encode(compute_manifest_stripped_asset_digest(&args.input)?);
+    if assertion.claim_hash != expected_claim_hash {
+        eprintln!("\n❌ Asset binding digest mismatch!");
+        eprintln!("   Expected (from manifest-stripped asset): {expected_claim_hash}");
+        eprintln!("   Got (from assertion):                   {}", assertion.claim_hash);
+        std::process::exit(1);
+    }
+    println!("✓ Assertion digest matches manifest-stripped asset");
+
     // Verify expected issuer if provided
     if let Some(expected_issuer) = &args.issuer {
         if &assertion.issuer != expected_issuer {
@@ -99,7 +110,7 @@ fn main() -> Result<()> {
 
     let native_paths = NativeCircuitPaths::default_for_circuit(
         &args.circuits_dir,
-        "c2pa_signer_proof",
+        "x509_issue_and_possession",
     );
 
     if !native_paths.setup_complete() {
@@ -110,15 +121,79 @@ fn main() -> Result<()> {
 
     let proof = NativeProof::from_base64(&assertion.proof)?;
 
-    // TODO: Verify that public signals match:
-    // - claim_hash in proof matches assertion.claim_hash
-    // - issuer in proof matches assertion.issuer
+    // -------------------------------------------------------------------------
+    // Public signal binding check
+    //
+    // A valid Groth16 proof only guarantees that the prover knew a witness
+    // satisfying the circuit for SOME public inputs — not necessarily the ones
+    // we care about.  We must explicitly verify that the public inputs embedded
+    // in the proof match (a) the CA we trust and (b) the claim hash recorded in
+    // the assertion.
+    //
+    // Circuit public-input layout (k = 6 registers, indices 0-based):
+    //   [0 .. 5]  caPubKeyX[0..5]  — CA public key X, LSB register first
+    //   [6 .. 11] caPubKeyY[0..5]  — CA public key Y
+    //   [12.. 17] claimHash[0..5]  — manifest-stripped asset digest
+    //   [18]      photoTimestamp   — Unix anonymization-time timestamp (public, informational)
+    // -------------------------------------------------------------------------
+    const K: usize = 6;
+
+    if proof.public_inputs.len() < 2 * K + K + 1 {
+        bail!(
+            "proof has {} public inputs, expected at least {}",
+            proof.public_inputs.len(),
+            2 * K + K + 1
+        );
+    }
+
+    // Reconstruct expected caPubKeyX/Y registers from the trusted CA cert.
+    let (expected_ca_x, expected_ca_y) =
+        pubkey_registers_from_der(&ca_params.ca_cert_der)
+            .map_err(|e| anyhow::anyhow!("failed to extract CA public key registers: {e}"))?;
+
+    for (i, expected) in expected_ca_x.iter().enumerate() {
+        if &proof.public_inputs[i] != expected {
+            eprintln!("\n❌ Public signal mismatch: caPubKeyX[{i}]");
+            eprintln!("   Expected (from trusted CA cert):  {expected}");
+            eprintln!("   Embedded in proof:                {}", proof.public_inputs[i]);
+            eprintln!("\n   The proof was generated for a DIFFERENT CA public key.");
+            std::process::exit(1);
+        }
+    }
+    for (i, expected) in expected_ca_y.iter().enumerate() {
+        if &proof.public_inputs[K + i] != expected {
+            eprintln!("\n❌ Public signal mismatch: caPubKeyY[{i}]");
+            eprintln!("   Expected (from trusted CA cert):  {expected}");
+            eprintln!("   Embedded in proof:                {}", proof.public_inputs[K + i]);
+            eprintln!("\n   The proof was generated for a DIFFERENT CA public key.");
+            std::process::exit(1);
+        }
+    }
+    println!("✓ Proof CA public key matches trusted CA");
+
+    // Reconstruct expected claimHash registers from the recomputed asset digest.
+    let claim_hash_bytes: [u8; 32] = hex::decode(&expected_claim_hash)
+        .map_err(|_| anyhow::anyhow!("assertion.claim_hash is not valid hex"))?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("assertion.claim_hash is not 32 bytes"))?;
+    let expected_claim_hash = bytes_to_registers(&claim_hash_bytes);
+
+    for (i, expected) in expected_claim_hash.iter().enumerate() {
+        if &proof.public_inputs[2 * K + i] != expected {
+            eprintln!("\n❌ Public signal mismatch: claimHash[{i}]");
+            eprintln!("   Expected (from assertion):  {expected}");
+            eprintln!("   Embedded in proof:          {}", proof.public_inputs[2 * K + i]);
+            eprintln!("\n   The proof's embedded claim hash does not match the assertion.");
+            std::process::exit(1);
+        }
+    }
+    println!("✓ Proof claim hash matches assertion");
 
     match verify_proof_native(&proof, &native_paths) {
         Ok(true) => {
             println!("\n✅ ZK proof verified successfully!");
             println!("   Issuer: {}", assertion.issuer);
-            println!("   The asset was signed by a certificate issued by the trusted CA.");
+            println!("   The asset was anonymized using a certificate issued by the trusted CA.");
         }
         Ok(false) => {
             eprintln!("\n❌ ZK proof verification failed!");

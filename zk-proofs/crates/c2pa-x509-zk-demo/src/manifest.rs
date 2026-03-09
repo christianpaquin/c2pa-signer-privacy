@@ -2,22 +2,20 @@
 
 use anyhow::{anyhow, bail, Result};
 use base64::Engine;
-use c2pa::{Reader, Manifest, Signer, SigningAlg};
+use c2pa::{hash_stream_by_alg, Reader, Manifest, Signer, SigningAlg};
 use ciborium::Value as CborValue;
 use coset::{CoseSign1Builder, Header};
+use std::fs::{self, File};
+use std::io::BufReader;
 use std::path::Path;
-use std::fs;
+use tempfile::Builder as TempFileBuilder;
 
 use crate::{ManifestData, X509ZkSignerProofAssertion, ASSERTION_TYPE, CLAIM_GENERATOR};
 
-/// DER-encoded demo certificates (same as fixtures/certs but embedded)
-const DEMO_LEAF_CERT: &[u8] = include_bytes!("../../../fixtures/certs/signer-cert.der");
-const DEMO_CA_CERT: &[u8] = include_bytes!("../../../fixtures/certs/ca-cert.der");
-
-/// Extract manifest data needed for ZK proof generation
+/// Extract manifest data needed for ZK proof generation.
 /// 
 /// This reads an existing C2PA-signed asset and extracts:
-/// - The claim hash
+/// - A verifier-recomputable digest of the manifest-stripped asset bytes
 /// - The leaf certificate from the COSE x5chain
 /// - The CA certificate(s)
 pub fn extract_manifest_data(asset_path: &Path) -> Result<ManifestData> {
@@ -46,21 +44,31 @@ pub fn extract_manifest_data(asset_path: &Path) -> Result<ManifestData> {
     let leaf_cert_der = certs[0].clone();
     let ca_certs_der = certs[1..].to_vec();
     
-    // For claim hash, we need to get it from the manifest
-    // c2pa-rs doesn't expose the claim hash directly, so we need to
-    // work around this. For now, we'll compute a hash of the claim CBOR.
-    // TODO: Use proper claim hash once c2pa-rs exposes it
-    let claim_hash = compute_claim_hash_workaround(manifest)?;
-    
-    // Get the raw signature bytes
-    // c2pa-rs doesn't expose this directly either
-    let cose_signature = Vec::new(); // Placeholder
-    
+    // Bind the proof to the asset bytes with all C2PA JUMBF removed.
+    //
+    // This is not the spec claim hash, but unlike the previous surrogate hash
+    // it is derived from the actual file content and can be recomputed by the
+    // verifier from the anonymized asset after removing its manifest.
+    let claim_hash = compute_manifest_stripped_asset_digest(asset_path)?;
+
+    // The original COSE signature bytes are not extracted here.  `prepare_inputs`
+    // does not use them — it re-signs `claim_hash` with the caller-supplied
+    // private key.  The field is retained in `ManifestData` for future use if
+    // extraction becomes possible (e.g. to skip re-signing and use the original
+    // signer's ECDSA components directly as circuit witnesses).
+    let cose_signature = Vec::new();
+
     Ok(ManifestData {
         claim_hash,
         leaf_cert_der,
         ca_certs_der,
         cose_signature,
+        // Use the current time as the anonymization-time timestamp consumed by
+        // the circuit's validity-period check.
+        photo_timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
     })
 }
 
@@ -95,26 +103,35 @@ fn parse_pem_chain(pem_chain: &str) -> Result<Vec<Vec<u8>>> {
     Ok(certs)
 }
 
-/// Workaround to compute claim hash when c2pa-rs doesn't expose it directly
-fn compute_claim_hash_workaround(manifest: &c2pa::Manifest) -> Result<Vec<u8>> {
-    use sha2::{Sha256, Digest};
-    
-    // This is a workaround - in reality we need the actual claim CBOR bytes
-    // For now, hash the manifest title + assertions as a placeholder
-    let mut hasher = Sha256::new();
-    
-    if let Some(title) = manifest.title() {
-        hasher.update(title.as_bytes());
-    }
-    
-    // Add label for uniqueness
-    if let Some(label) = manifest.label() {
-        hasher.update(label.as_bytes());
-    }
-    
-    // This is NOT the correct claim hash - just a placeholder
-    // The real implementation needs access to the raw claim CBOR
-    Ok(hasher.finalize().to_vec())
+fn compute_asset_digest(asset_path: &Path) -> Result<Vec<u8>> {
+    let file = File::open(asset_path)
+        .map_err(|err| anyhow!("failed to open asset {asset_path:?}: {err}"))?;
+    let mut reader = BufReader::new(file);
+    hash_stream_by_alg("sha256", &mut reader, None, false)
+        .map_err(|err| anyhow!("failed to compute asset digest for {asset_path:?}: {err}"))
+}
+
+/// Compute a verifier-recomputable digest over the asset bytes after stripping
+/// all embedded C2PA manifests/JUMBF data.
+pub fn compute_manifest_stripped_asset_digest(asset_path: &Path) -> Result<Vec<u8>> {
+    let suffix = asset_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| format!(".{ext}"))
+        .unwrap_or_default();
+
+    let temp_file = TempFileBuilder::new()
+        .prefix("c2pa-x509-zk-")
+        .suffix(&suffix)
+        .tempfile()
+        .map_err(|err| anyhow!("failed to create temp file for digest computation: {err}"))?;
+
+    fs::copy(asset_path, temp_file.path())
+        .map_err(|err| anyhow!("failed to copy asset for digest computation: {err}"))?;
+    c2pa::jumbf_io::remove_jumbf_from_file(temp_file.path())
+        .map_err(|err| anyhow!("failed to remove embedded manifest for digest computation: {err}"))?;
+
+    compute_asset_digest(temp_file.path())
 }
 
 /// Rewrite a manifest to replace the COSE signature with a ZK proof assertion
@@ -122,6 +139,7 @@ pub fn rewrite_manifest_with_zk_proof(
     input_path: &Path,
     output_path: &Path,
     assertion: X509ZkSignerProofAssertion,
+    cert_chain_der: Vec<Vec<u8>>,
 ) -> Result<()> {
     // Create a new manifest with the ZK assertion
     let mut manifest = Manifest::new(CLAIM_GENERATOR);
@@ -144,7 +162,7 @@ pub fn rewrite_manifest_with_zk_proof(
         .decode(&assertion.proof)
         .unwrap_or_else(|_| assertion.proof.as_bytes().to_vec());
     
-    let signer = ZkProofSigner::new(proof_bytes);
+    let signer = ZkProofSigner::new(proof_bytes, cert_chain_der);
     
     manifest.embed(input_path, output_path, &signer)
         .map_err(|e| anyhow!("failed to embed manifest: {e}"))?;
@@ -160,11 +178,15 @@ const CRIT_LABEL: &str = "c2pa-x509-zk";
 /// Custom signer that outputs a COSE_Sign1 with our ZK proof
 struct ZkProofSigner {
     proof: Vec<u8>,
+    cert_chain_der: Vec<Vec<u8>>,
 }
 
 impl ZkProofSigner {
-    fn new(proof: Vec<u8>) -> Self {
-        Self { proof }
+    fn new(proof: Vec<u8>, cert_chain_der: Vec<Vec<u8>>) -> Self {
+        Self {
+            proof,
+            cert_chain_der,
+        }
     }
 
     /// Build a COSE_Sign1 structure with our custom algorithm.
@@ -243,15 +265,15 @@ impl Signer for ZkProofSigner {
     }
 
     fn certs(&self) -> c2pa::Result<Vec<Vec<u8>>> {
-        Ok(vec![DEMO_LEAF_CERT.to_vec(), DEMO_CA_CERT.to_vec()])
+        Ok(self.cert_chain_der.clone())
     }
 
     fn reserve_size(&self) -> usize {
         // Account for COSE overhead + proof + certs + headers + padding
+        let certs_len: usize = self.cert_chain_der.iter().map(Vec::len).sum();
         self.proof
             .len()
-            .saturating_add(DEMO_LEAF_CERT.len())
-            .saturating_add(DEMO_CA_CERT.len())
+            .saturating_add(certs_len)
             .saturating_add(8192)
     }
 
@@ -270,4 +292,19 @@ pub fn extract_zk_assertion(asset_path: &Path) -> Result<X509ZkSignerProofAssert
     
     manifest.find_assertion(ASSERTION_TYPE)
         .map_err(|e| anyhow!("missing {ASSERTION_TYPE} assertion: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ZkProofSigner;
+    use c2pa::Signer;
+
+    #[test]
+    fn zk_signer_uses_supplied_cert_chain() {
+        let cert_chain = vec![vec![1u8, 2, 3], vec![4u8, 5], vec![6u8]];
+        let signer = ZkProofSigner::new(vec![9u8, 8, 7], cert_chain.clone());
+
+        assert_eq!(signer.certs().unwrap(), cert_chain);
+        assert!(signer.reserve_size() >= 9 + 8_192);
+    }
 }

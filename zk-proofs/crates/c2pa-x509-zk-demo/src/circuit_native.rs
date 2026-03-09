@@ -195,8 +195,7 @@ pub fn generate_proof_native(
     
     // Set circuit inputs
     set_circuit_inputs(&mut builder, circuit_inputs)?;
-    
-    // Build the circuit with inputs
+
     let circom = builder.build()
         .map_err(|e| anyhow!("failed to build circuit with witness: {e}"))?;
     
@@ -260,44 +259,130 @@ pub fn verify_proof_native(
     Ok(valid)
 }
 
-/// Set circuit inputs on the builder
+/// Set circuit inputs on the builder using the x509_issue_and_possession signal layout.
 fn set_circuit_inputs(builder: &mut CircomBuilder<Fr>, inputs: &CircuitInputs) -> Result<()> {
-    // issuerHash[4]
-    for val in inputs.issuer_hash.iter() {
+    // caPubKeyX[6] — trusted CA public key X, public input
+    for val in inputs.ca_pub_key_x.iter() {
         let bigint: BigInt = val.parse()
-            .map_err(|e| anyhow!("invalid issuer_hash value: {e}"))?;
-        builder.push_input("issuerHash", bigint);
+            .map_err(|e| anyhow!("invalid caPubKeyX value: {e}"))?;
+        builder.push_input("caPubKeyX", bigint);
     }
-    
-    // claimHash[6]
+
+    // caPubKeyY[6] — trusted CA public key Y, public input
+    for val in inputs.ca_pub_key_y.iter() {
+        let bigint: BigInt = val.parse()
+            .map_err(|e| anyhow!("invalid caPubKeyY value: {e}"))?;
+        builder.push_input("caPubKeyY", bigint);
+    }
+
+    // claimHash[6] — public input
     for val in inputs.claim_hash.iter() {
         let bigint: BigInt = val.parse()
-            .map_err(|e| anyhow!("invalid claim_hash value: {e}"))?;
+            .map_err(|e| anyhow!("invalid claimHash value: {e}"))?;
         builder.push_input("claimHash", bigint);
     }
-    
-    // signerPubkey[2][6] - flattened
-    for vals in inputs.signer_pubkey.iter() {
-        for val in vals.iter() {
-            let bigint: BigInt = val.parse()
-                .map_err(|e| anyhow!("invalid signer_pubkey value: {e}"))?;
-            builder.push_input("signerPubkey", bigint);
-        }
+
+    // photoTimestamp — public input (single field element)
+    {
+        let bigint: BigInt = inputs.photo_timestamp.parse()
+            .map_err(|e| anyhow!("invalid photoTimestamp value: {e}"))?;
+        builder.push_input("photoTimestamp", bigint);
     }
-    
-    // claimSigR[6]
+
+    // certDer[1500] — raw certificate bytes, zero-padded, private input
+    for val in inputs.cert_der.iter() {
+        let bigint: BigInt = val.parse()
+            .map_err(|e| anyhow!("invalid certDer byte value: {e}"))?;
+        builder.push_input("certDer", bigint);
+    }
+
+    // certLen — private input (single field element)
+    {
+        let bigint: BigInt = inputs.cert_len.parse()
+            .map_err(|e| anyhow!("invalid certLen value: {e}"))?;
+        builder.push_input("certLen", bigint);
+    }
+
+    // certSigR[6] — private input
+    for val in inputs.cert_sig_r.iter() {
+        let bigint: BigInt = val.parse()
+            .map_err(|e| anyhow!("invalid certSigR value: {e}"))?;
+        builder.push_input("certSigR", bigint);
+    }
+
+    // certSigS[6] — private input
+    for val in inputs.cert_sig_s.iter() {
+        let bigint: BigInt = val.parse()
+            .map_err(|e| anyhow!("invalid certSigS value: {e}"))?;
+        builder.push_input("certSigS", bigint);
+    }
+
+    // claimSigR[6] — private input
     for val in inputs.claim_sig_r.iter() {
         let bigint: BigInt = val.parse()
-            .map_err(|e| anyhow!("invalid claim_sig_r value: {e}"))?;
+            .map_err(|e| anyhow!("invalid claimSigR value: {e}"))?;
         builder.push_input("claimSigR", bigint);
     }
-    
-    // claimSigS[6]
+
+    // claimSigS[6] — private input
     for val in inputs.claim_sig_s.iter() {
         let bigint: BigInt = val.parse()
-            .map_err(|e| anyhow!("invalid claim_sig_s value: {e}"))?;
+            .map_err(|e| anyhow!("invalid claimSigS value: {e}"))?;
         builder.push_input("claimSigS", bigint);
     }
-    
+
+    // certNotBefore / certNotAfter — REMOVED: now computed in-circuit by
+    // UTCTimeToUnix inside X509Parse.  Only offsets are needed.
+
+    // tbsOffset — private DER structural hint
+    {
+        let bigint: BigInt = inputs.tbs_offset.parse()
+            .map_err(|e| anyhow!("invalid tbsOffset value: {e}"))?;
+        builder.push_input("tbsOffset", bigint);
+    }
+
+    // tbsLen — private DER structural hint
+    {
+        let bigint: BigInt = inputs.tbs_len.parse()
+            .map_err(|e| anyhow!("invalid tbsLen value: {e}"))?;
+        builder.push_input("tbsLen", bigint);
+    }
+
+    // spkiXOffset — private DER structural hint
+    {
+        let bigint: BigInt = inputs.spki_x_offset.parse()
+            .map_err(|e| anyhow!("invalid spkiXOffset value: {e}"))?;
+        builder.push_input("spkiXOffset", bigint);
+    }
+
+    // notBeforeOffset — byte offset of notBefore UTCTime tag (0x17) in certDer
+    {
+        let bigint: BigInt = inputs.not_before_offset.parse()
+            .map_err(|e| anyhow!("invalid notBeforeOffset value: {e}"))?;
+        builder.push_input("notBeforeOffset", bigint);
+    }
+
+    // notAfterOffset — byte offset of notAfter UTCTime tag (0x17) in certDer
+    {
+        let bigint: BigInt = inputs.not_after_offset.parse()
+            .map_err(|e| anyhow!("invalid notAfterOffset value: {e}"))?;
+        builder.push_input("notAfterOffset", bigint);
+    }
+
+    // tbsHashPaddedLen — padded byte length for Sha256Bytes(1536)
+    {
+        let bigint: BigInt = inputs.tbs_hash_padded_len.parse()
+            .map_err(|e| anyhow!("invalid tbsHashPaddedLen value: {e}"))?;
+        builder.push_input("tbsHashPaddedLen", bigint);
+    }
+
+    // tbsHashPaddedBytes[1536] — SHA-256-padded TBS bytes; circuit hashes
+    // these in-circuit via Sha256Bytes(1536) inside X509Parse.
+    for val in inputs.tbs_padded_bytes.iter() {
+        let bigint: BigInt = val.parse()
+            .map_err(|e| anyhow!("invalid tbsHashPaddedBytes value: {e}"))?;
+        builder.push_input("tbsHashPaddedBytes", bigint);
+    }
+
     Ok(())
 }

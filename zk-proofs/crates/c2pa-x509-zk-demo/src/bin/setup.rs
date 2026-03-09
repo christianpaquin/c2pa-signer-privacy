@@ -16,7 +16,7 @@ struct Args {
     circuits_dir: PathBuf,
     
     /// Circuit name (without extension)
-    #[arg(long, default_value = "c2pa_signer_proof")]
+    #[arg(long, default_value = "x509_issue_and_possession")]
     circuit_name: String,
 }
 

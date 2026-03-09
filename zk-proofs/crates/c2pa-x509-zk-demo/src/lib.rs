@@ -3,7 +3,7 @@
 //! This crate provides tools for anonymizing C2PA manifests by replacing
 //! X.509/COSE signatures with zero-knowledge proofs that prove:
 //! 1. The signer's certificate was issued by a trusted CA
-//! 2. The signer possessed the private key and signed the claim hash
+//! 2. The signer possessed the private key and signed the asset-binding digest
 //!
 //! The final manifest only reveals the CA issuer, not the signer's identity.
 
@@ -17,14 +17,19 @@ pub mod types;
 
 // Re-exports
 pub use circuit::{
-    CircuitInputs, CircuitPaths, ProofInputs, ProofOutputs, PublicKeyComponents, 
-    SignatureComponents, SnarkProof, proof_inputs_to_circuit,
+    CircuitInputs, CircuitPaths, ProofInputs, ProofOutputs, PublicKeyComponents,
+    SignatureComponents, SnarkProof, bytes_to_registers, pubkey_registers_from_der,
+    proof_inputs_to_circuit,
 };
 pub use circuit_native::{
     NativeCircuitPaths, NativeProof, native_setup, 
     generate_proof_native, verify_proof_native,
 };
-pub use manifest::{extract_manifest_data, rewrite_manifest_with_zk_proof};
+pub use manifest::{
+    compute_manifest_stripped_asset_digest,
+    extract_manifest_data,
+    rewrite_manifest_with_zk_proof,
+};
 pub use types::*;
 
 /// Assertion type marker for X.509 ZK proofs
@@ -44,7 +49,7 @@ pub struct X509ZkSignerProofAssertion {
     pub issuer: String,
     /// Hash of the CA public key for quick lookup
     pub issuer_key_id: String,
-    /// C2PA claim hash (hex encoded)
+    /// Hex-encoded manifest-stripped asset digest used for proof binding.
     pub claim_hash: String,
     /// Base64-encoded SNARK proof
     pub proof: String,

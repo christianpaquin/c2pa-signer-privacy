@@ -9,11 +9,13 @@ This approach keeps standard X.509/ECDSA-P256 signing, then adds a post-processi
 - Generates a Groth16 ZK proof demonstrating valid CA issuance
 - Replaces the manifest signature with the proof
 
-The verifier can confirm the asset was signed by *someone* with a certificate from the trusted CA, without learning *who*.
+The verifier can confirm the asset was anonymized from an asset signed by *someone* with a certificate from the trusted CA, without learning *who*.
 
 ## Quick Start
 
 > **Prerequisites**: Complete the [Building Circuits](#building-circuits) setup before running these commands — you need the compiled circuit and trusted setup keys. For testing without that setup, see [Placeholder Mode](#placeholder-mode).
+>
+> **Current status**: the real native flow has been exercised successfully end-to-end locally, but the editor's proof-generation step is still very slow on this circuit. Treat the commands below as accurate, but expect the anonymization step to take a long time.
 
 ```bash
 # Build
@@ -27,7 +29,8 @@ cargo run --release --bin c2pa-x509-zk-sign -- \
   --key fixtures/certs/signer-key.pem \
   --ca fixtures/certs/ca-cert.pem
 
-# 2. Anonymize: Replace signature with a real Groth16 ZK proof (~8–10 minutes)
+# 2. Anonymize: Replace signature with a real Groth16 ZK proof
+# This step is slow on the current circuit and may take a long time.
 # --cert supplies the original signer cert DER so the circuit sees the exact
 # bytes the CA signed (c2pa-rs may alter encoding when storing in the manifest).
 cargo run --release --bin c2pa-x509-zk-editor -- \
@@ -69,14 +72,14 @@ zk-proofs/
 
 ## Cryptographic Details
 
-The ZK approach uses a Groth16 zkSNARK to prove that the signer possesses a valid certificate issued by a trusted CA, without revealing which certificate. The primary circuit performs two P-256 ECDSA signature verifications plus in-circuit SHA-256 and UTCTime parsing (~12M constraints total), making proof generation slow (~10–15 minutes) but verification fast (11ms). The proof cryptographically binds the signer's private key to a CA-issued certificate, and proves that the certificate was valid when the photo was taken.
+The ZK approach uses a Groth16 zkSNARK to prove that the signer possesses a valid certificate issued by a trusted CA, without revealing which certificate. The primary circuit performs two P-256 ECDSA signature verifications plus in-circuit SHA-256 and UTCTime parsing (~12M constraints total). The proof cryptographically binds the signer's private key to a CA-issued certificate, and proves that the certificate was valid when the asset was anonymized.
 
 ### ZK Proof Statement
 
 **Public inputs:**
 - `caPubKeyX[6]`, `caPubKeyY[6]`: Trusted CA's P-256 public key (X, Y, each as 6 × 43-bit registers)
-- `claimHash[6]`: C2PA claim hash SHA-256 (6 × 43-bit registers)
-- `photoTimestamp`: Unix timestamp of when the photo was captured
+- `claimHash[6]`: Manifest-stripped asset digest SHA-256 (6 × 43-bit registers)
+- `photoTimestamp`: Unix timestamp of when the asset was anonymized/processed
 
 **Private inputs (witness):**
 - `certDer[1500]`: Raw DER-encoded signer certificate bytes (zero-padded to 1500 bytes)
@@ -87,13 +90,13 @@ The ZK approach uses a Groth16 zkSNARK to prove that the signer possesses a vali
 - `tbsHashPaddedLen`: Padded byte length of the TBS slice for SHA-256 (multiple of 64)
 - `tbsHashPaddedBytes[1536]`: TBS DER bytes with SHA-256 padding appended, zero-filled to 1536
 - `certSigR[6]`, `certSigS[6]`: CA's ECDSA signature over the TBSCertificate
-- `claimSigR[6]`, `claimSigS[6]`: Signer's ECDSA signature over `claimHash`
+- `claimSigR[6]`, `claimSigS[6]`: Signer's ECDSA signature over the manifest-stripped asset digest carried in `claimHash`
 
 **Relations proved:**
 1. `x509_parse.circom` extracts the TBSCertificate hash and SPKI from `certDer` in-circuit — the certificate structure is enforced by the proof itself
 2. `caPubKeyX/Y` verifies the CA signature over the parsed TBSCertificate — the cert was issued by the trusted CA
 3. The parsed subject public key verifies the signer's signature over `claimHash` — the prover holds the corresponding private key
-4. `parser.notBefore ≤ photoTimestamp ≤ parser.notAfter` — the cert was valid when the photo was taken (timestamps parsed in-circuit from certDer)
+4. `parser.notBefore ≤ photoTimestamp ≤ parser.notAfter` — the cert was valid when the asset was anonymized/processed (timestamps parsed in-circuit from certDer)
 
 **Pending (required for production soundness):**
 - RFC 5280 field validation (version, algorithm OID, key-usage extensions)
@@ -166,13 +169,15 @@ fields were pre-computed off-circuit.
 
 ### Performance
 
+The figures below should be treated as rough guidance for this circuit class, not as tight guarantees for every machine. In local testing for this repository, circuit compilation and native setup completed successfully and the full real flow completed end-to-end, but the editor's proof-generation step remained very slow.
+
 | Phase | Time | Notes |
 |-------|------|-------|
 | Circuit compilation | ~10 min | One-time |
-| Trusted setup | ~36 sec | One-time, native Rust |
-| Witness generation | ~2 sec | Per-proof |
-| Proof generation | ~8-10 min | Per-proof (two ECDSA verifications) |
-| Verification | **11 ms** | Fast |
+| Trusted setup | ~30 sec | One-time, native Rust |
+| Witness generation | Slow and hardware-dependent | Per-proof |
+| Proof generation | Slow and hardware-dependent | Per-proof |
+| Verification | Fast once a real proof exists | Real flow has been exercised locally |
 
 ### COSE Integration
 

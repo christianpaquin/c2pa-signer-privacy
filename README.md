@@ -19,8 +19,8 @@ Two proof-of-concept implementations demonstrate different privacy strategies:
 | **PKI compatibility** | Requires new CA infrastructure | Works with existing X.509 |
 | **Privacy model** | Selective attribute disclosure | Hide signer, reveal CA |
 | **Signer identity hidden** | ✅ Yes | ✅ Yes |
-| **Proof generation time** | ~2ms | ~4-5 minutes |
-| **Verification time** | ~3ms | 11ms |
+| **Proof generation time** | ~2ms | Very slow, hardware-dependent |
+| **Verification time** | ~3ms | Fast once a proof exists |
 | **Setup required** | None | Trusted setup (one-time) |
 | **Proof size** | ~500 bytes | ~1KB |
 | **Randomized proofs** | ✅ Different bytes each time | ❌ Deterministic |

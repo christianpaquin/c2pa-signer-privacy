@@ -49,12 +49,12 @@ include "circomlib/circuits/comparators.circom";
  *   2. The prover holds the private key corresponding to the SPKI in certDer
  *      — demonstrated by a fresh ECDSA signature over claimHash
  *   3. parser.notBefore ≤ photoTimestamp ≤ parser.notAfter
- *      — the certificate was valid when the photo was taken
+ *      — the certificate was valid when the asset was anonymized
  *
  * Public Inputs:
  *   caPubKeyX[k], caPubKeyY[k] — Trusted CA's P-256 public key (verifier-supplied)
  *   claimHash[k]               — C2PA claim hash (SHA-256) as k n-bit registers
- *   photoTimestamp             — Unix timestamp of when the photo was taken
+ *   photoTimestamp             — Unix timestamp of when the asset was anonymized
  *
  * Private Inputs:
  *   certDer[maxCertBytes]           — DER-encoded end-entity certificate
@@ -76,7 +76,7 @@ template X509IssueAndPossession(maxCertBytes, n, k) {
     signal input caPubKeyX[k];         // Trusted CA public key X coordinate
     signal input caPubKeyY[k];         // Trusted CA public key Y coordinate
     signal input claimHash[k];         // C2PA claim hash (256 bits as k n-bit chunks)
-    signal input photoTimestamp;       // Unix timestamp of photo capture
+    signal input photoTimestamp;       // Unix timestamp of anonymization time
 
     // === Private Inputs — certificate bytes ===
     signal input certDer[maxCertBytes]; // DER-encoded certificate bytes

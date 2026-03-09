@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
 
     println!("  Leaf certificate: {} bytes", manifest_data.leaf_cert_der.len());
     println!("  CA certificates: {}", manifest_data.ca_certs_der.len());
-    println!("  Claim hash: {} bytes", manifest_data.claim_hash.len());
+    println!("  Asset binding digest: {} bytes", manifest_data.claim_hash.len());
 
     // If the caller supplied the original cert file, override the extracted
     // cert bytes.  c2pa-rs can re-encode a PEM cert when embedding it in the
@@ -105,21 +105,6 @@ async fn main() -> Result<()> {
         };
         let orig_len = manifest_data.leaf_cert_der.len();
         manifest_data.leaf_cert_der = cert_bytes;
-        // Re-derive claim hash from the original cert bytes so proof is consistent.
-        manifest_data.claim_hash = {
-            use sha2::{Sha256, Digest};
-            use c2pa::Reader;
-            // Re-compute the surrogate claim hash using the original cert.
-            let reader = Reader::from_file(&args.input)
-                .map_err(|e| anyhow!("re-read for claim hash: {e}"))?;
-            let mf = reader.active_manifest()
-                .ok_or_else(|| anyhow!("no active manifest"))?;
-            let mut hasher = Sha256::new();
-            hasher.update(&manifest_data.leaf_cert_der);
-            if let Some(label) = mf.label() { hasher.update(label.as_bytes()); }
-            if let Some(title) = mf.title() { hasher.update(title.as_bytes()); }
-            hasher.finalize().to_vec()
-        };
         eprintln!("[info] Overriding manifest cert ({orig_len}B) with {} from {:?}",
             manifest_data.leaf_cert_der.len(), cert_path);
     }
@@ -153,6 +138,10 @@ async fn main() -> Result<()> {
         }
         eprintln!("\n   Creating a placeholder assertion...\n");
 
+        let cert_chain_der = std::iter::once(manifest_data.leaf_cert_der.clone())
+            .chain(manifest_data.ca_certs_der.iter().cloned())
+            .collect();
+
         // Create placeholder assertion for testing the flow
         let assertion = X509ZkSignerProofAssertion::new(
             issuer_dn,
@@ -165,7 +154,7 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&assertion)?);
 
         // Try to rewrite manifest (will fail until custom signer is implemented)
-        match rewrite_manifest_with_zk_proof(&args.input, &args.output, assertion) {
+        match rewrite_manifest_with_zk_proof(&args.input, &args.output, assertion, cert_chain_der) {
             Ok(()) => println!("\n✅ Anonymized asset written to {:?}", args.output),
             Err(e) => {
                 eprintln!("\n❌ Manifest rewrite not yet implemented: {e}");
@@ -203,8 +192,12 @@ async fn main() -> Result<()> {
             proof_base64,
         );
 
+        let cert_chain_der = std::iter::once(manifest_data.leaf_cert_der.clone())
+            .chain(manifest_data.ca_certs_der.iter().cloned())
+            .collect();
+
         println!("Rewriting manifest with ZK proof...");
-        rewrite_manifest_with_zk_proof(&args.input, &args.output, assertion)?;
+        rewrite_manifest_with_zk_proof(&args.input, &args.output, assertion, cert_chain_der)?;
 
         println!("\n✅ Anonymized asset written to {:?}", args.output);
     }

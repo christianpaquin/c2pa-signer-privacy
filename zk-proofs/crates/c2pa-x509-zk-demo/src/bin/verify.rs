@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use c2pa_x509_zk_demo::{
     bytes_to_registers, pubkey_registers_from_der,
     circuit_native::{NativeCircuitPaths, NativeProof, verify_proof_native},
+    compute_manifest_stripped_asset_digest,
     compute_key_id,
     types::TrustedCaParams,
     X509ZkSignerProofAssertion, ASSERTION_TYPE,
@@ -77,6 +78,15 @@ fn main() -> Result<()> {
     }
     println!("\n✓ Issuer key ID matches trusted CA");
 
+    let expected_claim_hash = hex::encode(compute_manifest_stripped_asset_digest(&args.input)?);
+    if assertion.claim_hash != expected_claim_hash {
+        eprintln!("\n❌ Asset binding digest mismatch!");
+        eprintln!("   Expected (from manifest-stripped asset): {expected_claim_hash}");
+        eprintln!("   Got (from assertion):                   {}", assertion.claim_hash);
+        std::process::exit(1);
+    }
+    println!("✓ Assertion digest matches manifest-stripped asset");
+
     // Verify expected issuer if provided
     if let Some(expected_issuer) = &args.issuer {
         if &assertion.issuer != expected_issuer {
@@ -123,8 +133,8 @@ fn main() -> Result<()> {
     // Circuit public-input layout (k = 6 registers, indices 0-based):
     //   [0 .. 5]  caPubKeyX[0..5]  — CA public key X, LSB register first
     //   [6 .. 11] caPubKeyY[0..5]  — CA public key Y
-    //   [12.. 17] claimHash[0..5]  — C2PA claim hash
-    //   [18]      photoTimestamp   — Unix photo timestamp (public, informational)
+    //   [12.. 17] claimHash[0..5]  — manifest-stripped asset digest
+    //   [18]      photoTimestamp   — Unix anonymization-time timestamp (public, informational)
     // -------------------------------------------------------------------------
     const K: usize = 6;
 
@@ -161,8 +171,8 @@ fn main() -> Result<()> {
     }
     println!("✓ Proof CA public key matches trusted CA");
 
-    // Reconstruct expected claimHash registers from the assertion's claim_hash.
-    let claim_hash_bytes: [u8; 32] = hex::decode(&assertion.claim_hash)
+    // Reconstruct expected claimHash registers from the recomputed asset digest.
+    let claim_hash_bytes: [u8; 32] = hex::decode(&expected_claim_hash)
         .map_err(|_| anyhow::anyhow!("assertion.claim_hash is not valid hex"))?
         .try_into()
         .map_err(|_| anyhow::anyhow!("assertion.claim_hash is not 32 bytes"))?;
@@ -183,7 +193,7 @@ fn main() -> Result<()> {
         Ok(true) => {
             println!("\n✅ ZK proof verified successfully!");
             println!("   Issuer: {}", assertion.issuer);
-            println!("   The asset was signed by a certificate issued by the trusted CA.");
+            println!("   The asset was anonymized using a certificate issued by the trusted CA.");
         }
         Ok(false) => {
             eprintln!("\n❌ ZK proof verification failed!");

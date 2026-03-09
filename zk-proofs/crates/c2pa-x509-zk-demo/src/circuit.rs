@@ -28,7 +28,7 @@ pub struct CircuitInputs {
     pub ca_pub_key_y: [String; K_REGISTERS],
     /// C2PA claim hash as k registers of n bits (public)
     pub claim_hash: [String; K_REGISTERS],
-    /// Unix timestamp of when the photo was taken (public, decimal string)
+    /// Unix timestamp of when the asset was anonymized (public, decimal string)
     pub photo_timestamp: String,
 
     // --- Private inputs (witness) ---
@@ -78,7 +78,7 @@ pub struct ProofInputs {
     pub claim_hash: Vec<u8>,
     /// Trusted CA public key (public)
     pub ca_pubkey: PublicKeyComponents,
-    /// Unix timestamp when the photo was taken (public)
+    /// Unix timestamp when the asset was anonymized (public)
     pub photo_timestamp: u64,
 }
 

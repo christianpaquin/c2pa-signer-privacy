@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 /// Data extracted from a C2PA manifest for ZK proof generation
 #[derive(Debug, Clone)]
 pub struct ManifestData {
-    /// The C2PA claim hash (32 bytes SHA-256)
+    /// The manifest-stripped asset digest used as the proof's public message.
+    ///
+    /// The field name is retained for compatibility with the current circuit
+    /// signal layout (`claimHash`).
     pub claim_hash: Vec<u8>,
     /// DER-encoded leaf certificate from the COSE x5chain
     pub leaf_cert_der: Vec<u8>,
@@ -13,9 +16,9 @@ pub struct ManifestData {
     pub ca_certs_der: Vec<Vec<u8>>,
     /// The original COSE signature bytes
     pub cose_signature: Vec<u8>,
-    /// Unix timestamp (seconds since epoch) of when the photo was taken.
+    /// Unix timestamp (seconds since epoch) of when the asset was anonymized.
     /// Used as the `photoTimestamp` public input for the validity-period check.
-    /// Defaults to 0 if not available from the manifest metadata.
+    /// Currently set by the editor at processing time.
     pub photo_timestamp: u64,
 }
 

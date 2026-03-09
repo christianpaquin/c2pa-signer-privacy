@@ -55,7 +55,7 @@ Cryptographic unlinkable signatures allow creating privacy-supporting certified 
 
 A Zero-Knowledge Proof (ZKP) is a cryptographic mechanism allowing someone to prove properties about some data without disclosing the data itself. Given some data signed by a X.509 certificate, a user could prove that the signature and certificate are valid without disclosing the identifiable parts of the certificate (e.g., serial number, public key, issuer signature, validity period). A C2PA manifest could be redacted using a ZKP allowing anyone to verify that:
 1. the digital asset hasn't been modified
-2. the signer's cert was valid at signing
+2. the signer's cert was valid when the asset was processed/anonymized
 3. the signer cert's CA is trusted (the CA cert would be visible, allowing validators to infer memberships)
 
 This technique is very promising as it is compatible with the current C2PA specification and doesn't require changes to the key management infrastructure (to introduce new signing algorithms).
@@ -71,7 +71,7 @@ This technique is very promising as it is compatible with the current C2PA speci
 
 ## A prototype
 
-I've built prototypes for the most privacy-preserving options explored here: a BBS-based flow and a zero-knowledge approach on top of a conventional manifest. The BBS prototype now models a simple issuer/holder/verifier flow: a demo issuer signs a toy credential, the holder presents that credential over the C2PA asset hash, and the verifier checks both the disclosed attributes and the content binding. The code is available in this GitHub [c2pa-signer-privacy](https://github.com/christianpaquin/c2pa-signer-privacy) project.
+I've built prototypes for the most privacy-preserving options explored here: a BBS-based flow and a zero-knowledge approach on top of a conventional manifest. The BBS prototype now models a simple issuer/holder/verifier flow: a demo issuer signs a toy credential, the holder presents that credential over the C2PA asset hash, and the verifier checks both the disclosed attributes and the content binding. The zero-knowledge prototype keeps conventional X.509/ECDSA signing, then post-processes the asset into an anonymized variant whose proof is bound to the manifest-stripped asset bytes and to the signer's CA. The code is available in this GitHub [c2pa-signer-privacy](https://github.com/christianpaquin/c2pa-signer-privacy) project.
 
 ## Next steps
 

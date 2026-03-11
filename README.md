@@ -1,6 +1,6 @@
 # C2PA Signer Privacy
 
-This project explores privacy-preserving signature schemes for [C2PA](https://c2pa.org/) (Coalition for Content Provenance and Authenticity) manifests, as described in this [blog post](https://christianpaquin.github.io/2026-02-27-privacy-for-c2pa-signers.html). The goal is to allow verification of content authenticity while protecting the identity of individual signers.
+This project explores privacy-preserving signature schemes for [C2PA](https://c2pa.org/) (Coalition for Content Provenance and Authenticity) manifests, as described in this [blog post](https://christianpaquin.github.io/2026-03-13-privacy-for-c2pa-signers.html). The goal is to allow verification of content authenticity while protecting the identity of individual signers.
 
 ## Approaches
 

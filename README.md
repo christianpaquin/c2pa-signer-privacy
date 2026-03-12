@@ -40,13 +40,6 @@ c2pa-signer-privacy/
     └── pairing_crypto/           # BBS crypto library (submodule)
 ```
 
-## Helpful References
-
-- [C2PA Specification](https://c2pa.org/specifications/)
-- [BBS Signatures (IETF Draft)](https://datatracker.ietf.org/doc/draft-irtf-cfrg-bbs-signatures/)
-- [Groth16 zkSNARK](https://eprint.iacr.org/2016/260)
-- [`c2pa` Rust library](https://github.com/contentauth/c2pa-rs)
-
 ## Acknowledgments
 
 I'd like to thank my colleague Greg Zaverucha for his helpful feedback on the project.

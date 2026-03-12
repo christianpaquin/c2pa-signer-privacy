@@ -27,7 +27,7 @@ cargo run --release --bin c2pa-x509-zk-sign -- \
   --key fixtures/certs/signer-key.pem \
   --ca fixtures/certs/ca-cert.pem
 
-# 2. Anonymize: Replace signature with a real Groth16 ZK proof
+# 2. Anonymize: Replace signature with a Groth16 ZK proof
 # This step is slow on the current circuit and may take a long time.
 # --cert supplies the original signer cert DER so the circuit sees the exact
 # bytes the CA signed (c2pa-rs may alter encoding when storing in the manifest).
@@ -100,14 +100,11 @@ The ZK approach uses a Groth16 zkSNARK to prove that the signer possesses a vali
 - RFC 5280 field validation (version, algorithm OID, key-usage extensions)
 - Optional: revocation check via short-lived certs or an accumulator commitment
 
-**Why in-circuit cert parsing matters:**
-Passing raw `certDer` bytes into the circuit and parsing them inside the ZK proof is the architecturally sound design. An alternative (pre-computing fields off-circuit) creates a key-mixing attack: a malicious prover could combine cert A's CA signature with an unrelated key pair B, bypassing issuance verification entirely. In-circuit parsing closes this soundness gap.
-
 The in-circuit SHA-256 is implemented via `Sha256Bytes(1536)` from `@zk-email/circuits`.  The prover supplies `tbsHashPaddedBytes[1536]` (the TBS DER bytes with standard SHA-256 padding) and the circuit verifies that the first `4+tbsLen` bytes match `certDer[tbsOffset..]`, then hashes the buffer in-circuit and feeds the result into the CA ECDSA check.
 
 ### Constraint Count
 
-Estimated for the updated circuit (in-circuit SHA-256 + UTCTime parsing added):
+Estimated for the circuit (in-circuit SHA-256 + UTCTime parsing added):
 
 | Component | Constraints |
 |---|-----------|
@@ -123,9 +120,13 @@ Estimated for the updated circuit (in-circuit SHA-256 + UTCTime parsing added):
 
 For a production multi-party trusted setup (MPC ceremony) this circuit class would require a **2²⁴** (~16.7M) Powers of Tau file.  **For this demo no ptau download is needed** — `ark-groth16` performs a local single-party setup directly from the `.r1cs` file.
 
-**Future optimisation:** The `SelectByte` calls for TBS binding (the dominant cost) can be replaced with `VarShiftLeft` from `@zk-email/circuits/utils/array.circom`, reducing the TBS binding cost from ~4.3M constraints to ~500K constraints (~8.3M total based on measured baseline, still within the pot24 ceremony class).
+### Potential Optimisation
 
-### Potential Optimisation: Efficient ECDSA
+#### TBS binding
+
+The `SelectByte` calls for TBS binding (the dominant cost) can be replaced with `VarShiftLeft` from `@zk-email/circuits/utils/array.circom`, reducing the TBS binding cost from ~4.3M constraints to ~500K constraints (~8.3M total based on measured baseline, still within the pot24 ceremony class).
+
+#### Efficient ECDSA
 
 The **Efficient ECDSA** technique (sometimes called the "NOPE" circuit, from [Personae Labs](https://personaelabs.org/posts/efficient-ecdsa-1/)) eliminates the fixed-base G scalar multiplication from signature verification by computing it off-circuit and supplying the result as a witness T.  This would reduce each `ECDSAVerifyNoPubkeyCheck` (~1.3M constraints) to roughly ~700K constraints.
 
@@ -198,7 +199,7 @@ git submodule update --init --recursive
 # Install circuit JS dependencies (circomlib, circom-ecdsa-p256 deps)
 npm install --prefix circuits
 
-# Compile circuit (~5-10 minutes, produces .r1cs and .wasm)
+# Compile circuit (will run for a while, produces .r1cs and .wasm)
 mkdir -p circuits/build
 circom circuits/x509_issue_and_possession.circom \
   --r1cs --wasm --sym \
@@ -279,7 +280,9 @@ cargo test --release
 - [Groth16 zkSNARK](https://eprint.iacr.org/2016/260)
 - [ark-circom](https://github.com/arkworks-rs/circom-compat)
 - [ark-groth16](https://github.com/arkworks-rs/groth16)
+- [@zk-email/circuits](https://github.com/zkemail/zk-email-verify)
 - [Efficient ECDSA — Personae Labs](https://personaelabs.org/posts/efficient-ecdsa-1/)
+- [c2pa-rs](https://github.com/contentauth/c2pa-rs)
 
 ## Credits
 
@@ -290,3 +293,18 @@ big-integer and elliptic-curve arithmetic) are taken from
 [**circom-ecdsa-p256**](https://github.com/privacy-scaling-explorations/circom-ecdsa-p256)
 by 0xPARC / Privacy Scaling Explorations, licensed under ISC.
 The library is included as a git submodule at `circuits/circom-ecdsa-p256/`.
+
+### circom-pairing
+
+The elliptic-curve pairing and field-arithmetic circuits used by circom-ecdsa-p256 come from
+[**circom-pairing**](https://github.com/privacy-scaling-explorations/circom-pairing)
+(a.k.a. zkPairing) by 0xPARC / Privacy Scaling Explorations, licensed under GPL-3.0.
+It is bundled as a nested submodule at `circuits/circom-ecdsa-p256/circuits/circom-pairing/`.
+
+### @zk-email/circuits
+
+The `Sha256Bytes` and `Sha256General` templates (in-circuit SHA-256 over byte arrays) are adapted
+from [**@zk-email/circuits**](https://github.com/zkemail/zk-email-verify)
+by the ZK Email team, licensed under MIT.
+Utility includes (`utils/array.circom`, `utils/functions.circom`) are also used.
+The package is installed as an npm dependency.

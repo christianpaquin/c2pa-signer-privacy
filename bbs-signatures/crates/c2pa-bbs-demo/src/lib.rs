@@ -50,7 +50,7 @@ pub struct PublicAttributes {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HiddenAttributes {
-    pub editor_id: String,
+    pub user_id: String,
     pub device_id: String,
 }
 
@@ -439,7 +439,7 @@ fn collect_attribute_messages(
     vec![
         AttributeMessage::revealed(public_attributes.issuer.clone().into_bytes()),
         AttributeMessage::revealed(public_attributes.policy.clone().into_bytes()),
-        AttributeMessage::hidden(hidden_attributes.editor_id.clone().into_bytes()),
+        AttributeMessage::hidden(hidden_attributes.user_id.clone().into_bytes()),
         AttributeMessage::hidden(hidden_attributes.device_id.clone().into_bytes()),
     ]
 }

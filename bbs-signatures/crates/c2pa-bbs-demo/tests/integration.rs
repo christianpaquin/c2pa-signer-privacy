@@ -25,8 +25,8 @@ fn issue_credential(dir: &tempfile::TempDir) -> std::path::PathBuf {
             "TestIssuer",
             "--policy",
             "test-policy",
-            "--editor-id",
-            "editor-1234",
+            "--user-id",
+            "user-1234",
             "--device-id",
             "device-9876",
         ])

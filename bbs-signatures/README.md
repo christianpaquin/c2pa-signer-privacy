@@ -6,11 +6,15 @@ This project implements privacy-preserving C2PA manifests using BBS selective-di
 
 BBS signatures support **selective disclosure** (reveal only chosen attributes) and **unlinkable presentations** (the holder can derive fresh proofs from the same credential). This implementation:
 
-- Issues a toy BBS credential signed by a demo issuer
-- Lets the holder present that credential in a `bbs-signer-proof` assertion
-- Reveals `issuer` and `policy` while hiding `editor_id` and `device_id`
-- Binds the C2PA asset hash into the BBS presentation header
-- Recomputes the manifest-stripped asset hash during verification to detect tampering
+- Issues a toy BBS credential signed by a demo issuer, encoding four attributes:
+  - an `issuer` identifier
+  - an issuance `policy` identifier
+  - a `user_id`
+  - a `device_id` 
+- Lets the holder present that credential in a `bbs-signer-proof` assertion, while
+  - Revealing the `issuer` and `policy` attributes and hiding the `user_id` and `device_id` ones
+  - Binding the C2PA asset hash into the BBS presentation header
+- Lets the verifier validate the presentation, learning the disclosed attributes, and matching the BBS presentation to the C2PA asset
 
 ## Quick Start
 
@@ -22,7 +26,7 @@ cargo build --release
 cargo run --release --bin c2pa-bbs-issue -- \
   --output /tmp/credential.json \
   --issuer "MyOrg" \
-  --policy "trusted-editor-v1"
+  --policy "issuance-policy-v1"
 
 # Present the credential over an asset
 cargo run --release --bin c2pa-bbs-sign -- \
@@ -55,7 +59,7 @@ cargo test --release
 | `claim_hash` | ✅ Yes | SHA-256 hash of the asset with the manifest excluded |
 | `issuer` | ✅ Yes | Organization name |
 | `policy` | ✅ Yes | Trust policy identifier |
-| `editor_id` | ❌ No | Individual editor identifier (hidden) |
+| `user_id` | ❌ No | Individual user identifier (hidden) |
 | `device_id` | ❌ No | Device/hardware identifier (hidden) |
 
 ### Toy Credential Format
@@ -66,10 +70,10 @@ cargo test --release
   "issuer_public_key": "<base64-bbs-public-key>",
   "public_attributes": {
     "issuer": "ExampleOrg",
-    "policy": "trusted-editor-v1"
+    "policy": "issuance-policy-v1"
   },
   "hidden_attributes": {
-    "editor_id": "editor-1234",
+    "user_id": "user-1234",
     "device_id": "device-9876"
   },
   "signature": "<base64-bbs-signature>"
@@ -84,7 +88,7 @@ cargo test --release
   "version": "0.1",
   "public_attributes": {
     "issuer": "ExampleOrg",
-    "policy": "trusted-editor-v1"
+    "policy": "issuance-policy-v1"
   },
   "claim_hash": "<hex>",
   "proof": "<base64-bbs-proof>",
@@ -101,7 +105,7 @@ cargo test --release
 
 ## Cryptographic Details
 
-The BBS approach replaces the standard COSE/ECDSA signature with a BBS presentation derived from a previously issued credential. In this toy flow, an issuer signs a credential containing multiple attributes, and the holder later derives a proof that reveals only the chosen attributes while binding the presentation to a C2PA asset hash. Each proof derivation uses fresh randomness, so the holder can generate unlinkable presentations from the same credential while the verifier still learns the issuer public key and the disclosed policy attributes.
+The BBS approach replaces the standard COSE/ECDSA signature with a BBS presentation derived from a previously issued credential. In this toy flow, an issuer signs a credential containing multiple attributes, and the holder later derives a proof that reveals only the chosen attributes while binding the presentation to a C2PA asset hash. Each proof derivation uses fresh randomness, so the holder can generate unlinkable presentations from the same credential while the verifier still learns the issuer public key and the disclosed attributes.
 
 ### C2PA Integration
 
@@ -131,7 +135,7 @@ A BBS credential is issued over a vector of messages (attributes). When deriving
 - The issuer signs the full attribute set once
 - The holder selects which messages to reveal
 - The derived proof cryptographically demonstrates that hidden values were included in the original issuer signature
-- The holder binds the C2PA asset hash into the presentation header
+- The holder binds the C2PA asset hash into the presentation header, on which its private key is applied (effectively signing the C2PA asset using the BBS credential)
 - Each proof derivation uses fresh randomness, producing different bytes (unlinkable)
 
 The presentation header binding used by this demo is:
@@ -186,5 +190,6 @@ Additional limitations of the current prototype:
 
 ## References
 
-- [BBS Signatures (IETF Draft)](https://datatracker.ietf.org/doc/draft-irtf-cfrg-bbs-signatures/)
-- [MATTR pairing_crypto](https://github.com/mattrglobal/pairing_crypto)
+- [BBS Signatures (IETF Draft)](https://datatracker.ietf.org/doc/draft-irtf-cfrg-bbs-signatures/) specification
+- [MATTR pairing_crypto](https://github.com/mattrglobal/pairing_crypto) BBS library 
+- [c2pa-rs](https://github.com/contentauth/c2pa-rs) C2PA rust library

@@ -15,12 +15,12 @@ struct IssueArgs {
     issuer: String,
 
     /// Revealed policy attribute embedded in the credential.
-    #[arg(long, default_value = "trusted-editor-v1")]
+    #[arg(long, default_value = "issuance-policy-v1")]
     policy: String,
 
-    /// Hidden editor identifier embedded in the credential.
-    #[arg(long, default_value = "editor-1234")]
-    editor_id: String,
+    /// Hidden user identifier embedded in the credential.
+    #[arg(long, default_value = "user-1234")]
+    user_id: String,
 
     /// Hidden device identifier embedded in the credential.
     #[arg(long, default_value = "device-9876")]
@@ -35,7 +35,7 @@ fn main() -> Result<()> {
         policy: args.policy,
     };
     let hidden_attributes = HiddenAttributes {
-        editor_id: args.editor_id,
+        user_id: args.user_id,
         device_id: args.device_id,
     };
 

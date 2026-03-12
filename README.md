@@ -16,41 +16,37 @@ Two proof-of-concept implementations demonstrate different privacy strategies:
 | Feature | BBS Signatures | X.509 + ZK Proofs |
 |---------|----------------|-------------------|
 | **Signing algorithm** | BBS (new) | ECDSA P-256 (standard) |
-| **PKI compatibility** | Requires new CA infrastructure | Works with existing X.509 |
+| **PKI compatibility** | Requires new CA infrastructure | Works with existing PKI |
 | **Privacy model** | Selective attribute disclosure | Hide signer, reveal CA |
 | **Signer identity hidden** | ✅ Yes | ✅ Yes |
-| **Proof generation time** | ~2ms | Very slow, hardware-dependent |
-| **Verification time** | ~3ms | Fast once a proof exists |
+| **Proof generation time** | Fast | Slow |
+| **Verification time** | Fast | Fast |
 | **Setup required** | None | Trusted setup (one-time) |
 | **Proof size** | ~500 bytes | ~1KB |
-| **Randomized proofs** | ✅ Different bytes each time | ✅ Different bytes each time |
-
-## Dependencies
-
-Both subprojects depend on the [`c2pa` Rust library](https://github.com/contentauth/c2pa-rs) (v0.33) for C2PA manifest handling (reading, writing, and validating manifests).
 
 ## Project Structure
 
 ```
 c2pa-signer-privacy/
-├── README.md                    # This file
-├── bbs-signatures/              # BBS implementation
-│   ├── crates/c2pa-bbs-demo/    # CLI tools and library
-│   └── fixtures/                # Test images
-├── zk-proofs/                   # X.509 + ZK implementation  
-│   ├── circuits/                # Circom circuits
+├── README.md                     # This file
+├── bbs-signatures/               # BBS implementation
+│   ├── crates/c2pa-bbs-demo/     # CLI tools and library
+│   └── fixtures/                 # Test images
+├── zk-proofs/                    # X.509 + ZK implementation  
+│   ├── circuits/                 # Circom circuits
 │   ├── crates/c2pa-x509-zk-demo/ # CLI tools and library
-│   └── fixtures/                # Test certs and images
+│   └── fixtures/                 # Test certs and images
 └── external/
-    └── pairing_crypto/          # BBS crypto library (submodule)
+    └── pairing_crypto/           # BBS crypto library (submodule)
 ```
 
-## License
-
-MIT
-
-## References
+## Helpful References
 
 - [C2PA Specification](https://c2pa.org/specifications/)
 - [BBS Signatures (IETF Draft)](https://datatracker.ietf.org/doc/draft-irtf-cfrg-bbs-signatures/)
 - [Groth16 zkSNARK](https://eprint.iacr.org/2016/260)
+- [`c2pa` Rust library](https://github.com/contentauth/c2pa-rs)
+
+## Acknowledgments
+
+I'd like to thank my colleague Greg Zaverucha for his helpful feedback on the project.

@@ -128,13 +128,7 @@ The `SelectByte` calls for TBS binding (the dominant cost) can be replaced with 
 
 #### Efficient ECDSA
 
-The **Efficient ECDSA** technique (sometimes called the "NOPE" circuit, from [Personae Labs](https://personaelabs.org/posts/efficient-ecdsa-1/)) eliminates the fixed-base G scalar multiplication from signature verification by computing it off-circuit and supplying the result as a witness T.  This would reduce each `ECDSAVerifyNoPubkeyCheck` (~1.3M constraints) to roughly ~700K constraints.
-
-**However, this optimisation is not straightforwardly applicable to Step 2 (CA signature verification).**  If T is an unconstrained private witness, a prover can forge a passing check by computing T = (r, y) − u₂·Q for any point (r, y) on P-256, without access to the CA's private key.  Making T a public commitment would fix the soundness issue but would allow a verifier to link multiple proofs that use the same certificate (T = (hash/s)·G is deterministic per cert+signature pair).
-
-For Step 4 (claim signature), the soundness concern is managed at the system level — only legitimate key holders receive CA-signed certs — so efficient ECDSA could be applied there.  The saving (~600K constraints) would not change the pot24 ceremony class requirement for a production multi-party setup.
-
-Applying this optimisation is left as future work when the soundness and privacy tradeoffs have been fully evaluated.
+The **Efficient ECDSA** technique (sometimes called the "NOPE" circuit, from [Personae Labs](https://personaelabs.org/posts/efficient-ecdsa-1/)) eliminates the fixed-base G scalar multiplication from signature verification by computing it off-circuit and supplying the result as a witness T. This would reduce each `ECDSAVerifyNoPubkeyCheck` (~1.3M constraints) to roughly ~700K constraints.
 
 ### Circuit Architecture
 

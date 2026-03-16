@@ -3,20 +3,23 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use c2pa::{hash_stream_by_alg, Builder, Reader, SigningAlg, Signer};
 use ciborium::Value as CborValue;
 use coset::{CoseSign1Builder, Header, TaggedCborSerializable};
-use pairing_crypto::bbs::{
-    ciphersuites::{
-        bls12_381::{
-            KeyPair,
-            BBS_BLS12381G1_PUBLIC_KEY_LENGTH,
-            BBS_BLS12381G1_SECRET_KEY_LENGTH,
-            MIN_KEY_GEN_IKM_LENGTH,
-        },
-        bls12_381_g1_sha_256,
-    },
-    BbsProofGenRequest,
-    BbsProofGenRevealMessageRequest,
-    BbsProofVerifyRequest,
-    BbsSignRequest,
+use pairing_crypto::bbs::ciphersuites::bls12_381::{
+    KeyPair as BbsKeyPair,
+    BBS_BLS12381G1_PUBLIC_KEY_LENGTH,
+    BBS_BLS12381G1_SECRET_KEY_LENGTH,
+    MIN_KEY_GEN_IKM_LENGTH,
+};
+use pairing_crypto::bbs_bound::{
+    ciphersuites::bls12_381_bbs_g1_bls_sig_g2_sha_256 as bbs_bound_sha256,
+    BbsBoundProofGenRequest,
+    BbsBoundProofGenRevealMessageRequest,
+    BbsBoundProofVerifyRequest,
+    BbsBoundSignRequest,
+};
+use pairing_crypto::bls::ciphersuites::bls12_381::{
+    KeyPair as BlsKeyPair,
+    BLS_SIG_BLS12381G2_PUBLIC_KEY_LENGTH,
+    BLS_SIG_BLS12381G2_SECRET_KEY_LENGTH,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -27,8 +30,10 @@ use std::{
 use tempfile::Builder as TempFileBuilder;
 
 const CLAIM_HASH_BINDING_DOMAIN: &[u8] = b"c2pa-bbs-claim-hash:";
-const DEMO_KEY_INFO: &[u8] = b"c2pa-bbs-demo-key-info";
-const DEMO_IKM: [u8; MIN_KEY_GEN_IKM_LENGTH] = *b"c2pa-bbs-demo-static-ikm-seed!!!";
+const DEMO_ISSUER_KEY_INFO: &[u8] = b"c2pa-bbs-demo-key-info";
+const DEMO_ISSUER_IKM: [u8; MIN_KEY_GEN_IKM_LENGTH] = *b"c2pa-bbs-demo-static-ikm-seed!!!";
+const DEMO_HOLDER_KEY_INFO: &[u8] = b"c2pa-bbs-demo-holder-key-info";
+const DEMO_HOLDER_IKM: [u8; MIN_KEY_GEN_IKM_LENGTH] = *b"c2pa-bbs-demo-holder-ikm-seed!!!";
 const CLAIM_GENERATOR: &str = "c2pa-bbs-demo/0.1";
 const MANIFEST_LABEL: &str = "c2pa-bbs-demo";
 const DEMO_LEAF_CERT: &[u8] = include_bytes!("../resources/demo-bbs-leaf.der");
@@ -58,6 +63,8 @@ pub struct HiddenAttributes {
 pub struct IssuedCredential {
     pub version: String,
     pub issuer_public_key: String,
+    /// Base64-encoded BLS secret key for the holder (kept locally, never shared).
+    pub holder_secret_key: String,
     pub public_attributes: PublicAttributes,
     pub hidden_attributes: HiddenAttributes,
     pub signature: String,
@@ -66,6 +73,7 @@ pub struct IssuedCredential {
 impl IssuedCredential {
     pub fn new(
         issuer_public_key: String,
+        holder_secret_key: String,
         public_attributes: PublicAttributes,
         hidden_attributes: HiddenAttributes,
         signature: String,
@@ -73,6 +81,7 @@ impl IssuedCredential {
         Self {
             version: ASSERTION_VERSION.to_string(),
             issuer_public_key,
+            holder_secret_key,
             public_attributes,
             hidden_attributes,
             signature,
@@ -171,20 +180,25 @@ pub fn issue_demo_credential(
     public_attributes: &PublicAttributes,
     hidden_attributes: &HiddenAttributes,
     ) -> Result<IssuedCredential> {
-    let key_pair = DemoIssuerKeyPair::new()?;
+    let issuer_kp = DemoIssuerKeyPair::new()?;
+    let holder_kp = DemoHolderKeyPair::new()?;
     let attribute_specs = collect_attribute_messages(public_attributes, hidden_attributes);
     let message_values = signing_messages(&attribute_specs);
 
-    let signature = bls12_381_g1_sha_256::sign(&BbsSignRequest {
-        secret_key: &key_pair.secret_key,
-        public_key: &key_pair.public_key,
+    // Use BBS-bound signing: the issuer binds the credential to the holder's
+    // BLS public key so that only the holder can later derive proofs.
+    let signature = bbs_bound_sha256::sign(&BbsBoundSignRequest {
+        secret_key: &issuer_kp.secret_key,
+        public_key: &issuer_kp.public_key,
+        bls_public_key: &holder_kp.public_key,
         header: None,
         messages: Some(&message_values),
     })
-    .map_err(|err| anyhow!("BBS credential issuance failed: {err:?}"))?;
+    .map_err(|err| anyhow!("BBS bound credential issuance failed: {err:?}"))?;
 
     Ok(IssuedCredential::new(
-        BASE64_STANDARD.encode(key_pair.public_key),
+        BASE64_STANDARD.encode(issuer_kp.public_key),
+        BASE64_STANDARD.encode(holder_kp.secret_key),
         public_attributes.clone(),
         hidden_attributes.clone(),
         BASE64_STANDARD.encode(signature),
@@ -199,7 +213,7 @@ pub fn generate_bbs_proof_from_credential(
         &credential.public_attributes,
         &credential.hidden_attributes,
     );
-    let reveal_plan = build_reveal_plan(&attribute_specs);
+    let reveal_plan = build_bound_reveal_plan(&attribute_specs);
     let signature_bytes = decode_credential_signature(&credential.signature)?;
     let signature: [u8; 80] = signature_bytes
         .try_into()
@@ -211,15 +225,26 @@ pub fn generate_bbs_proof_from_credential(
         .try_into()
         .map_err(|_| anyhow!("issuer public key has wrong length"))?;
 
-    let proof_bytes = bls12_381_g1_sha_256::proof_gen(&BbsProofGenRequest {
+    // Decode the holder's BLS secret key for bound proof generation.
+    let holder_sk_bytes = BASE64_STANDARD
+        .decode(&credential.holder_secret_key)
+        .map_err(|e| anyhow!("invalid base64 holder secret key: {e}"))?;
+    let holder_secret_key: [u8; BLS_SIG_BLS12381G2_SECRET_KEY_LENGTH] = holder_sk_bytes
+        .try_into()
+        .map_err(|_| anyhow!("holder secret key has wrong length"))?;
+
+    // Use BBS-bound proof generation: the holder proves possession of the BLS
+    // secret key that matches the public key bound into the credential.
+    let proof_bytes = bbs_bound_sha256::proof_gen(&BbsBoundProofGenRequest {
         public_key: &issuer_public_key,
+        bls_secret_key: &holder_secret_key,
         header: None,
         messages: Some(&reveal_plan),
         signature: &signature,
         presentation_header: Some(claim_binding(claim_hash)),
         verify_signature: Some(true),
     })
-    .map_err(|err| anyhow!("BBS proof generation failed: {err:?}"))?;
+    .map_err(|err| anyhow!("BBS bound proof generation failed: {err:?}"))?;
 
     Ok(GeneratedProof {
         proof: ProofBlob(BASE64_STANDARD.encode(proof_bytes)),
@@ -246,14 +271,17 @@ pub fn verify_bbs_proof(
     let proof_bytes = decode_proof(&assertion.proof)?;
     let revealed_pairs = build_revealed_pairs(&assertion.public_attributes);
 
-    let valid = bls12_381_g1_sha_256::proof_verify(&BbsProofVerifyRequest {
+    // Use BBS-bound proof verification: this checks that the proof was derived
+    // by someone holding the BLS secret key bound into the credential, without
+    // learning that key.
+    let valid = bbs_bound_sha256::proof_verify(&BbsBoundProofVerifyRequest {
         public_key: &issuer_public_key,
         header: None,
         presentation_header: Some(claim_binding(expected_claim_hash)),
         proof: &proof_bytes,
         messages: Some(&revealed_pairs),
     })
-    .map_err(|err| anyhow!("BBS proof verification failed: {err:?}"))?;
+    .map_err(|err| anyhow!("BBS bound proof verification failed: {err:?}"))?;
 
     if !valid {
         bail!("invalid BBS signer proof for provided asset");
@@ -301,8 +329,26 @@ struct DemoIssuerKeyPair {
 
 impl DemoIssuerKeyPair {
     fn new() -> Result<Self> {
-        let raw = KeyPair::new(&DEMO_IKM, DEMO_KEY_INFO)
-            .ok_or_else(|| anyhow!("failed to derive deterministic demo key pair"))?;
+        let raw = BbsKeyPair::new(&DEMO_ISSUER_IKM, DEMO_ISSUER_KEY_INFO)
+            .ok_or_else(|| anyhow!("failed to derive deterministic demo issuer key pair"))?;
+
+        Ok(Self {
+            secret_key: raw.secret_key.to_bytes(),
+            public_key: raw.public_key.to_octets(),
+        })
+    }
+}
+
+/// Deterministic BLS key pair for the demo holder (used for holder binding).
+struct DemoHolderKeyPair {
+    secret_key: [u8; BLS_SIG_BLS12381G2_SECRET_KEY_LENGTH],
+    public_key: [u8; BLS_SIG_BLS12381G2_PUBLIC_KEY_LENGTH],
+}
+
+impl DemoHolderKeyPair {
+    fn new() -> Result<Self> {
+        let raw = BlsKeyPair::new(&DEMO_HOLDER_IKM, DEMO_HOLDER_KEY_INFO)
+            .ok_or_else(|| anyhow!("failed to derive deterministic demo holder key pair"))?;
 
         Ok(Self {
             secret_key: raw.secret_key.to_bytes(),
@@ -448,12 +494,12 @@ fn signing_messages(specs: &[AttributeMessage]) -> Vec<Vec<u8>> {
     specs.iter().map(|entry| entry.value.clone()).collect()
 }
 
-fn build_reveal_plan(
+fn build_bound_reveal_plan(
     specs: &[AttributeMessage],
-) -> Vec<BbsProofGenRevealMessageRequest<Vec<u8>>> {
+) -> Vec<BbsBoundProofGenRevealMessageRequest<Vec<u8>>> {
     specs
         .iter()
-        .map(|entry| BbsProofGenRevealMessageRequest {
+        .map(|entry| BbsBoundProofGenRevealMessageRequest {
             reveal: entry.reveal,
             value: entry.value.clone(),
         })

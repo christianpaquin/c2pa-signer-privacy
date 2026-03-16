@@ -68,6 +68,7 @@ cargo test --release
 {
   "version": "0.1",
   "issuer_public_key": "<base64-bbs-public-key>",
+  "holder_secret_key": "<base64-bls-secret-key>",
   "public_attributes": {
     "issuer": "ExampleOrg",
     "policy": "issuance-policy-v1"
@@ -76,9 +77,11 @@ cargo test --release
     "user_id": "user-1234",
     "device_id": "device-9876"
   },
-  "signature": "<base64-bbs-signature>"
+  "signature": "<base64-bbs-bound-signature>"
 }
 ```
+
+The `holder_secret_key` is the holder's BLS secret key used for holder binding (see below). In the demo it is stored alongside the credential for convenience; a production system would manage holder keys separately in a secure wallet.
 
 ### Manifest Assertion Format
 
@@ -107,6 +110,27 @@ cargo test --release
 
 The BBS approach replaces the standard COSE/ECDSA signature with a BBS presentation derived from a previously issued credential. In this toy flow, an issuer signs a credential containing multiple attributes, and the holder later derives a proof that reveals only the chosen attributes while binding the presentation to a C2PA asset hash. Each proof derivation uses fresh randomness, so the holder can generate unlinkable presentations from the same credential while the verifier still learns the issuer public key and the disclosed attributes.
 
+### Holder Binding
+
+This demo uses **BBS bound signatures** (as defined in the [draft BBS spec](https://datatracker.ietf.org/doc/draft-irtf-cfrg-bbs-signatures/)) to bind each credential and proof to a specific holder via a BLS key pair.
+
+Without holder binding, anyone who obtains the credential file could derive valid proofs — the credential would be a **bearer token**. Holder binding prevents this: only the entity that holds the BLS secret key can produce valid presentations.
+
+**How it works:**
+
+1. **Key generation**: The holder generates a BLS12-381 key pair (secret key + public key).
+2. **Issuance**: The holder sends the BLS _public key_ to the issuer. The issuer calls `bbs_bound::sign()`, which binds the credential to that public key. The issuer learns the holder's public key (needed to know who they're issuing to) but never the secret key.
+3. **Proof generation**: The holder calls `bbs_bound::proof_gen()` with their BLS _secret key_. The secret key is used as an additional always-hidden message during proof derivation, cryptographically proving that the holder possesses the matching key.
+4. **Verification**: The verifier calls `bbs_bound::proof_verify()` which succeeds only if the proof was generated with the correct secret key. The verifier does **not** learn the holder's BLS key — it remains hidden in the proof.
+
+**Privacy properties:**
+
+- The **verifier** does not learn the holder's identity or BLS public key — the holder binding is zero-knowledge.
+- The **issuer** knows the holder's BLS public key (and thus can identify which holder they issued to), which is the standard Verifiable Credential model: issuers naturally verify holder identity before issuance.
+- Presentations remain **unlinkable**: each proof derivation uses fresh randomness, so two proofs from the same credential cannot be correlated by the verifier.
+
+**Note on issuer-privacy:** In this demo flow, the issuer sees the holder's BLS public key during issuance. An alternative approach could use BBS blind signing (where the holder commits to a secret value that the issuer signs without seeing), but the standard `bbs_bound` scheme is the simpler and more widely supported option. Since the issuer already knows who it is issuing credentials to (that's inherent to the issuance process), revealing the holder's public key to the issuer is not an additional privacy concern.
+
 ### C2PA Integration
 
 This prototype keeps the usual C2PA manifest structure and replaces the conventional COSE claim signature with a private-use BBS-based COSE object.
@@ -132,9 +156,9 @@ The COSE signature field contains the BBS proof bytes. The payload is detached i
 ### How BBS Works
 
 A BBS credential is issued over a vector of messages (attributes). When deriving a proof:
-- The issuer signs the full attribute set once
+- The issuer signs the full attribute set once, binding the credential to the holder's BLS public key via `bbs_bound::sign()`
 - The holder selects which messages to reveal
-- The derived proof cryptographically demonstrates that hidden values were included in the original issuer signature
+- The derived proof cryptographically demonstrates that hidden values were included in the original issuer signature, and that the prover holds the BLS secret key bound into the credential
 - The holder binds the C2PA asset hash into the presentation header, on which its private key is applied (effectively signing the C2PA asset using the BBS credential)
 - Each proof derivation uses fresh randomness, producing different bytes (unlinkable)
 
@@ -150,17 +174,17 @@ This ensures the BBS presentation is tied to the specific asset being certified.
 
 Signing in the demo has two explicit steps:
 
-1. The issuer creates a toy BBS credential over the holder attributes.
-2. The holder computes the asset hash before manifest embedding, derives a selective-disclosure proof from the credential, and embeds that proof into the C2PA manifest.
+1. The issuer creates a toy BBS-bound credential over the holder attributes, binding it to the holder's BLS public key.
+2. The holder computes the asset hash before manifest embedding, derives a holder-bound selective-disclosure proof from the credential using their BLS secret key, and embeds that proof into the C2PA manifest.
 
 Verification in the demo does the reverse:
 
 1. Read the manifest and extract the `bbs-signer-proof` assertion.
 2. Remove the embedded JUMBF from a temporary copy of the asset.
 3. Recompute the asset hash on that manifest-stripped copy.
-4. Reconstruct the presentation header and verify the BBS proof against the disclosed attributes and issuer public key.
+4. Reconstruct the presentation header and verify the BBS-bound proof against the disclosed attributes and issuer public key.
 
-This means the verifier now checks both the BBS disclosure proof and the integrity of the non-manifest asset bytes.
+This means the verifier now checks the BBS disclosure proof (including holder binding), and the integrity of the non-manifest asset bytes.
 
 ### Demo Certificate Chain
 
@@ -175,14 +199,15 @@ This implementation uses [MATTR's `pairing_crypto`](https://github.com/mattrglob
 
 ### Limitations
 
-The prototype uses a deterministic demo issuer key and stores the issued credential as a local JSON file. A production system would anchor the issuer key in a real trust framework, protect holder credentials at rest, and define how the holder obtains and manages credentials out of band.
+The prototype uses deterministic demo keys for both the issuer (BBS key pair) and the holder (BLS key pair), and stores the issued credential as a local JSON file. A production system would anchor the issuer key in a real trust framework, protect holder keys and credentials at rest (e.g., in a secure wallet), and define how the holder obtains and manages credentials out of band.
 
 Additional limitations of the current prototype:
 
-- It uses a toy local credential file instead of a real wallet or credential exchange.
+- It uses a toy local credential file (with the holder's BLS secret key stored alongside) instead of a real wallet or credential exchange.
 - It relies on a private-use COSE algorithm value rather than a standardized C2PA extension.
 - It embeds a demo X.509 chain only to satisfy current `c2pa-rs` manifest-writing requirements.
 - It does not yet model revocation, issuer policy discovery, or a production trust registry for BBS issuers.
+- The holder BLS key pair is generated deterministically from a static seed; a real system would generate random holder keys.
 
 ## Test Assets
 

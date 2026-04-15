@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Anonymize &mdash; ZK{% endblock %}
+
+{% block content %}
+<h1>Anonymize Image</h1>
+
+<div class="tabs">
+    <a href="{{ url_for('zk_sign') }}">Sign</a>
+    <a href="{{ url_for('zk_anonymize') }}" class="active">Anonymize</a>
+    <a href="{{ url_for('zk_verify') }}">Verify</a>
+</div>
+
+{% if success %}
+<div class="result success">
+    <h2>&#10003; Anonymized</h2>
+    <div class="img-preview" style="display:block">
+        <img src="{{ url_for('preview_file', filename=output_filename) }}" alt="Anonymized image">
+    </div>
+    <div class="actions">
+        <a href="{{ url_for('download_file', filename=output_filename) }}" class="btn btn-success">Download Anonymized Image</a>
+        <a href="{{ url_for('zk_verify') }}" class="btn btn-secondary">Verify &rarr;</a>
+    </div>
+    <pre>{{ output }}</pre>
+</div>
+{% endif %}
+
+<div class="panel">
+    <form method="post" enctype="multipart/form-data">
+        <div class="drop-zone">
+            <input type="file" id="image" name="image" accept=".png,.jpg,.jpeg" required>
+            <div class="icon">&#128274;</div>
+            <div class="label">Drop signed image or click to browse</div>
+            <div class="filename"></div>
+        </div>
+        <div class="img-preview" style="display:none">
+            <img src="" alt="Preview">
+        </div>
+
+        <button type="submit" class="btn btn-lg">Anonymize</button>
+    </form>
+</div>
+{% endblock %}

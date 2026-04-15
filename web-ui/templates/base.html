@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}C2PA Signer Privacy{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <nav>
+        <a href="{{ url_for('index') }}" class="brand">C2PA Signer Privacy</a>
+        <a href="{{ url_for('bbs_index') }}" class="{{ 'active' if request.path.startswith('/bbs') }}">BBS</a>
+        <a href="{{ url_for('zk_index') }}" class="{{ 'active' if request.path.startswith('/zk') }}">ZK Proofs</a>
+    </nav>
+
+    <main>
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="flash-messages">
+            {% for category, message in messages %}
+            <div class="flash {{ category }}">{{ message }}</div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer>C2PA Signer Privacy &mdash; Research Prototype</footer>
+
+    <script>
+    // Drop zone enhancement
+    document.querySelectorAll('.drop-zone').forEach(zone => {
+        const input = zone.querySelector('input[type="file"]');
+        const label = zone.querySelector('.label');
+        const fnEl = zone.querySelector('.filename');
+        const preview = zone.closest('form')?.querySelector('.img-preview img');
+
+        ['dragenter','dragover'].forEach(e => zone.addEventListener(e, ev => {
+            ev.preventDefault(); zone.classList.add('dragover');
+        }));
+        ['dragleave','drop'].forEach(e => zone.addEventListener(e, ev => {
+            ev.preventDefault(); zone.classList.remove('dragover');
+        }));
+        zone.addEventListener('drop', ev => {
+            if (ev.dataTransfer.files.length) {
+                input.files = ev.dataTransfer.files;
+                input.dispatchEvent(new Event('change'));
+            }
+        });
+        if (input) input.addEventListener('change', () => {
+            if (input.files.length) {
+                const file = input.files[0];
+                if (fnEl) fnEl.textContent = file.name;
+                if (preview && file.type.startsWith('image/')) {
+                    preview.src = URL.createObjectURL(file);
+                    preview.closest('.img-preview').style.display = 'block';
+                }
+            }
+        });
+    });
+    </script>
+</body>
+</html>

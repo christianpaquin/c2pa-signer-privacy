@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Wallet &mdash; BBS{% endblock %}
+
+{% block content %}
+<h1>Wallet</h1>
+
+<div class="tabs">
+    <a href="{{ url_for('bbs_issue') }}" class="active">Wallet</a>
+    <a href="{{ url_for('bbs_sign') }}">Sign</a>
+    <a href="{{ url_for('bbs_verify') }}">Verify</a>
+</div>
+
+{% if success %}
+<div class="result success">
+    <h2>&#10003; Credential saved to wallet</h2>
+    <div class="actions">
+        <a href="{{ url_for('bbs_sign') }}" class="btn btn-secondary">Sign an Image &rarr;</a>
+    </div>
+</div>
+{% endif %}
+
+<div class="panel">
+    <h2>Obtain Credential</h2>
+    <p class="muted small" style="margin-bottom:1rem">Request a BBS credential from the issuer.</p>
+
+    <div class="form-row">
+        <div class="form-group">
+            <label>Issuer</label>
+            <input type="text" value="ExampleOrg" disabled>
+        </div>
+        <div class="form-group">
+            <label>Policy</label>
+            <input type="text" value="issuance-policy-v1" disabled>
+        </div>
+    </div>
+    <div class="form-row">
+        <div class="form-group">
+            <label>User ID</label>
+            <input type="text" value="user-1234" disabled>
+        </div>
+        <div class="form-group">
+            <label>Device ID</label>
+            <input type="text" value="device-9876" disabled>
+        </div>
+    </div>
+
+    <form method="post">
+        <button type="submit" class="btn btn-lg">Obtain Credential</button>
+    </form>
+</div>
+
+{% if wallet %}
+<div class="panel" style="margin-top:1.5rem">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h2 style="margin:0">Stored Credentials</h2>
+        <form method="post" action="{{ url_for('bbs_clear_wallet') }}" style="margin:0">
+            <button type="submit" class="btn btn-secondary" style="padding:.3rem .8rem; font-size:.8rem">Clear Wallet</button>
+        </form>
+    </div>
+    {% for cred in wallet %}
+    <div style="padding:.6rem 0; border-bottom:1px solid #334155;">
+        <span style="color:#f1f5f9; font-weight:500">Credential #{{ cred.id }}</span>
+        <span class="muted small">&mdash; {{ cred.issuer }} / {{ cred.policy }}</span>
+        <div class="muted small" style="margin-top:.2rem">
+            user_id: {{ cred.data.hidden_attributes.user_id }},
+            device_id: {{ cred.data.hidden_attributes.device_id }}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Anonymizing&hellip; &mdash; ZK{% endblock %}
+
+{% block content %}
+<h1>Anonymize Image</h1>
+
+<div class="tabs">
+    <a href="{{ url_for('zk_sign') }}">Sign</a>
+    <a href="{{ url_for('zk_anonymize') }}" class="active">Anonymize</a>
+    <a href="{{ url_for('zk_verify') }}">Verify</a>
+</div>
+
+<div class="panel" id="status-box">
+    <div style="text-align:center; padding:2rem 0">
+        <div class="spinner" style="margin:0 auto 1rem"></div>
+        <div class="progress-elapsed"><span id="elapsed">0</span>s</div>
+        <p class="muted" style="margin-top:.5rem">Generating ZK proof&hellip;</p>
+    </div>
+</div>
+
+<div class="result success" id="done-box" style="display:none">
+    <h2>&#10003; Anonymized</h2>
+    <div class="img-preview" style="display:block">
+        <img id="done-preview" src="" alt="Anonymized image">
+    </div>
+    <div class="actions">
+        <a id="download-link" href="#" class="btn btn-success">Download Anonymized Image</a>
+        <a href="{{ url_for('zk_verify') }}" class="btn btn-secondary">Verify &rarr;</a>
+    </div>
+    <pre id="done-output"></pre>
+</div>
+
+<div class="result failure" id="error-box" style="display:none">
+    <h2>&#10007; Failed</h2>
+    <pre id="error-output"></pre>
+</div>
+
+<script>
+(function() {
+    const jobId = {{ job_id | tojson }};
+    const statusBox  = document.getElementById("status-box");
+    const doneBox    = document.getElementById("done-box");
+    const errorBox   = document.getElementById("error-box");
+    const elapsedEl  = document.getElementById("elapsed");
+
+    function poll() {
+        fetch("/api/job/" + jobId)
+            .then(r => r.json())
+            .then(data => {
+                if (data.elapsed !== null) elapsedEl.textContent = data.elapsed;
+                if (data.status === "done") {
+                    statusBox.style.display = "none";
+                    doneBox.style.display = "block";
+                    document.getElementById("done-output").textContent = data.output;
+                    document.getElementById("download-link").href = "/download/" + data.output_filename;
+                    document.getElementById("done-preview").src = "/preview/" + data.output_filename;
+                    document.title = "Done! \u2014 ZK";
+                } else if (data.status === "error") {
+                    statusBox.style.display = "none";
+                    errorBox.style.display = "block";
+                    document.getElementById("error-output").textContent = data.output;
+                    document.title = "Error \u2014 ZK";
+                } else {
+                    setTimeout(poll, 3000);
+                }
+            })
+            .catch(() => setTimeout(poll, 5000));
+    }
+    setTimeout(poll, 2000);
+})();
+</script>
+{% endblock %}

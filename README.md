@@ -10,6 +10,7 @@ Two proof-of-concept implementations demonstrate different privacy strategies:
 |----------|-------------|---------------|
 | **BBS Signatures** | Toy issuer/holder flow using BBS credentials, selective disclosure, and C2PA hash-bound presentations | [bbs-signatures/](bbs-signatures/README.md) |
 | **X.509 + ZK Proofs** | Keep standard X.509/ECDSA signing, add a post-processing step that replaces the signature with a zero-knowledge proof | [zk-proofs/](zk-proofs/README.md) |
+| **Web UI Demo** | Flask web interface for both prototypes | [web-ui/](web-ui/README.md) |
 
 ## Comparison
 
@@ -36,6 +37,7 @@ c2pa-signer-privacy/
 │   ├── circuits/                 # Circom circuits
 │   ├── crates/c2pa-x509-zk-demo/ # CLI tools and library
 │   └── fixtures/                 # Test certs and images
+├── web-ui/                       # Flask web demo for both prototypes
 └── external/
     └── pairing_crypto/           # BBS crypto library (submodule)
 ```

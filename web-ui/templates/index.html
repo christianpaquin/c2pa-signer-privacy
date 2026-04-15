@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}C2PA Signer Privacy{% endblock %}
+
+{% block content %}
+<div class="hero">
+    <h1>C2PA Signer Privacy</h1>
+    <p>Sign and verify content authenticity while protecting signer identity.</p>
+</div>
+
+<div class="card-grid">
+    <div class="card">
+        <span class="tag">BBS Signatures</span>
+        <h2>Selective Disclosure</h2>
+        <p>Reveal organization &amp; policy, hide personal identifiers. Fast proofs, ~500 bytes.</p>
+        <a href="{{ url_for('bbs_index') }}" class="btn">Open BBS &rarr;</a>
+    </div>
+    <div class="card">
+        <span class="tag">X.509 + ZK Proofs</span>
+        <h2>Full Anonymity</h2>
+        <p>Standard X.509 signing + Groth16 ZK proof. Works with existing PKI, ~1 KB proofs.</p>
+        <a href="{{ url_for('zk_index') }}" class="btn">Open ZK &rarr;</a>
+    </div>
+</div>
+{% endblock %}

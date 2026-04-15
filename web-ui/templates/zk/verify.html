@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Verify &mdash; ZK{% endblock %}
+
+{% block content %}
+<h1>Verify Image</h1>
+
+<div class="tabs">
+    <a href="{{ url_for('zk_sign') }}">Sign</a>
+    <a href="{{ url_for('zk_anonymize') }}">Anonymize</a>
+    <a href="{{ url_for('zk_verify') }}" class="active">Verify</a>
+</div>
+
+{% if verified is defined and verified is not none %}
+<div class="result {{ 'success' if verified else 'failure' }}">
+    <h2>{{ '✓ Valid' if verified else '✗ Invalid' }}</h2>
+    {% if input_filename %}
+    <div class="img-preview" style="display:block">
+        <img src="{{ url_for('preview_file', filename=input_filename) }}" alt="Verified image">
+    </div>
+    {% endif %}
+    <pre>{{ output }}</pre>
+</div>
+{% endif %}
+
+<div class="panel">
+    <form method="post" enctype="multipart/form-data">
+        <div class="drop-zone">
+            <input type="file" id="image" name="image" accept=".png,.jpg,.jpeg" required>
+            <div class="icon">&#128270;</div>
+            <div class="label">Drop anonymized image or click to browse</div>
+            <div class="filename"></div>
+        </div>
+        <div class="img-preview" style="display:none">
+            <img src="" alt="Preview">
+        </div>
+        <button type="submit" class="btn btn-lg" style="margin-top:1rem">Verify</button>
+    </form>
+</div>
+{% endblock %}

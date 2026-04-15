@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}ZK Proofs &mdash; C2PA Signer Privacy{% endblock %}
+
+{% block content %}
+<h1>X.509 + ZK Proofs</h1>
+
+<div class="tabs">
+    <a href="{{ url_for('zk_sign') }}">Sign</a>
+    <a href="{{ url_for('zk_anonymize') }}">Anonymize</a>
+    <a href="{{ url_for('zk_verify') }}">Verify</a>
+</div>
+
+<div class="card-grid">
+    <a href="{{ url_for('zk_sign') }}" class="card" style="text-decoration:none">
+        <h2>1. Sign</h2>
+        <p class="muted">Standard X.509/ECDSA-P256 C2PA signature</p>
+    </a>
+    <a href="{{ url_for('zk_anonymize') }}" class="card" style="text-decoration:none">
+        <h2>2. Anonymize</h2>
+        <p class="muted">Replace the signature with a Groth16 ZK proof</p>
+    </a>
+    <a href="{{ url_for('zk_verify') }}" class="card" style="text-decoration:none">
+        <h2>3. Verify</h2>
+        <p class="muted">Verify ZK proof against the trusted CA</p>
+    </a>
+</div>
+{% endblock %}

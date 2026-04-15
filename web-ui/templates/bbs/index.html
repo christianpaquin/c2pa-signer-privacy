@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}BBS &mdash; C2PA Signer Privacy{% endblock %}
+
+{% block content %}
+<h1>BBS Signatures</h1>
+
+<div class="tabs">
+    <a href="{{ url_for('bbs_issue') }}">Wallet</a>
+    <a href="{{ url_for('bbs_sign') }}">Sign</a>
+    <a href="{{ url_for('bbs_verify') }}">Verify</a>
+</div>
+
+<div class="card-grid">
+    <a href="{{ url_for('bbs_issue') }}" class="card" style="text-decoration:none">
+        <h2>1. Obtain Credential</h2>
+        <p class="muted">Get a BBS credential from the issuer and save it to your wallet</p>
+    </a>
+    <a href="{{ url_for('bbs_sign') }}" class="card" style="text-decoration:none">
+        <h2>2. Sign Image</h2>
+        <p class="muted">Sign an image using a credential from your wallet</p>
+    </a>
+    <a href="{{ url_for('bbs_verify') }}" class="card" style="text-decoration:none">
+        <h2>3. Verify</h2>
+        <p class="muted">Verify a signed image and see disclosed attributes</p>
+    </a>
+</div>
+{% endblock %}

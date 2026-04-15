@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Sign &mdash; BBS{% endblock %}
+
+{% block content %}
+<h1>Sign Image</h1>
+
+<div class="tabs">
+    <a href="{{ url_for('bbs_issue') }}">Wallet</a>
+    <a href="{{ url_for('bbs_sign') }}" class="active">Sign</a>
+    <a href="{{ url_for('bbs_verify') }}">Verify</a>
+</div>
+
+{% if success %}
+<div class="result success">
+    <h2>&#10003; Signed</h2>
+    <div class="img-preview" style="display:block">
+        <img src="{{ url_for('preview_file', filename=output_filename) }}" alt="Signed image">
+    </div>
+    <div class="actions">
+        <a href="{{ url_for('download_file', filename=output_filename) }}" class="btn btn-success">Download Signed Image</a>
+        <a href="{{ url_for('bbs_verify') }}" class="btn btn-secondary">Verify &rarr;</a>
+    </div>
+</div>
+{% endif %}
+
+<div class="panel">
+    <form method="post" enctype="multipart/form-data">
+        <div class="split">
+            <div>
+                <div class="drop-zone" id="dropzone-image">
+                    <input type="file" id="image" name="image" accept=".png,.jpg,.jpeg">
+                    <div class="icon">&#128444;</div>
+                    <div class="label">Drop image or click to browse</div>
+                    <div class="filename"></div>
+                </div>
+                <div class="img-preview" style="display:none">
+                    <img src="" alt="Preview">
+                </div>
+                <input type="hidden" name="use_sample" id="use_sample" value="">
+                <p class="small muted" style="margin-top:.5rem">
+                    <a href="#" onclick="loadSample(event)">Use sample image</a>
+                </p>
+            </div>
+            <div>
+                <div class="form-group">
+                    <label>Credential</label>
+                    {% if wallet %}
+                    <select name="credential_idx">
+                        {% for cred in wallet %}
+                        <option value="{{ cred.id }}" {{ 'selected' if loop.last }}>
+                            #{{ cred.id }} &mdash; {{ cred.issuer }} / {{ cred.policy }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                    {% else %}
+                    <select disabled>
+                        <option>No credentials in wallet</option>
+                    </select>
+                    <p class="small muted" style="margin-top:.4rem">
+                        <a href="{{ url_for('bbs_issue') }}">Obtain a credential</a> first
+                    </p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        <button type="submit" class="btn btn-lg" style="margin-top:1rem" {{ 'disabled' if not wallet }}>Sign Image</button>
+    </form>
+</div>
+
+<script>
+function loadSample(e) {
+    e.preventDefault();
+    const url = {{ url_for('sample_image', name='cards.png') | tojson }};
+    document.getElementById('use_sample').value = 'cards.png';
+    const zone = document.getElementById('dropzone-image');
+    zone.querySelector('.filename').textContent = 'cards.png';
+    const preview = zone.closest('form').querySelector('.img-preview');
+    preview.style.display = 'block';
+    preview.querySelector('img').src = url;
+}
+</script>
+{% endblock %}

@@ -33,6 +33,9 @@ zk-proofs/circuits/circom-ecdsa-p256/script_outputs/
 *.swo
 *~
 
+# Python
+__pycache__/
+
 # OS
 .DS_Store
 Thumbs.db

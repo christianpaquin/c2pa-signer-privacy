@@ -297,6 +297,67 @@ cargo run --release --bin c2pa-x509-zk-verify -- \
 cargo test --release
 ```
 
+## Roadmap
+
+The goal is to move this prototype from a demo toward something that works in realistic deployments, with stronger security and privacy guarantees. Each item below is planned as its own PR, roughly in this order.
+
+### 1. Standards-conformant COSE encoding
+
+Today's anonymized assets cannot be parsed by standard COSE/C2PA tooling (`c2patool` reports "No C2PA Manifests"), for two reasons:
+
+- The algorithm identifiers are not in the COSE private-use range (values below -65536). `-65534` is registered by IANA as `A128CTR`, and the BBS prototype's `-65535` as `RS1`. Both prototypes should move to private-use values.
+- The COSE structure is padded with trailing zero bytes, which strict parsers reject. `c2pa-rs` instead pads its own signatures with a `pad` field in the unprotected header; this prototype should do the same.
+
+The custom algorithm will still not be *verified* by standard tools, but it will be readable and reported as unsupported rather than invisible.
+
+### 2. Intermediate CAs and verifier trust lists
+
+Real PKIs issue end-entity certificates from intermediate CAs, which verifiers often do not hold in advance. The circuit already proves issuance by whichever CA key is a public input, so no circuit change is needed:
+
+- The anonymizer embeds the issuing CA's chain (intermediates up to, but excluding, the root). It never embeds the signer's certificate.
+- The verifier validates that chain to a root in a trust list (a directory of anchors, or the C2PA trust list format) instead of a single `--ca` file, and checks that the issuing CA's key matches the proof's public inputs.
+- `issuer_key_id` becomes a stable key identifier (hash of the CA's SPKI, or its Subject Key Identifier) rather than a hash of the whole CA certificate, so it survives CA certificate renewal.
+
+Open design point: where the chain lives. The standard `x5chain` header requires the first certificate to be the signer's end-entity certificate, and `c2pa-rs` rejects a CA certificate in that position. Options are a CA-only `x5chain` (simple, but contradicts its defined semantics) or a dedicated field in the `c2pa-x509-zk` header map.
+
+Privacy note: the issuing CA is disclosed by design, so the anonymity set is everyone that CA has issued certificates to. A narrowly scoped intermediate can nearly identify the signer (see item 7).
+
+### 3. Bind the proof to the C2PA claim
+
+The proof currently binds to a digest of the asset bytes with the manifest stripped, so nothing authenticates the rest of the manifest: other assertions can be changed without detection. The proof's public input should instead be the hash of the new claim, which already covers every assertion, including the hard binding to the asset bytes. The verifier can then re-enable standard `c2pa-rs` assertion and hash validation and only substitute the signature check.
+
+### 4. Meaningful timestamps
+
+The `photoTimestamp` public input is chosen by the prover and ignored by the verifier, so a proof shows only that the certificate was valid at *some* time the prover picked, which an expired certificate can satisfy. The verifier should enforce a policy (for example, "within N hours of now" at anonymization time), and the timestamp should be anchored to an RFC 3161 time-stamp authority rather than self-reported.
+
+### 5. Full certificate validation in the circuit
+
+Complete the RFC 5280 / C2PA certificate-profile checks listed under [Pending](#zk-proof-statement): certificate version, signature algorithm OID, key usage, `CA:FALSE`, and the C2PA / document-signing EKU. Without these, any certificate the CA has issued (including a CA certificate) can produce a valid proof.
+
+### 6. Revocation
+
+Support revoked or compromised signer keys, either through short-lived certificates or through a CA-published accumulator of valid keys (see [CA-published accumulator](#ca-published-accumulator-of-issued-spkis)). The accumulator approach also removes most of the circuit's cost.
+
+### 7. Hiding the issuing CA among a trusted set
+
+As the blog post suggests, prove membership of the issuing CA's key in a published set of trusted CAs (for example, a Merkle root over a trust list) instead of disclosing which CA issued the certificate. This enlarges the anonymity set beyond a single, possibly small, intermediate.
+
+### 8. Production proving setup and performance
+
+Replace the single-party local setup with a multi-party ceremony (or a proof system without a circuit-specific trusted setup), and apply the [optimisations](#potential-optimisations) above to bring proving time to something a signer will accept.
+
+### 9. Anonymizing without the signer's private key
+
+The anonymizer currently re-signs the asset digest with the signer's key, so it must run on the signer's side. Supporting a third-party anonymizer would require proving, in-circuit, the validity of the *original* COSE signature over the original claim. This is a research item: it involves hashing the full claim in-circuit and deciding what happens to the original claim's contents.
+
+### 10. Metadata privacy beyond the signature
+
+Removing the certificate is necessary but not sufficient. The anonymizer should also check or scrub other identifying data: the claim generator and manifest identifiers, ingredients, and the asset's own metadata (for example EXIF camera serial numbers and GPS). The regression test for [#6](https://github.com/christianpaquin/c2pa-signer-privacy/issues/6) (`anonymized_asset_does_not_reveal_signer`) should be extended as each source is addressed.
+
+### 11. Test infrastructure
+
+Generate test PKI at test time rather than relying on committed certificates with short validity periods, run the placeholder-mode suite in CI, and periodically run the full real-proof end-to-end test.
+
 ## Toolchain
 
 | Component | Tool | Version |

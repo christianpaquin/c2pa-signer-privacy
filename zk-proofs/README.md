@@ -28,7 +28,7 @@ cargo run --release --bin c2pa-x509-zk-sign -- \
   --ca fixtures/certs/ca-cert.pem
 
 # 2. Anonymize: Replace signature with a Groth16 ZK proof
-# This step is slow on the current circuit and may take a long time.
+# This step is slow: ~20 minutes and ~28 GB of RAM (see Performance).
 # --cert supplies the original signer cert DER so the circuit sees the exact
 # bytes the CA signed (c2pa-rs may alter encoding when storing in the manifest).
 cargo run --release --bin c2pa-x509-zk-anonymizer -- \
@@ -200,15 +200,16 @@ fields were pre-computed off-circuit.
 
 ### Performance
 
-The figures below should be treated as rough guidance for this circuit class, not as tight guarantees for every machine. In local testing for this repository, circuit compilation and native setup completed successfully and the full real flow completed end-to-end, but the anonymizer's proof-generation step remained very slow.
+Measured on a 20-core machine with 31 GB of RAM (WSL2). Expect different times on other hardware, but similar memory use.
 
-| Phase | Time | Notes |
-|-------|------|-------|
-| Circuit compilation | ~10 min | One-time |
-| Trusted setup | ~30 sec | One-time, native Rust |
-| Witness generation | Slow and hardware-dependent | Per-proof |
-| Proof generation | Slow and hardware-dependent | Per-proof |
-| Verification | Fast once a real proof exists | Real flow has been exercised locally |
+| Phase | Time | Peak RAM | Notes |
+|-------|------|----------|-------|
+| Circuit compilation | ~15 min | ~23 GB | One-time (`circom`) |
+| Trusted setup | ~6.5 min | ~24 GB | One-time, native Rust |
+| Anonymization (witness + proof) | ~20 min | ~28 GB | Per asset; witness generation runs the circuit's WASM |
+| Verification | ~0.03 s | ~13 MB | Per asset |
+
+**A machine with at least 32 GB of RAM is required** for the real-proof flow; on 16 GB machines compilation, setup, and proving will fail. Use [Placeholder Mode](#placeholder-mode) on smaller machines.
 
 ### COSE Integration
 
@@ -238,7 +239,7 @@ circom circuits/x509_issue_and_possession.circom \
   -l circuits/node_modules \
   -o circuits/build/
 
-# Run trusted setup (~36 seconds) — generates proving and verifying keys
+# Run trusted setup (~6.5 minutes, ~24 GB RAM) — generates proving and verifying keys
 # Must run from zk-proofs/, not circuits/
 cargo run --release --bin c2pa-x509-zk-setup -- --circuits-dir circuits
 ```
@@ -248,7 +249,11 @@ This generates the proving and verifying keys in `circuits/build/`.
 > **Note**: The native Rust prover (`ark-groth16`) generates its own circuit-specific keys
 > directly from the compiled `.r1cs` + `.wasm` files using a local random seed.  No
 > external Powers of Tau ceremony file is needed — `ark-groth16::generate_random_parameters_with_reduction`
-> handles the setup in one ~36-second pass.
+> handles the setup in one pass.
+>
+> If keys already exist, setup does nothing, even if the circuit has changed. After
+> recompiling a modified circuit, delete `circuits/build/x509_issue_and_possession_native.{pk,vk}`
+> before re-running setup, or proofs will fail.
 
 ## Certificate Requirements
 
@@ -265,7 +270,7 @@ Generate test certificates and a signed test asset:
 
 ## Placeholder Mode
 
-If you haven't completed the circuit setup, the anonymizer can embed a placeholder proof instead of a real ZK proof. This lets you exercise the full manifest pipeline — sign, anonymize, verify — immediately after `cargo build`, without waiting for circuit compilation (~10 min) and trusted setup (~36 sec).
+If you haven't completed the circuit setup, the anonymizer can embed a placeholder proof instead of a real ZK proof. This lets you exercise the full manifest pipeline — sign, anonymize, verify — immediately after `cargo build`, without circuit compilation (~15 min), trusted setup (~6.5 min), or ~20-minute proof generation, and without needing 32 GB of RAM.
 
 The verifier will detect a placeholder and exit with a non-zero status (exit code 2) along with a warning. This is intentional: placeholder mode is for development and structural testing only.
 
@@ -354,9 +359,13 @@ The anonymizer currently re-signs the asset digest with the signer's key, so it 
 
 Removing the certificate is necessary but not sufficient. The anonymizer should also check or scrub other identifying data: the claim generator and manifest identifiers, ingredients, and the asset's own metadata (for example EXIF camera serial numbers and GPS). The regression test for [#6](https://github.com/christianpaquin/c2pa-signer-privacy/issues/6) (`anonymized_asset_does_not_reveal_signer`) should be extended as each source is addressed.
 
-### 11. Test infrastructure
+### 11. Build, setup, and test infrastructure
 
-Generate test PKI at test time rather than relying on committed certificates with short validity periods, run the placeholder-mode suite in CI, and periodically run the full real-proof end-to-end test.
+- Generate test PKI at test time rather than relying on committed certificates with short validity periods.
+- Run the placeholder-mode suite in CI, and periodically run the full real-proof end-to-end test (it needs ~28 GB of RAM).
+- Fix key distribution. The committed `x509_issue_and_possession_native.vk` is not usable on its own: the matching proving key is not committed, so every user who runs setup generates new random keys and overwrites it. Either publish both keys from a single setup (the proving key is ~2.4 GB), or stop committing the verifying key.
+- Make setup detect a stale proving key (for example, by recording a hash of the `.r1cs` alongside the keys) instead of silently reusing keys from an older circuit.
+- Bring `circuits/build.sh` in line with the working steps above. It currently uses a snarkjs/pot20 flow that is too small for this circuit and omits the include paths.
 
 ## Toolchain
 

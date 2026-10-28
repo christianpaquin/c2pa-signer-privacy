@@ -419,7 +419,7 @@ fn anonymized_asset_does_not_reveal_signer() {
 }
 
 /// Full end-to-end test with real ZK proof generation and verification.
-/// This test is slower (~1 minute) because it generates actual Groth16 proofs.
+/// This test is slow (~20 minutes, ~28 GB of RAM) because it generates an actual Groth16 proof.
 /// It's marked #[ignore] by default - run with `cargo test -- --ignored` to include.
 #[test]
 #[ignore]
@@ -444,7 +444,7 @@ fn full_e2e_with_real_zk_proof() {
         .stdout(predicate::str::contains("Signed asset written"));
 
     // Step 2: Anonymize with real ZK proof (no --placeholder flag)
-    // Note: This step takes ~2-3 minutes due to ZK proof generation
+    // Note: This step takes ~20 minutes due to ZK proof generation
     Command::cargo_bin("c2pa-x509-zk-anonymizer")
         .unwrap()
         .args([
@@ -455,7 +455,7 @@ fn full_e2e_with_real_zk_proof() {
             "--circuits-dir", "circuits",
         ])
         .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(std::time::Duration::from_secs(45 * 60))
         .assert()
         .success()
         .stdout(predicate::str::contains("Proof generated"))

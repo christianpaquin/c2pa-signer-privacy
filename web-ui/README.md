@@ -30,4 +30,4 @@ Open [http://localhost:5000](http://localhost:5000).
 - **ZK flow**: Sign images with X.509/ECDSA, anonymize (replace signature with ZK proof), verify
 - Image preview on upload and after processing
 - Sample image auto-load for quick demos
-- Background processing for ZK proof generation (~2 min)
+- Background processing for ZK proof generation (~20 min; requires ~28 GB of RAM, see [zk-proofs Performance](../zk-proofs/README.md#performance))

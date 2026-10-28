@@ -215,6 +215,7 @@ The figures below should be treated as rough guidance for this circuit class, no
 - Custom algorithm: `alg = -65534` (experimental range)
 - Critical header: `crit = ["c2pa-x509-zk"]`
 - Extension map with circuit metadata
+- No `x5chain`: the anonymized output carries no certificates. Embedding the signer's leaf certificate would reveal the identity the proof hides, and the verifier supplies the trusted CA certificate itself (`--ca`). Thanks to Iman Attia (EBU) for reporting the earlier leak ([#6](https://github.com/christianpaquin/c2pa-signer-privacy/issues/6)).
 
 ## Building Circuits
 

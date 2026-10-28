@@ -134,12 +134,14 @@ pub fn compute_manifest_stripped_asset_digest(asset_path: &Path) -> Result<Vec<u
     compute_asset_digest(temp_file.path())
 }
 
-/// Rewrite a manifest to replace the COSE signature with a ZK proof assertion
+/// Rewrite a manifest to replace the COSE signature with a ZK proof assertion.
+///
+/// The output carries no certificates: the signer's leaf certificate is the
+/// identity the proof hides, and the verifier supplies the trusted CA itself.
 pub fn rewrite_manifest_with_zk_proof(
     input_path: &Path,
     output_path: &Path,
     assertion: X509ZkSignerProofAssertion,
-    cert_chain_der: Vec<Vec<u8>>,
 ) -> Result<()> {
     // Create a new manifest with the ZK assertion using the Builder API
     let definition = serde_json::json!({
@@ -163,7 +165,7 @@ pub fn rewrite_manifest_with_zk_proof(
         .decode(&assertion.proof)
         .unwrap_or_else(|_| assertion.proof.as_bytes().to_vec());
     
-    let signer = ZkProofSigner::new(proof_bytes, cert_chain_der);
+    let signer = ZkProofSigner::new(proof_bytes);
     
     builder.sign_file(&signer, input_path, output_path)
         .map_err(|e| anyhow!("failed to embed manifest: {e}"))?;
@@ -176,31 +178,22 @@ const ZK_COSE_ALG: i64 = -65534;  // Different from BBS (-65535)
 /// Critical header label for ZK extension.
 const CRIT_LABEL: &str = "c2pa-x509-zk";
 
-/// Custom signer that outputs a COSE_Sign1 with our ZK proof
+/// Custom signer that outputs a COSE_Sign1 with our ZK proof.
+///
+/// Unlike a standard C2PA signer, it deliberately emits no `x5chain` header:
+/// embedding the signer's certificate would reveal the identity the proof hides.
 struct ZkProofSigner {
     proof: Vec<u8>,
-    cert_chain_der: Vec<Vec<u8>>,
 }
 
 impl ZkProofSigner {
-    fn new(proof: Vec<u8>, cert_chain_der: Vec<Vec<u8>>) -> Self {
-        Self {
-            proof,
-            cert_chain_der,
-        }
+    fn new(proof: Vec<u8>) -> Self {
+        Self { proof }
     }
 
     /// Build a COSE_Sign1 structure with our custom algorithm.
     fn build_cose(&self, claim_bytes: &[u8]) -> c2pa::Result<Vec<u8>> {
         use coset::TaggedCborSerializable;
-        
-        // Get certificate chain
-        let certs = self.certs()?;
-        let x5chain = if certs.len() == 1 {
-            CborValue::Bytes(certs[0].clone())
-        } else {
-            CborValue::Array(certs.into_iter().map(CborValue::Bytes).collect())
-        };
 
         // ZK extension map with circuit info
         let zk_ext = CborValue::Map(vec![
@@ -209,12 +202,11 @@ impl ZkProofSigner {
             (CborValue::Text("version".into()), CborValue::Text(crate::ASSERTION_VERSION.into())),
         ]);
 
-        // Build the protected header with private-use algorithm
+        // Build the protected header with private-use algorithm.
+        // No x5chain (header param 33): see the ZkProofSigner doc comment.
         let protected = Header {
             alg: Some(coset::Algorithm::PrivateUse(ZK_COSE_ALG)),
             rest: vec![
-                // x5chain (header param 33)
-                (coset::Label::Int(33), x5chain),
                 // crit header
                 (coset::Label::Text("crit".into()), CborValue::Array(vec![CborValue::Text(CRIT_LABEL.into())])),
                 // zk extension map
@@ -266,16 +258,13 @@ impl Signer for ZkProofSigner {
     }
 
     fn certs(&self) -> c2pa::Result<Vec<Vec<u8>>> {
-        Ok(self.cert_chain_der.clone())
+        // No certificates: the signer's identity must not appear in the output.
+        Ok(Vec::new())
     }
 
     fn reserve_size(&self) -> usize {
-        // Account for COSE overhead + proof + certs + headers + padding
-        let certs_len: usize = self.cert_chain_der.iter().map(Vec::len).sum();
-        self.proof
-            .len()
-            .saturating_add(certs_len)
-            .saturating_add(8192)
+        // Account for COSE overhead + proof + headers + padding
+        self.proof.len().saturating_add(8192)
     }
 
     fn direct_cose_handling(&self) -> bool {
@@ -299,13 +288,31 @@ pub fn extract_zk_assertion(asset_path: &Path) -> Result<X509ZkSignerProofAssert
 mod tests {
     use super::ZkProofSigner;
     use c2pa::Signer;
+    use ciborium::Value as CborValue;
 
     #[test]
-    fn zk_signer_uses_supplied_cert_chain() {
-        let cert_chain = vec![vec![1u8, 2, 3], vec![4u8, 5], vec![6u8]];
-        let signer = ZkProofSigner::new(vec![9u8, 8, 7], cert_chain.clone());
+    fn zk_signer_emits_no_certificates() {
+        let signer = ZkProofSigner::new(vec![9u8, 8, 7]);
 
-        assert_eq!(signer.certs().unwrap(), cert_chain);
-        assert!(signer.reserve_size() >= 9 + 8_192);
+        assert!(signer.certs().unwrap().is_empty());
+        assert!(signer.reserve_size() >= 3 + 8_192);
+
+        // Decode as plain CBOR: coset rejects the demo's algorithm value, which
+        // is outside the COSE private-use range.
+        let cose: CborValue = ciborium::de::from_reader(&signer.build_cose(b"claim").unwrap()[..]).unwrap();
+        let CborValue::Tag(18, sign1) = cose else { panic!("expected tagged COSE_Sign1") };
+        let CborValue::Array(fields) = *sign1 else { panic!("expected COSE_Sign1 array") };
+        let CborValue::Bytes(protected) = &fields[0] else { panic!("expected protected header bytes") };
+        let CborValue::Map(protected) = ciborium::de::from_reader(&protected[..]).unwrap() else {
+            panic!("expected protected header map")
+        };
+        let CborValue::Map(unprotected) = &fields[1] else { panic!("expected unprotected header map") };
+
+        let x5chain = CborValue::Integer(33.into());
+        assert!(
+            !protected.iter().chain(unprotected).any(|(label, _)| *label == x5chain),
+            "COSE headers must not carry an x5chain"
+        );
+        assert_eq!(fields[3], CborValue::Bytes(vec![9u8, 8, 7]));
     }
 }

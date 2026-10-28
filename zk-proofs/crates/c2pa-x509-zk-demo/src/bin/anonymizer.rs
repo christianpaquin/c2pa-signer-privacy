@@ -138,10 +138,6 @@ async fn main() -> Result<()> {
         }
         eprintln!("\n   Creating a placeholder assertion...\n");
 
-        let cert_chain_der = std::iter::once(manifest_data.leaf_cert_der.clone())
-            .chain(manifest_data.ca_certs_der.iter().cloned())
-            .collect();
-
         // Create placeholder assertion for testing the flow
         let assertion = X509ZkSignerProofAssertion::new(
             issuer_dn,
@@ -154,7 +150,7 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&assertion)?);
 
         // Try to rewrite manifest (will fail until custom signer is implemented)
-        match rewrite_manifest_with_zk_proof(&args.input, &args.output, assertion, cert_chain_der) {
+        match rewrite_manifest_with_zk_proof(&args.input, &args.output, assertion) {
             Ok(()) => println!("\n✅ Anonymized asset written to {:?}", args.output),
             Err(e) => {
                 eprintln!("\n❌ Manifest rewrite not yet implemented: {e}");
@@ -192,12 +188,8 @@ async fn main() -> Result<()> {
             proof_base64,
         );
 
-        let cert_chain_der = std::iter::once(manifest_data.leaf_cert_der.clone())
-            .chain(manifest_data.ca_certs_der.iter().cloned())
-            .collect();
-
         println!("Rewriting manifest with ZK proof...");
-        rewrite_manifest_with_zk_proof(&args.input, &args.output, assertion, cert_chain_der)?;
+        rewrite_manifest_with_zk_proof(&args.input, &args.output, assertion)?;
 
         println!("\n✅ Anonymized asset written to {:?}", args.output);
     }

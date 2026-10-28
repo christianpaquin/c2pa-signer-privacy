@@ -338,8 +338,19 @@ fn verify_fails_for_tampered_asset() {
         .stderr(predicate::str::contains("Asset binding digest mismatch"));
 }
 
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+/// Regression test for issue #6: the anonymized asset must not carry anything
+/// that identifies the signer. Scans the raw file bytes rather than relying on
+/// a C2PA parser, which can fail to decode the custom COSE structure and so
+/// report an empty certificate chain even when one is present.
 #[test]
-fn anonymized_manifest_preserves_original_cert_chain() {
+fn anonymized_asset_does_not_reveal_signer() {
+    use der::{Decode, Encode};
+    use x509_cert::Certificate;
+
     let dir = tempdir().expect("failed to create temp dir");
     let signed_path = dir.path().join("signed-alt.png");
     let anon_path = dir.path().join("anon-alt.png");
@@ -371,17 +382,39 @@ fn anonymized_manifest_preserves_original_cert_chain() {
         .success();
 
     let signed_chain = read_cert_chain_from_asset(&signed_path, false);
+    let signed_label = Reader::from_file(&signed_path)
+        .expect("failed to read signed asset")
+        .active_label()
+        .expect("signed asset has no active manifest")
+        .to_string();
     let anonymized_bytes = std::fs::read(&anon_path).expect("failed to read anonymized asset");
-    let signer_cert_der = signed_chain[0].clone();
-    let ca_cert_der = signed_chain[1].clone();
+
+    let signer_cert_der = &signed_chain[0];
+    let signer = Certificate::from_der(signer_cert_der).expect("failed to parse signer cert");
+    let tbs = &signer.tbs_certificate;
+    let signer_pubkey = tbs.subject_public_key_info.subject_public_key.raw_bytes();
+    let signer_serial = tbs.serial_number.as_bytes();
+    let signer_subject = tbs.subject.to_der().expect("failed to encode signer subject");
 
     assert!(
-        anonymized_bytes.windows(signer_cert_der.len()).any(|window| window == signer_cert_der.as_slice()),
-        "anonymized asset does not contain the alternate signer certificate"
+        !contains(&anonymized_bytes, signer_cert_der),
+        "anonymized asset contains the signer certificate"
     );
     assert!(
-        anonymized_bytes.windows(ca_cert_der.len()).any(|window| window == ca_cert_der.as_slice()),
-        "anonymized asset does not contain the alternate CA certificate"
+        !contains(&anonymized_bytes, signer_pubkey),
+        "anonymized asset contains the signer public key"
+    );
+    assert!(
+        !contains(&anonymized_bytes, signer_serial),
+        "anonymized asset contains the signer certificate serial number"
+    );
+    assert!(
+        !contains(&anonymized_bytes, &signer_subject),
+        "anonymized asset contains the signer subject DN"
+    );
+    assert!(
+        !contains(&anonymized_bytes, signed_label.as_bytes()),
+        "anonymized asset still contains the original signed manifest"
     );
 }
 

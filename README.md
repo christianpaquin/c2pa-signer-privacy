@@ -25,6 +25,10 @@ Two proof-of-concept implementations demonstrate different privacy strategies:
 | **Setup required** | None | Trusted setup (one-time) |
 | **Proof size** | ~500 bytes | ~1KB |
 
+## Roadmap
+
+The X.509 + ZK prototype is being extended toward realistic deployments (intermediate CAs, trust lists, claim binding, standards-conformant COSE encoding, and more). See the [ZK roadmap](zk-proofs/README.md#roadmap).
+
 ## Project Structure
 
 ```

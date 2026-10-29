@@ -315,11 +315,29 @@ Done for both prototypes. The COSE structures previously could not be parsed by 
 - `crit` was written under the text label `"crit"` rather than COSE header label 2, so nothing was actually marked critical.
 - The structure was padded with trailing zero bytes. Padding is now a `pad` field in the unprotected header, as `c2pa-rs` does.
 
-Result: `c2patool` now displays BBS-signed assets and reports `algorithm.unsupported`, the correct outcome for a custom algorithm. ZK-anonymized assets still fail in `c2patool`'s default (validating) mode, now with "could not find signing certificate chain": `c2pa-rs` treats a missing signing certificate as a fatal error rather than a validation failure (`get_signing_cert_serial_num` in `claim_verify.rs`). With verification disabled, `c2patool` displays the manifest. Resolving this depends on item 2 and possibly an upstream `c2pa-rs` change.
+Result: `c2patool` now displays BBS-signed assets and reports `algorithm.unsupported`, the correct outcome for a custom algorithm. ZK-anonymized assets still fail in `c2patool`'s default (validating) mode, now with "could not find signing certificate chain": `c2pa-rs` treats a missing signing certificate as a fatal error rather than a validation failure (`get_signing_cert_serial_num` in `claim_verify.rs`). With verification disabled, `c2patool` displays the manifest. Resolving this depends on item 4 and possibly an upstream `c2pa-rs` change.
 
-Both prototypes' manifests also lack a `c2pa.created` action, which `c2patool` reports as `assertion.action.malformed`; this should be fixed alongside item 3.
+Both prototypes' manifests also lack a `c2pa.created` action, which `c2patool` reports as `assertion.action.malformed`; this should be fixed alongside item 5.
 
-### 2. Intermediate CAs and verifier trust lists
+### 2. Quick circuit win: cheaper TBS binding
+
+Replace the 1536 `SelectByte` calls in the TBS binding with `VarShiftLeft` from `@zk-email/circuits` (see [TBS binding](#tbs-binding)): an estimated reduction from ~12M to ~8.3M constraints, without changing what the circuit proves. This lowers the cost of every later real-proof test run, and stays worthwhile whatever the architecture decisions below conclude.
+
+Because it changes the circuit, it also needs setup to detect a stale proving key (for example, by recording a hash of the `.r1cs` alongside the keys) instead of silently reusing keys from an older circuit.
+
+### 3. Architecture decisions
+
+Several items below depend on choices that change what the CA must do, what the circuit proves, or which proof system is used. These are laid out in [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIONS.md), to be settled before the items that depend on them:
+
+- **D1. Trust model:** existing PKI only, a CA-published accumulator, or a SNARK-friendly "twin" signature from the CA. Affects items 7 and 8.
+- **D2. Proof system:** Groth16/circom, a PLONKish system, folding, or a proof system designed for ECDSA credentials. Affects item 10 and most circuit work.
+- **D3. Curve:** BN254 (~100-bit security) or BLS12-381 (~120-bit). Follows D2.
+- **D4. Where the issuing CA chain lives.** Affects item 4.
+- **D5. How key possession is proved:** in-circuit ECDSA or an out-of-circuit Sigma protocol. Affects item 5.
+
+Item 4 can proceed in parallel once D4 is settled.
+
+### 4. Intermediate CAs and verifier trust lists
 
 Real PKIs issue end-entity certificates from intermediate CAs, which verifiers often do not hold in advance. The circuit already proves issuance by whichever CA key is a public input, so no circuit change is needed:
 
@@ -327,48 +345,51 @@ Real PKIs issue end-entity certificates from intermediate CAs, which verifiers o
 - The verifier validates that chain to a root in a trust list (a directory of anchors, or the C2PA trust list format) instead of a single `--ca` file, and checks that the issuing CA's key matches the proof's public inputs.
 - `issuer_key_id` becomes a stable key identifier (hash of the CA's SPKI, or its Subject Key Identifier) rather than a hash of the whole CA certificate, so it survives CA certificate renewal.
 
-Open design point: where the chain lives. The standard `x5chain` header requires the first certificate to be the signer's end-entity certificate, and `c2pa-rs` rejects a CA certificate in that position. Options are a CA-only `x5chain` (simple, but contradicts its defined semantics) or a dedicated field in the `c2pa-x509-zk` header map.
+Depends on decision D4 (where the chain lives): the standard `x5chain` header requires the first certificate to be the signer's end-entity certificate, and `c2pa-rs` rejects a CA certificate in that position.
 
-Privacy note: the issuing CA is disclosed by design, so the anonymity set is everyone that CA has issued certificates to. A narrowly scoped intermediate can nearly identify the signer (see item 7).
+Privacy note: the issuing CA is disclosed by design, so the anonymity set is everyone that CA has issued certificates to. A narrowly scoped intermediate can nearly identify the signer (see item 9).
 
-### 3. Bind the proof to the C2PA claim
+### 5. Bind the proof to the C2PA claim
 
 The proof currently binds to a digest of the asset bytes with the manifest stripped, so nothing authenticates the rest of the manifest: other assertions can be changed without detection. The proof's public input should instead be the hash of the new claim, which already covers every assertion, including the hard binding to the asset bytes. The verifier can then re-enable standard `c2pa-rs` assertion and hash validation and only substitute the signature check.
 
-### 4. Meaningful timestamps
+Related: decision D5 (an out-of-circuit Sigma protocol for key possession would carry this binding instead of the in-circuit signature), and the missing `c2pa.created` action noted under item 1.
+
+### 6. Meaningful timestamps
 
 The `photoTimestamp` public input is chosen by the prover and ignored by the verifier, so a proof shows only that the certificate was valid at *some* time the prover picked, which an expired certificate can satisfy. The verifier should enforce a policy (for example, "within N hours of now" at anonymization time), and the timestamp should be anchored to an RFC 3161 time-stamp authority rather than self-reported.
 
-### 5. Full certificate validation in the circuit
+### 7. Full certificate validation in the circuit
 
 Complete the RFC 5280 / C2PA certificate-profile checks listed under [Pending](#zk-proof-statement): certificate version, signature algorithm OID, key usage, `CA:FALSE`, and the C2PA / document-signing EKU. Without these, any certificate the CA has issued (including a CA certificate) can produce a valid proof.
 
-### 6. Revocation
+Depends on decision D1: with a CA-published accumulator, the CA validates certificates when it builds the root, and most of this item becomes unnecessary.
 
-Support revoked or compromised signer keys, either through short-lived certificates or through a CA-published accumulator of valid keys (see [CA-published accumulator](#ca-published-accumulator-of-issued-spkis)). The accumulator approach also removes most of the circuit's cost.
+### 8. Revocation
 
-### 7. Hiding the issuing CA among a trusted set
+Support revoked or compromised signer keys, either through short-lived certificates or through a CA-published accumulator of valid keys (see [CA-published accumulator](#ca-published-accumulator-of-issued-spkis)). The accumulator approach also removes most of the circuit's cost. Depends on decision D1.
+
+### 9. Hiding the issuing CA among a trusted set
 
 As the blog post suggests, prove membership of the issuing CA's key in a published set of trusted CAs (for example, a Merkle root over a trust list) instead of disclosing which CA issued the certificate. This enlarges the anonymity set beyond a single, possibly small, intermediate.
 
-### 8. Production proving setup and performance
+### 10. Production proving setup and performance
 
-Replace the single-party local setup with a multi-party ceremony (or a proof system without a circuit-specific trusted setup), and apply the [optimisations](#potential-optimisations) above to bring proving time to something a signer will accept.
+Depends on decisions D2 and D3. Replace the single-party local setup with a multi-party ceremony, or adopt a proof system without a circuit-specific trusted setup, and bring proving time and memory to something a signer will accept. The remaining [optimisations](#potential-optimisations) (Efficient ECDSA, after a soundness review; folding; public-input compression) apply here if the circom/Groth16 stack is kept.
 
-### 9. Anonymizing without the signer's private key
+### 11. Anonymizing without the signer's private key
 
 The anonymizer currently re-signs the asset digest with the signer's key, so it must run on the signer's side. Supporting a third-party anonymizer would require proving, in-circuit, the validity of the *original* COSE signature over the original claim. This is a research item: it involves hashing the full claim in-circuit and deciding what happens to the original claim's contents.
 
-### 10. Metadata privacy beyond the signature
+### 12. Metadata privacy beyond the signature
 
 Removing the certificate is necessary but not sufficient. The anonymizer should also check or scrub other identifying data: the claim generator and manifest identifiers, ingredients, and the asset's own metadata (for example EXIF camera serial numbers and GPS). The regression test for [#6](https://github.com/christianpaquin/c2pa-signer-privacy/issues/6) (`anonymized_asset_does_not_reveal_signer`) should be extended as each source is addressed.
 
-### 11. Build, setup, and test infrastructure
+### 13. Build, setup, and test infrastructure
 
 - Generate test PKI at test time rather than relying on committed certificates with short validity periods.
 - Run the placeholder-mode suite in CI, and periodically run the full real-proof end-to-end test (it needs ~28 GB of RAM).
 - Fix key distribution. The committed `x509_issue_and_possession_native.vk` is not usable on its own: the matching proving key is not committed, so every user who runs setup generates new random keys and overwrites it. Either publish both keys from a single setup (the proving key is ~2.4 GB), or stop committing the verifying key.
-- Make setup detect a stale proving key (for example, by recording a hash of the `.r1cs` alongside the keys) instead of silently reusing keys from an older circuit.
 - Bring `circuits/build.sh` in line with the working steps above. It currently uses a snarkjs/pot20 flow that is too small for this circuit and omits the include paths.
 
 ## Toolchain

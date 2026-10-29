@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use c2pa::{hash_stream_by_alg, Builder, Reader, SigningAlg, Signer};
 use ciborium::Value as CborValue;
-use coset::{CoseSign1Builder, Header, TaggedCborSerializable};
+use coset::{CoseSign1, CoseSign1Builder, Header, TaggedCborSerializable};
 use pairing_crypto::bbs::ciphersuites::bls12_381::{
     KeyPair as BbsKeyPair,
     BBS_BLS12381G1_PUBLIC_KEY_LENGTH,
@@ -362,19 +362,24 @@ struct BbsProofSigner {
     public_key: Vec<u8>,
 }
 
-/// Private-use COSE algorithm value for BBS (BLS12-381, SHA-256).
-const BBS_COSE_ALG: i64 = -65535;
+/// COSE algorithm value for BBS (BLS12-381, SHA-256), in the private-use
+/// range (below -65536).
+const BBS_COSE_ALG: i64 = -65537;
 /// Critical header label for BBS extension.
 const CRIT_LABEL: &str = "c2pa-bbs";
+/// Unprotected header labels used to pad the COSE structure, as in c2pa-rs.
+const PAD_LABEL: &str = "pad";
+const PAD2_LABEL: &str = "pad2";
 
 impl BbsProofSigner {
     fn new(proof: Vec<u8>, public_key: Vec<u8>) -> Self {
         Self { proof, public_key }
     }
 
-    /// Build a COSE_Sign1 structure with our custom algorithm.
-    fn build_cose(&self, claim_bytes: &[u8]) -> c2pa::Result<Vec<u8>> {
-        // Protected header: alg = -65535, crit = ["c2pa-bbs"], x5chain, c2pa-bbs map.
+    /// Build a COSE_Sign1 structure with our custom algorithm, padded to
+    /// exactly `end_size` bytes.
+    fn build_cose(&self, claim_bytes: &[u8], end_size: usize) -> c2pa::Result<Vec<u8>> {
+        // Protected header: alg = BBS_COSE_ALG, crit = ["c2pa-bbs"], x5chain, c2pa-bbs map.
         let certs = self.certs()?;
         let x5chain = if certs.len() == 1 {
             CborValue::Bytes(certs[0].clone())
@@ -390,52 +395,73 @@ impl BbsProofSigner {
         ]);
 
         // Build the protected header manually to set the private-use algorithm.
+        // The extension is marked critical (COSE `crit`, label 2), so verifiers
+        // that don't understand it must reject the signature.
         let protected = Header {
             alg: Some(coset::Algorithm::PrivateUse(BBS_COSE_ALG)),
+            crit: vec![coset::RegisteredLabel::Text(CRIT_LABEL.into())],
             rest: vec![
                 // x5chain (header param 33)
                 (coset::Label::Int(33), x5chain),
-                // crit header
-                (coset::Label::Text("crit".into()), CborValue::Array(vec![CborValue::Text(CRIT_LABEL.into())])),
                 // c2pa-bbs map
                 (coset::Label::Text(CRIT_LABEL.into()), bbs_ext),
             ],
             ..Default::default()
         };
 
-        let sign1 = CoseSign1Builder::new()
+        let mut sign1 = CoseSign1Builder::new()
             .protected(protected)
             .payload(claim_bytes.to_vec())
             .create_signature(&[], |_| self.proof.clone())
             .build();
 
-        // Remove payload (detached) and serialize as tagged.
-        let mut sign1_detached = sign1;
-        sign1_detached.payload = None;
-        sign1_detached
-            .to_tagged_vec()
-            .map_err(|e| c2pa::Error::OtherError(Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("{e:?}")))))
+        // Detached payload, as in standard C2PA signatures.
+        sign1.payload = None;
+        pad_cose_sign1(sign1, end_size)
+            .map_err(|msg| c2pa::Error::OtherError(Box::new(std::io::Error::new(std::io::ErrorKind::Other, msg))))
     }
+}
+
+/// Serialize `sign1` padded to exactly `end_size` bytes (c2pa-rs requires the
+/// signature to fill its reserved space). The padding goes in a `pad` byte
+/// string in the unprotected header, as c2pa-rs does, rather than as trailing
+/// bytes, which strict COSE parsers reject.
+fn pad_cose_sign1(sign1: CoseSign1, end_size: usize) -> std::result::Result<Vec<u8>, String> {
+    // A CBOR byte string's length prefix grows at 24 and 256 bytes, so a single
+    // pad cannot hit sizes just past those boundaries. An empty second pad
+    // (`pad2`) shifts the required pad length away from the boundary.
+    for pad2 in [false, true] {
+        let serialize = |pad_len: usize| {
+            let mut padded = sign1.clone();
+            let rest = &mut padded.unprotected.rest;
+            rest.push((coset::Label::Text(PAD_LABEL.into()), CborValue::Bytes(vec![0u8; pad_len])));
+            if pad2 {
+                rest.push((coset::Label::Text(PAD2_LABEL.into()), CborValue::Bytes(Vec::new())));
+            }
+            padded.to_tagged_vec().map_err(|e| format!("{e:?}"))
+        };
+
+        // The pad entry adds its label and a length prefix on top of the
+        // padding itself, so search just below the raw size gap.
+        let Some(gap) = end_size.checked_sub(serialize(0)?.len()) else {
+            continue;
+        };
+        for pad_len in (gap.saturating_sub(16)..=gap).rev() {
+            let cose = serialize(pad_len)?;
+            if cose.len() == end_size {
+                return Ok(cose);
+            }
+        }
+    }
+    Err(format!("cannot pad COSE structure to exactly {end_size} bytes"))
 }
 
 impl Signer for BbsProofSigner {
     fn sign(&self, data: &[u8]) -> c2pa::Result<Vec<u8>> {
         // When direct_cose_handling is true, `data` is the claim bytes and we
         // return the full COSE_Sign1 structure.
-        let cose = self.build_cose(data)?;
-        
-        // c2pa-rs expects the signature to be EXACTLY reserve_size bytes (padded).
-        if cose.len() > self.reserve_size() {
-            return Err(c2pa::Error::OtherError(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("COSE structure {} > reserve_size {}", cose.len(), self.reserve_size()),
-            ))));
-        }
-        
-        // Pad to exact reserve_size (c2pa-rs requires this).
-        let mut padded = cose;
-        padded.resize(self.reserve_size(), 0);
-        Ok(padded)
+        // c2pa-rs expects the signature to be EXACTLY reserve_size bytes.
+        self.build_cose(data, self.reserve_size())
     }
 
     fn alg(&self) -> SigningAlg {
@@ -533,4 +559,45 @@ fn decode_credential_signature(signature: &str) -> Result<Vec<u8>> {
     BASE64_STANDARD
         .decode(signature)
         .map_err(|err| anyhow!("invalid base64 credential signature: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BbsProofSigner, BBS_COSE_ALG, CRIT_LABEL, PAD_LABEL};
+    use c2pa::Signer;
+    use coset::{CoseSign1, TaggedCborSerializable};
+
+    #[test]
+    fn bbs_signer_emits_conformant_cose() {
+        let proof = vec![9u8; 300];
+        let signer = BbsProofSigner::new(proof.clone(), vec![7u8; 96]);
+        let bytes = signer.sign(b"claim").unwrap();
+
+        // Exactly fills the reserved space, with no trailing bytes: strict
+        // parsing rejects both trailing data and non-private-use algorithms.
+        assert_eq!(bytes.len(), signer.reserve_size());
+        let cose = CoseSign1::from_tagged_slice(&bytes).unwrap();
+
+        assert!(BBS_COSE_ALG < coset::iana::ALGORITHM_PRIVATE_USE_MAX);
+        assert_eq!(cose.protected.header.alg, Some(coset::Algorithm::PrivateUse(BBS_COSE_ALG)));
+        assert_eq!(cose.protected.header.crit, vec![coset::RegisteredLabel::Text(CRIT_LABEL.into())]);
+        assert!(cose.protected.header.rest.iter().any(|(label, _)| *label == coset::Label::Text(CRIT_LABEL.into())));
+        assert!(cose.unprotected.rest.iter().any(|(label, _)| *label == coset::Label::Text(PAD_LABEL.into())));
+        assert_eq!(cose.payload, None);
+        assert_eq!(cose.signature, proof);
+    }
+
+    #[test]
+    fn pad_cose_sign1_hits_every_size() {
+        let signer = BbsProofSigner::new(vec![9u8, 8, 7], vec![7u8; 96]);
+        // The structure cannot shrink below its size with an empty pad.
+        let min_size = (0..).find(|&n| signer.build_cose(b"claim", n).is_ok()).unwrap();
+        // Every larger size is reachable, including across the CBOR
+        // length-prefix boundaries at 24 and 256 bytes of padding.
+        for end_size in min_size..min_size + 400 {
+            let bytes = signer.build_cose(b"claim", end_size).unwrap();
+            assert_eq!(bytes.len(), end_size);
+            CoseSign1::from_tagged_slice(&bytes).unwrap();
+        }
+    }
 }

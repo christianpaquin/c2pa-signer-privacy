@@ -27,7 +27,7 @@ Two proof-of-concept implementations demonstrate different privacy strategies:
 
 ## Roadmap
 
-The X.509 + ZK prototype is being extended toward realistic deployments (intermediate CAs, trust lists, claim binding, standards-conformant COSE encoding, and more). See the [ZK roadmap](zk-proofs/README.md#roadmap).
+The X.509 + ZK prototype is being extended toward realistic deployments (a faster circuit, intermediate CAs and trust lists, claim binding, and more), with the key architecture choices laid out in [ARCHITECTURE-DECISIONS.md](zk-proofs/ARCHITECTURE-DECISIONS.md). See the [ZK roadmap](zk-proofs/README.md#roadmap).
 
 ## Project Structure
 

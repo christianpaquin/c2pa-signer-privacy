@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Result};
 use base64::Engine;
 use c2pa::{hash_stream_by_alg, Reader, Builder, Signer, SigningAlg};
 use ciborium::Value as CborValue;
-use coset::{CoseSign1Builder, Header};
+use coset::{CoseSign1, CoseSign1Builder, Header, TaggedCborSerializable};
 use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::Path;
@@ -173,10 +173,13 @@ pub fn rewrite_manifest_with_zk_proof(
     Ok(())
 }
 
-/// Private-use COSE algorithm value for ZK proofs.
-const ZK_COSE_ALG: i64 = -65534;  // Different from BBS (-65535)
+/// COSE algorithm value for ZK proofs, in the private-use range (below -65536).
+const ZK_COSE_ALG: i64 = -65538;  // Different from BBS (-65537)
 /// Critical header label for ZK extension.
 const CRIT_LABEL: &str = "c2pa-x509-zk";
+/// Unprotected header labels used to pad the COSE structure, as in c2pa-rs.
+const PAD_LABEL: &str = "pad";
+const PAD2_LABEL: &str = "pad2";
 
 /// Custom signer that outputs a COSE_Sign1 with our ZK proof.
 ///
@@ -191,10 +194,9 @@ impl ZkProofSigner {
         Self { proof }
     }
 
-    /// Build a COSE_Sign1 structure with our custom algorithm.
-    fn build_cose(&self, claim_bytes: &[u8]) -> c2pa::Result<Vec<u8>> {
-        use coset::TaggedCborSerializable;
-
+    /// Build a COSE_Sign1 structure with our custom algorithm, padded to
+    /// exactly `end_size` bytes.
+    fn build_cose(&self, claim_bytes: &[u8], end_size: usize) -> c2pa::Result<Vec<u8>> {
         // ZK extension map with circuit info
         let zk_ext = CborValue::Map(vec![
             (CborValue::Text("circuit".into()), CborValue::Text(crate::CIRCUIT_ID.into())),
@@ -202,54 +204,70 @@ impl ZkProofSigner {
             (CborValue::Text("version".into()), CborValue::Text(crate::ASSERTION_VERSION.into())),
         ]);
 
-        // Build the protected header with private-use algorithm.
+        // Build the protected header with private-use algorithm. The extension
+        // is marked critical (COSE `crit`, label 2), so verifiers that don't
+        // understand it must reject the signature.
         // No x5chain (header param 33): see the ZkProofSigner doc comment.
         let protected = Header {
             alg: Some(coset::Algorithm::PrivateUse(ZK_COSE_ALG)),
-            rest: vec![
-                // crit header
-                (coset::Label::Text("crit".into()), CborValue::Array(vec![CborValue::Text(CRIT_LABEL.into())])),
-                // zk extension map
-                (coset::Label::Text(CRIT_LABEL.into()), zk_ext),
-            ],
+            crit: vec![coset::RegisteredLabel::Text(CRIT_LABEL.into())],
+            rest: vec![(coset::Label::Text(CRIT_LABEL.into()), zk_ext)],
             ..Default::default()
         };
 
-        let sign1 = CoseSign1Builder::new()
+        let mut sign1 = CoseSign1Builder::new()
             .protected(protected)
             .payload(claim_bytes.to_vec())
             .create_signature(&[], |_| self.proof.clone())
             .build();
 
-        // Remove payload (detached) and serialize as tagged
-        let mut sign1_detached = sign1;
-        sign1_detached.payload = None;
-        sign1_detached
-            .to_tagged_vec()
-            .map_err(|e| c2pa::Error::OtherError(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other, 
-                format!("{e:?}")
-            ))))
+        // Detached payload, as in standard C2PA signatures
+        sign1.payload = None;
+        pad_cose_sign1(sign1, end_size).map_err(|msg| {
+            c2pa::Error::OtherError(Box::new(std::io::Error::new(std::io::ErrorKind::Other, msg)))
+        })
     }
+}
+
+/// Serialize `sign1` padded to exactly `end_size` bytes (c2pa-rs requires the
+/// signature to fill its reserved space). The padding goes in a `pad` byte
+/// string in the unprotected header, as c2pa-rs does, rather than as trailing
+/// bytes, which strict COSE parsers reject.
+fn pad_cose_sign1(sign1: CoseSign1, end_size: usize) -> Result<Vec<u8>, String> {
+    // A CBOR byte string's length prefix grows at 24 and 256 bytes, so a single
+    // pad cannot hit sizes just past those boundaries. An empty second pad
+    // (`pad2`) shifts the required pad length away from the boundary.
+    for pad2 in [false, true] {
+        let serialize = |pad_len: usize| {
+            let mut padded = sign1.clone();
+            let rest = &mut padded.unprotected.rest;
+            rest.push((coset::Label::Text(PAD_LABEL.into()), CborValue::Bytes(vec![0u8; pad_len])));
+            if pad2 {
+                rest.push((coset::Label::Text(PAD2_LABEL.into()), CborValue::Bytes(Vec::new())));
+            }
+            padded.to_tagged_vec().map_err(|e| format!("{e:?}"))
+        };
+
+        // The pad entry adds its label and a length prefix on top of the
+        // padding itself, so search just below the raw size gap.
+        let Some(gap) = end_size.checked_sub(serialize(0)?.len()) else {
+            continue;
+        };
+        for pad_len in (gap.saturating_sub(16)..=gap).rev() {
+            let cose = serialize(pad_len)?;
+            if cose.len() == end_size {
+                return Ok(cose);
+            }
+        }
+    }
+    Err(format!("cannot pad COSE structure to exactly {end_size} bytes"))
 }
 
 impl Signer for ZkProofSigner {
     fn sign(&self, data: &[u8]) -> c2pa::Result<Vec<u8>> {
-        // When direct_cose_handling is true, `data` is the claim bytes
-        let cose = self.build_cose(data)?;
-        
-        // c2pa-rs expects the signature to be EXACTLY reserve_size bytes
-        if cose.len() > self.reserve_size() {
-            return Err(c2pa::Error::OtherError(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("COSE structure {} > reserve_size {}", cose.len(), self.reserve_size()),
-            ))));
-        }
-        
-        // Pad to exact reserve_size
-        let mut padded = cose;
-        padded.resize(self.reserve_size(), 0);
-        Ok(padded)
+        // When direct_cose_handling is true, `data` is the claim bytes.
+        // c2pa-rs expects the signature to be EXACTLY reserve_size bytes.
+        self.build_cose(data, self.reserve_size())
     }
 
     fn alg(&self) -> SigningAlg {
@@ -286,33 +304,54 @@ pub fn extract_zk_assertion(asset_path: &Path) -> Result<X509ZkSignerProofAssert
 
 #[cfg(test)]
 mod tests {
-    use super::ZkProofSigner;
+    use super::{ZkProofSigner, CRIT_LABEL, PAD_LABEL, ZK_COSE_ALG};
     use c2pa::Signer;
-    use ciborium::Value as CborValue;
+    use coset::{CoseSign1, TaggedCborSerializable};
 
     #[test]
     fn zk_signer_emits_no_certificates() {
         let signer = ZkProofSigner::new(vec![9u8, 8, 7]);
-
         assert!(signer.certs().unwrap().is_empty());
-        assert!(signer.reserve_size() >= 3 + 8_192);
 
-        // Decode as plain CBOR: coset rejects the demo's algorithm value, which
-        // is outside the COSE private-use range.
-        let cose: CborValue = ciborium::de::from_reader(&signer.build_cose(b"claim").unwrap()[..]).unwrap();
-        let CborValue::Tag(18, sign1) = cose else { panic!("expected tagged COSE_Sign1") };
-        let CborValue::Array(fields) = *sign1 else { panic!("expected COSE_Sign1 array") };
-        let CborValue::Bytes(protected) = &fields[0] else { panic!("expected protected header bytes") };
-        let CborValue::Map(protected) = ciborium::de::from_reader(&protected[..]).unwrap() else {
-            panic!("expected protected header map")
-        };
-        let CborValue::Map(unprotected) = &fields[1] else { panic!("expected unprotected header map") };
-
-        let x5chain = CborValue::Integer(33.into());
+        let cose = CoseSign1::from_tagged_slice(&signer.sign(b"claim").unwrap()).unwrap();
+        let x5chain = coset::Label::Int(33);
         assert!(
-            !protected.iter().chain(unprotected).any(|(label, _)| *label == x5chain),
+            !cose.protected.header.rest.iter().chain(&cose.unprotected.rest).any(|(label, _)| *label == x5chain),
             "COSE headers must not carry an x5chain"
         );
-        assert_eq!(fields[3], CborValue::Bytes(vec![9u8, 8, 7]));
+    }
+
+    #[test]
+    fn zk_signer_emits_conformant_cose() {
+        let proof = vec![9u8; 1000];
+        let signer = ZkProofSigner::new(proof.clone());
+        let bytes = signer.sign(b"claim").unwrap();
+
+        // Exactly fills the reserved space, with no trailing bytes: strict
+        // parsing rejects both trailing data and non-private-use algorithms.
+        assert_eq!(bytes.len(), signer.reserve_size());
+        let cose = CoseSign1::from_tagged_slice(&bytes).unwrap();
+
+        assert!(ZK_COSE_ALG < coset::iana::ALGORITHM_PRIVATE_USE_MAX);
+        assert_eq!(cose.protected.header.alg, Some(coset::Algorithm::PrivateUse(ZK_COSE_ALG)));
+        assert_eq!(cose.protected.header.crit, vec![coset::RegisteredLabel::Text(CRIT_LABEL.into())]);
+        assert!(cose.protected.header.rest.iter().any(|(label, _)| *label == coset::Label::Text(CRIT_LABEL.into())));
+        assert!(cose.unprotected.rest.iter().any(|(label, _)| *label == coset::Label::Text(PAD_LABEL.into())));
+        assert_eq!(cose.payload, None);
+        assert_eq!(cose.signature, proof);
+    }
+
+    #[test]
+    fn pad_cose_sign1_hits_every_size() {
+        let signer = ZkProofSigner::new(vec![9u8, 8, 7]);
+        // The structure cannot shrink below its size with an empty pad.
+        let min_size = (0..).find(|&n| signer.build_cose(b"claim", n).is_ok()).unwrap();
+        // Every larger size is reachable, including across the CBOR
+        // length-prefix boundaries at 24 and 256 bytes of padding.
+        for end_size in min_size..min_size + 400 {
+            let bytes = signer.build_cose(b"claim", end_size).unwrap();
+            assert_eq!(bytes.len(), end_size);
+            CoseSign1::from_tagged_slice(&bytes).unwrap();
+        }
     }
 }

@@ -102,8 +102,8 @@ The `holder_secret_key` is the holder's BLS secret key used for holder binding (
 
 ### COSE Integration
 
-- Custom algorithm: `alg = -65535`
-- Critical header: `crit = ["c2pa-bbs"]`
+- Custom algorithm: `alg = -65537`, in the COSE private-use range (below -65536)
+- Critical header: `crit = ["c2pa-bbs"]` (COSE header label 2)
 - Issuer BBS public key embedded in the assertion and COSE extension for verifier self-sufficiency
 
 ## Cryptographic Details
@@ -143,15 +143,17 @@ This prototype keeps the usual C2PA manifest structure and replaces the conventi
 
 The demo signer emits a `COSE_Sign1_Tagged` object with:
 
-- `alg = -65535` as a private-use BBS algorithm identifier
-- `crit = ["c2pa-bbs"]` so verifiers know an extension is required
+- `alg = -65537` as a private-use BBS algorithm identifier
+- `crit = ["c2pa-bbs"]` (COSE header label 2) so verifiers that don't understand the extension must reject the signature
 - `x5chain` carrying the demo X.509 certificate chain required by `c2pa-rs`
 - a `c2pa-bbs` extension map containing:
   - `scheme = "bbs"`
   - `version = "0.1"`
   - `issuer_public_key = <raw BBS issuer public key bytes>`
 
-The COSE signature field contains the BBS proof bytes. The payload is detached in the usual C2PA style.
+The COSE signature field contains the BBS proof bytes. The payload is detached in the usual C2PA style. A `pad` byte string in the unprotected header fills the space `c2pa-rs` reserves for the signature, as `c2pa-rs` does for its own signatures.
+
+`c2patool` displays BBS-signed assets and reports `algorithm.unsupported`, since standard verifiers cannot check the BBS proof.
 
 ### How BBS Works
 

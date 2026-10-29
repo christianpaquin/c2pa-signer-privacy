@@ -213,9 +213,10 @@ Measured on a 20-core machine with 31 GB of RAM (WSL2). Expect different times o
 
 ### COSE Integration
 
-- Custom algorithm: `alg = -65534` (experimental range)
-- Critical header: `crit = ["c2pa-x509-zk"]`
+- Custom algorithm: `alg = -65538`, in the COSE private-use range (below -65536)
+- Critical header: `crit = ["c2pa-x509-zk"]` (COSE header label 2), so verifiers that don't understand the extension must reject the signature
 - Extension map with circuit metadata
+- Padding: a `pad` byte string in the unprotected header fills the space `c2pa-rs` reserves for the signature, as `c2pa-rs` does for its own signatures
 - No `x5chain`: the anonymized output carries no certificates. Embedding the signer's leaf certificate would reveal the identity the proof hides, and the verifier supplies the trusted CA certificate itself (`--ca`). Thanks to Iman Attia (EBU) for reporting the earlier leak ([#6](https://github.com/christianpaquin/c2pa-signer-privacy/issues/6)).
 
 ## Building Circuits
@@ -306,14 +307,17 @@ cargo test --release
 
 The goal is to move this prototype from a demo toward something that works in realistic deployments, with stronger security and privacy guarantees. Each item below is planned as its own PR, roughly in this order.
 
-### 1. Standards-conformant COSE encoding
+### 1. Standards-conformant COSE encoding ✅
 
-Today's anonymized assets cannot be parsed by standard COSE/C2PA tooling (`c2patool` reports "No C2PA Manifests"), for two reasons:
+Done for both prototypes. The COSE structures previously could not be parsed by strict COSE parsers, including the one in `c2pa-rs`:
 
-- The algorithm identifiers are not in the COSE private-use range (values below -65536). `-65534` is registered by IANA as `A128CTR`, and the BBS prototype's `-65535` as `RS1`. Both prototypes should move to private-use values.
-- The COSE structure is padded with trailing zero bytes, which strict parsers reject. `c2pa-rs` instead pads its own signatures with a `pad` field in the unprotected header; this prototype should do the same.
+- The algorithm identifiers were not in the COSE private-use range: `-65534` is registered by IANA as `A128CTR`, and the BBS prototype's `-65535` as `RS1`. They are now `-65538` (ZK) and `-65537` (BBS).
+- `crit` was written under the text label `"crit"` rather than COSE header label 2, so nothing was actually marked critical.
+- The structure was padded with trailing zero bytes. Padding is now a `pad` field in the unprotected header, as `c2pa-rs` does.
 
-The custom algorithm will still not be *verified* by standard tools, but it will be readable and reported as unsupported rather than invisible.
+Result: `c2patool` now displays BBS-signed assets and reports `algorithm.unsupported`, the correct outcome for a custom algorithm. ZK-anonymized assets still fail in `c2patool`'s default (validating) mode, now with "could not find signing certificate chain": `c2pa-rs` treats a missing signing certificate as a fatal error rather than a validation failure (`get_signing_cert_serial_num` in `claim_verify.rs`). With verification disabled, `c2patool` displays the manifest. Resolving this depends on item 2 and possibly an upstream `c2pa-rs` change.
+
+Both prototypes' manifests also lack a `c2pa.created` action, which `c2patool` reports as `assertion.action.malformed`; this should be fixed alongside item 3.
 
 ### 2. Intermediate CAs and verifier trust lists
 

@@ -11,6 +11,17 @@ include "./sha_bytes.circom";
  * pattern: the prover computes byte offsets off-circuit and supplies them as
  * private inputs; the circuit verifies the DER tags/lengths at those positions.
  *
+ * Every offset must also be pinned inside the TBSCertificate, the only bytes
+ * the CA signed.  certDer is entirely prover-supplied, so a field that is
+ * merely "somewhere in certDer" can be forged: a prover could append their own
+ * key after a genuine certificate and point spkiXOffset at it.  The SPKI and
+ * Validity fields are therefore checked to (1) carry their exact DER encoding
+ * and (2) lie within [tbsOffset + 4, tbsOffset + 4 + tbsLen).
+ *
+ * This is not a full DER walk of the TBS: a byte sequence matching the SPKI or
+ * Validity encoding inside another TBS field (e.g. an extension) would also be
+ * accepted.  Exploiting that requires the CA to have signed such content.
+ *
  * Outputs:
  *   spkiX[k], spkiY[k]   — subject EC public key (for claim-sig check, Step 4)
  *   tbsHashBits[256]      — SHA-256(TBSCertificate) bits (for CA sig, Step 2)
@@ -42,7 +53,9 @@ include "./sha_bytes.circom";
  *   length as tbsHashPaddedLen.
  *
  * Constraint budget (n=43, k=6, maxCertBytes=1500):
- *   DER tag/length checks (7 × SelectByte):   ~31,500
+ *   DER tag/length checks (4 × SelectByte):   ~18,000
+ *   SPKI/Validity placement (35 × SelectByte
+ *     + offset range checks):                 ~157,600
  *   SPKI byte extraction  (64 × SelectByte):  ~288,000
  *   TBS byte extraction   (1536 × SelectByte):~6,912,000  ← dominates
  *   BytesToRegisters (×3):                    ~1,542
@@ -155,6 +168,108 @@ template BitsToRegisters(n, k) {
 }
 
 // ---------------------------------------------------------------------------
+// AssertLessEq — enforce a <= b.
+//
+// Sound only when both inputs are known to be small (here: offsets range-
+// checked to 11 bits).  If a > b, then b - a wraps to a field element close to
+// p, which does not fit in `bits` bits, so Num2Bits fails.
+// ---------------------------------------------------------------------------
+template AssertLessEq(bits) {
+    signal input a;
+    signal input b;
+
+    component diff = Num2Bits(bits);
+    diff.in <== b - a;
+}
+
+// ---------------------------------------------------------------------------
+// P256SpkiInRegion — pin the subject public key to a real P-256
+// SubjectPublicKeyInfo inside [regionStart, regionEnd).
+//
+// The 27 bytes before spkiXOffset must be the fixed DER encoding of a P-256
+// SPKI up to the uncompressed-point marker:
+//   30 59                      SubjectPublicKeyInfo SEQUENCE (89 bytes)
+//     30 13                    AlgorithmIdentifier SEQUENCE
+//       06 07 2A8648CE3D0201   OID id-ecPublicKey
+//       06 08 2A8648CE3D030107 OID prime256v1
+//     03 42 00 04              BIT STRING (66 bytes), no unused bits, 0x04
+// followed by the 64 bytes of X || Y.  The whole 91-byte field must lie in
+// the region.
+// ---------------------------------------------------------------------------
+template P256SpkiInRegion(maxBytes) {
+    signal input bytes[maxBytes];
+    signal input spkiXOffset;   // first X byte
+    signal input regionStart;   // inclusive
+    signal input regionEnd;     // exclusive
+
+    var PREFIX_LEN = 27;
+    var prefix[27] = [
+        48, 89, 48, 19,                     // 30 59 30 13
+        6, 7, 42, 134, 72, 206, 61, 2, 1,   // 06 07 2A 86 48 CE 3D 02 01
+        6, 8, 42, 134, 72, 206, 61, 3, 1, 7, // 06 08 2A 86 48 CE 3D 03 01 07
+        3, 66, 0, 4                         // 03 42 00 04
+    ];
+
+    component startOk = AssertLessEq(12);
+    startOk.a <== regionStart;
+    startOk.b <== spkiXOffset - PREFIX_LEN;
+
+    component endOk = AssertLessEq(12);
+    endOk.a <== spkiXOffset + 64;
+    endOk.b <== regionEnd;
+
+    component sel[PREFIX_LEN];
+    for (var i = 0; i < PREFIX_LEN; i++) {
+        sel[i] = SelectByte(maxBytes);
+        for (var j = 0; j < maxBytes; j++) sel[i].bytes[j] <== bytes[j];
+        sel[i].idx <== spkiXOffset - PREFIX_LEN + i;
+        sel[i].out === prefix[i];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ValidityInRegion — pin notBefore/notAfter to a real Validity field inside
+// [regionStart, regionEnd).
+//
+//   30 1E                      Validity SEQUENCE (30 bytes)
+//     17 0D YYMMDDHHMMSS 5A    notBefore UTCTime   ← notBeforeOffset
+//     17 0D YYMMDDHHMMSS 5A    notAfter  UTCTime   ← notAfterOffset
+//
+// notAfter must immediately follow notBefore, and the whole 32-byte field
+// must lie in the region.  GeneralizedTime (dates from 2050) is not supported.
+// ---------------------------------------------------------------------------
+template ValidityInRegion(maxBytes) {
+    signal input bytes[maxBytes];
+    signal input notBeforeOffset;   // notBefore UTCTime tag
+    signal input notAfterOffset;    // notAfter  UTCTime tag
+    signal input regionStart;       // inclusive
+    signal input regionEnd;         // exclusive
+
+    notAfterOffset === notBeforeOffset + 15;
+
+    component startOk = AssertLessEq(12);
+    startOk.a <== regionStart;
+    startOk.b <== notBeforeOffset - 2;
+
+    component endOk = AssertLessEq(12);
+    endOk.a <== notBeforeOffset + 30;
+    endOk.b <== regionEnd;
+
+    // (position relative to notBeforeOffset, expected byte)
+    var NUM_FIXED = 8;
+    var fixedPos[8] = [-2, -1,  0,  1, 14, 15, 16, 29];
+    var fixedVal[8] = [48, 30, 23, 13, 90, 23, 13, 90];
+
+    component sel[NUM_FIXED];
+    for (var i = 0; i < NUM_FIXED; i++) {
+        sel[i] = SelectByte(maxBytes);
+        for (var j = 0; j < maxBytes; j++) sel[i].bytes[j] <== bytes[j];
+        sel[i].idx <== notBeforeOffset + fixedPos[i];
+        sel[i].out === fixedVal[i];
+    }
+}
+
+// ---------------------------------------------------------------------------
 // X509Parse — main parser template.
 //
 // maxTbsPadded must equal the next multiple of 64 ≥ (maxCertBytes - 16).
@@ -229,38 +344,42 @@ template X509Parse(maxCertBytes, maxTbsPadded, n, k) {
     signal declaredTbsLen <== selTbsMSB.out * 256 + selTbsLSB.out;
     declaredTbsLen === tbsLen;
 
-    // (e) notBefore UTCTime tag (0x17) at notBeforeOffset.
-    component selNbTag = SelectByte(maxCertBytes);
-    for (var i = 0; i < maxCertBytes; i++) selNbTag.bytes[i] <== certDer[i];
-    selNbTag.idx <== notBeforeOffset;
-    selNbTag.out === 23;  // 0x17 = UTCTime
+    // (e) Bound every offset so the comparisons below cannot wrap around
+    //     the field, and keep the TBS inside the certificate bytes.
+    component offsetBits[6];
+    for (var i = 0; i < 6; i++) offsetBits[i] = Num2Bits(11);   // < 2048 > maxCertBytes
+    offsetBits[0].in <== tbsOffset;
+    offsetBits[1].in <== tbsLen;
+    offsetBits[2].in <== spkiXOffset;
+    offsetBits[3].in <== notBeforeOffset;
+    offsetBits[4].in <== notAfterOffset;
+    offsetBits[5].in <== certLen;
 
-    // (f) notBefore length byte must be 0x0D (13 bytes: YYMMDDHHMMSSZ).
-    signal nbLenOff <== notBeforeOffset + 1;
-    component selNbLen = SelectByte(maxCertBytes);
-    for (var i = 0; i < maxCertBytes; i++) selNbLen.bytes[i] <== certDer[i];
-    selNbLen.idx <== nbLenOff;
-    selNbLen.out === 13;
+    signal tbsContentStart <== tbsOffset + 4;
+    signal tbsEnd <== tbsOffset + 4 + tbsLen;
 
-    // (g) notAfter UTCTime tag (0x17) at notAfterOffset.
-    component selNaTag = SelectByte(maxCertBytes);
-    for (var i = 0; i < maxCertBytes; i++) selNaTag.bytes[i] <== certDer[i];
-    selNaTag.idx <== notAfterOffset;
-    selNaTag.out === 23;  // 0x17 = UTCTime
+    component tbsInCert = AssertLessEq(12);
+    tbsInCert.a <== tbsEnd;
+    tbsInCert.b <== certLen;
 
-    // (h) notAfter length byte must be 0x0D (13 bytes).
-    signal naLenOff <== notAfterOffset + 1;
-    component selNaLen = SelectByte(maxCertBytes);
-    for (var i = 0; i < maxCertBytes; i++) selNaLen.bytes[i] <== certDer[i];
-    selNaLen.idx <== naLenOff;
-    selNaLen.out === 13;
+    component certInBuffer = AssertLessEq(12);
+    certInBuffer.a <== certLen;
+    certInBuffer.b <== maxCertBytes;
 
-    // (i) Uncompressed EC point marker 0x04 at spkiXOffset-1.
-    signal spkiMarkerOff <== spkiXOffset - 1;
-    component selMarker = SelectByte(maxCertBytes);
-    for (var i = 0; i < maxCertBytes; i++) selMarker.bytes[i] <== certDer[i];
-    selMarker.idx <== spkiMarkerOff;
-    selMarker.out === 4;  // 0x04 = uncompressed point
+    // (f) The subject public key is a P-256 SPKI inside the signed TBS.
+    component spkiPlacement = P256SpkiInRegion(maxCertBytes);
+    for (var i = 0; i < maxCertBytes; i++) spkiPlacement.bytes[i] <== certDer[i];
+    spkiPlacement.spkiXOffset <== spkiXOffset;
+    spkiPlacement.regionStart <== tbsContentStart;
+    spkiPlacement.regionEnd <== tbsEnd;
+
+    // (g) notBefore/notAfter form a Validity field inside the signed TBS.
+    component validityPlacement = ValidityInRegion(maxCertBytes);
+    for (var i = 0; i < maxCertBytes; i++) validityPlacement.bytes[i] <== certDer[i];
+    validityPlacement.notBeforeOffset <== notBeforeOffset;
+    validityPlacement.notAfterOffset <== notAfterOffset;
+    validityPlacement.regionStart <== tbsContentStart;
+    validityPlacement.regionEnd <== tbsEnd;
 
     // =========================================================================
     // TBS SHA-256

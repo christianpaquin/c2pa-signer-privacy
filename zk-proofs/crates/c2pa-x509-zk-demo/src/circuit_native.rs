@@ -82,6 +82,8 @@ pub struct NativeCircuitPaths {
     pub proving_key: std::path::PathBuf,
     /// Path to store/load the verifying key
     pub verifying_key: std::path::PathBuf,
+    /// SHA-256 of the .r1cs the keys were generated from (hex), written by setup
+    pub r1cs_hash: std::path::PathBuf,
 }
 
 impl NativeCircuitPaths {
@@ -93,6 +95,7 @@ impl NativeCircuitPaths {
             wasm: build_dir.join(format!("{circuit_name}_js/{circuit_name}.wasm")),
             proving_key: build_dir.join(format!("{circuit_name}_native.pk")),
             verifying_key: build_dir.join(format!("{circuit_name}_native.vk")),
+            r1cs_hash: build_dir.join(format!("{circuit_name}_native.r1cs.sha256")),
         }
     }
     
@@ -100,6 +103,29 @@ impl NativeCircuitPaths {
     pub fn setup_complete(&self) -> bool {
         self.proving_key.exists() && self.verifying_key.exists()
     }
+
+    /// Check that the keys were generated from the current .r1cs.
+    ///
+    /// Keys from an older circuit produce proofs that never verify, so callers
+    /// should refuse to use them. Keys without a recorded hash (from before
+    /// this check existed) count as stale.
+    pub fn keys_match_circuit(&self) -> Result<bool> {
+        let Ok(recorded) = std::fs::read_to_string(&self.r1cs_hash) else {
+            return Ok(false);
+        };
+        Ok(recorded.trim() == r1cs_sha256(&self.r1cs)?)
+    }
+}
+
+/// Hex SHA-256 of a (multi-GB) .r1cs file, streamed.
+fn r1cs_sha256(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| anyhow!("failed to open {path:?}: {e}"))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)
+        .map_err(|e| anyhow!("failed to read {path:?}: {e}"))?;
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Run the Groth16 trusted setup using native Rust (much faster than snarkjs)
@@ -148,6 +174,9 @@ pub fn native_setup(paths: &NativeCircuitPaths) -> Result<()> {
     let mut vk_writer = BufWriter::new(vk_file);
     params.vk.serialize_compressed(&mut vk_writer)
         .map_err(|e| anyhow!("failed to serialize verifying key: {e}"))?;
+
+    // Record which circuit these keys belong to
+    std::fs::write(&paths.r1cs_hash, r1cs_sha256(&paths.r1cs)?)?;
     
     println!("✅ Native setup complete!");
     Ok(())

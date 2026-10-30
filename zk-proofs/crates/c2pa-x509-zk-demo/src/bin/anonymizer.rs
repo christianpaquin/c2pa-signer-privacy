@@ -163,6 +163,16 @@ async fn main() -> Result<()> {
         let signer_key_path = args.signer_key
             .ok_or_else(|| anyhow!("--signer-key required when setup is complete"))?;
         
+        // Keys from an older circuit would yield a proof that never verifies,
+        // after the full (~10 minute) proving run.
+        if !native_paths.keys_match_circuit()? {
+            anyhow::bail!(
+                "proving key does not match the compiled circuit; re-run \
+                 `c2pa-x509-zk-setup --circuits-dir {} --force`",
+                args.circuits_dir.display()
+            );
+        }
+
         let signer_key_pem = std::fs::read_to_string(&signer_key_path)?;
         let signer_key = parse_ec_private_key_pem(&signer_key_pem)?;
 

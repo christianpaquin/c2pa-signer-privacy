@@ -16,7 +16,7 @@ Today the circuit verifies a standard X.509 certificate: the CA's ECDSA signatur
 
 | Option | What the CA does | Circuit cost | Revocation | Certificate validation |
 |--------|------------------|--------------|------------|------------------------|
-| **A. Existing PKI only** (current) | Nothing new | ~12M constraints; CA ECDSA, SHA-256, and DER parsing in-circuit | Needs a separate mechanism (short-lived certs, or an accumulator anyway) | Must be done in-circuit (roadmap item 7) |
+| **A. Existing PKI only** (current) | Nothing new | ~4.8M constraints; CA ECDSA, SHA-256, and DER parsing in-circuit | Needs a separate mechanism (short-lived certs, or an accumulator anyway) | Must be done in-circuit (roadmap item 7) |
 | **B. CA-published accumulator** | Periodically publishes a signed Merkle root over currently valid subject public keys | Removes the CA ECDSA, SHA-256, and TBS binding (more than half the circuit); adds a Merkle path | Built in: drop the leaf from the next root | Done by the CA when building the root, so item 7 is largely unnecessary |
 | **C. Twin SNARK-friendly signature** | Also signs each subject key with a SNARK-friendly scheme (for example EdDSA over Baby Jubjub) | Order-of-magnitude reduction; no non-native ECDSA for issuance | Still needs a separate mechanism | Done by the CA at issuance |
 
@@ -29,7 +29,7 @@ Trade-offs:
 
 ## D2. Proof system
 
-The current Groth16/circom stack gives ~1 KB proofs and millisecond verification, but needs ~28 GB of RAM and ~20 minutes to prove, and a circuit-specific trusted setup that must be redone (and redistributed) after every circuit change.
+The current Groth16/circom stack gives ~1 KB proofs and millisecond verification, but needs ~12 GB of RAM and ~10 minutes to prove (a 61% constraint reduction only halved proving time, so WASM witness generation is a large share of it), and a circuit-specific trusted setup that must be redone (and redistributed) after every circuit change.
 
 | Option | Setup | Proof size / verification | Proving cost for P-256 + SHA-256 | Notes |
 |--------|-------|---------------------------|----------------------------------|-------|

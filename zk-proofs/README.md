@@ -28,7 +28,7 @@ cargo run --release --bin c2pa-x509-zk-sign -- \
   --ca fixtures/certs/ca-cert.pem
 
 # 2. Anonymize: Replace signature with a Groth16 ZK proof
-# This step is slow: ~20 minutes and ~28 GB of RAM (see Performance).
+# This step is slow: ~10 minutes and ~12 GB of RAM (see Performance).
 # --cert supplies the original signer cert DER so the circuit sees the exact
 # bytes the CA signed (c2pa-rs may alter encoding when storing in the manifest).
 cargo run --release --bin c2pa-x509-zk-anonymizer -- \
@@ -58,7 +58,7 @@ cargo run --release --bin c2pa-x509-zk-verify -- \
 zk-proofs/
 ├── circuits/                       # Circom ZK circuits
 │   ├── x509_issue_and_possession.circom  # Main proof circuit
-│   ├── x509_parse.circom           # X.509 DER parser (SelectByte, BytesToRegisters, X509Parse)
+│   ├── x509_parse.circom           # X.509 DER parser (X509Parse, field-placement checks)
 │   ├── circom-ecdsa-p256/          # P-256 ECDSA verification library
 │   └── build/                      # Compiled circuits and keys
 ├── crates/
@@ -70,7 +70,7 @@ zk-proofs/
 
 ## Cryptographic Details
 
-The ZK approach uses a Groth16 zkSNARK to prove that the signer possesses a valid certificate issued by a trusted CA, without revealing which certificate. The primary circuit performs two P-256 ECDSA signature verifications plus in-circuit SHA-256 and UTCTime parsing (~12M constraints total). The proof cryptographically binds the signer's private key to a CA-issued certificate, and proves that the certificate was valid when the asset was anonymized.
+The ZK approach uses a Groth16 zkSNARK to prove that the signer possesses a valid certificate issued by a trusted CA, without revealing which certificate. The primary circuit performs two P-256 ECDSA signature verifications plus in-circuit SHA-256 and UTCTime parsing (~4.8M constraints total). The proof cryptographically binds the signer's private key to a CA-issued certificate, and proves that the certificate was valid when the asset was anonymized.
 
 ### ZK Proof Statement
 
@@ -123,35 +123,34 @@ The in-circuit SHA-256 is implemented via `Sha256Bytes(1536)` from `@zk-email/ci
 
 ### Constraint Count
 
-The compiled circuit has **12,208,271 constraints** (measured: reported by `circom` and recorded in the `.r1cs` header). Use this value for capacity planning.
+The compiled circuit has **4,776,263 constraints** (reported by `circom` and recorded in the `.r1cs` header). Each component below was measured by compiling it on its own:
 
-The per-component figures below are estimates, not measurements:
-
-| Component | Constraints (estimated) |
+| Component | Constraints |
 |---|-----------|
-| `ECDSAVerifyNoPubkeyCheck` × 2 (Steps 2 + 4) | ~3,945,000 |
-| `X509Parse` TBS binding (1536 × `SelectByte` + 1536 × `LessEqThan`) | ~4,320,000 |
-| `Sha256Bytes(1536)` | ~720,000 |
-| SPKI extraction (64 × `SelectByte`) | ~90,000 |
-| SPKI / Validity placement checks (35 × `SelectByte` + range checks) | ~157,600 |
-| UTCTime parsing (2 × `UTCTimeToUnix`) | ~500 |
-| Validity period range checks (`Num2Bits(32)` × 2) | ~70 |
-| Sum of estimates | ~9,234,000 |
-| **Measured total** | **12,208,271** |
+| `ECDSAVerifyNoPubkeyCheck` × 2 (Steps 2 + 4) | 3,945,810 |
+| `Sha256Bytes(1536)` | 758,254 |
+| TBS view: `VarShiftLeft(1536, 1536)` | 16,907 |
+| TBS binding: 1536 × `LessEqThan` + products | ~21,500 |
+| SPKI window: `P256SpkiInRegion(1500)` | 16,547 |
+| Validity window: `ValidityInRegion(1500)` | 16,547 |
+| Register packing, UTCTime parsing, offset and validity range checks | ~760 |
+| **Total** | **4,776,263** |
 
-> **Note:** The estimates leave ~3M constraints (about a quarter of the circuit) unaccounted for. Wiring, `BytesToRegisters` conversions, and other glue logic explain some of the gap, but at least one component estimate is probably too low. Per-component measurements are planned as part of [roadmap item 2](#2-quick-circuit-win-cheaper-tbs-binding).
+The two ECDSA verifications are now over 80% of the circuit; see [Efficient ECDSA](#efficient-ecdsa) and the [cryptographic improvements](#cryptographic-improvements) for ways to reduce them.
 
-For a production multi-party trusted setup (MPC ceremony) this circuit class would require a **2²⁴** (~16.7M) Powers of Tau file.  **For this demo no ptau download is needed** — `ark-groth16` performs a local single-party setup directly from the `.r1cs` file.
+Variable-index byte reads use `VarShiftLeft` windows from `@zk-email/circuits`, which cost about log2(n) × n constraints for an n-byte buffer regardless of window size. An earlier version read each byte through a per-byte multiplexer (`SelectByte`, ~4,500 constraints per read); with 1,662 such reads, the circuit had 12,208,271 constraints.
+
+For a production multi-party trusted setup (MPC ceremony) this circuit class would require a **2²³** (~8.4M) Powers of Tau file.  **For this demo no ptau download is needed** — `ark-groth16` performs a local single-party setup directly from the `.r1cs` file.
 
 ### Potential Optimisations
 
 A note on proof size before listing the ideas: a Groth16 proof over BN254 is ~128 bytes (3 G1 + 1 G2, compressed) regardless of circuit size, so the headline "~1 KB" figure is dominated by serialization and public inputs rather than the SNARK itself. Shrinking the wire-format proof is mostly a public-input problem; shrinking proving time is where the cryptographic wins are.
 
-The first two items below are circuit-level tweaks that keep the current proof statement intact. The remaining items are deeper changes that restructure what is proved, switch the proof system, or compress public inputs.
+The first two items below are circuit-level tweaks that keep the current proof statement intact (the first is done). The remaining items are deeper changes that restructure what is proved, switch the proof system, or compress public inputs.
 
-#### TBS binding
+#### TBS binding ✅
 
-The `SelectByte` calls for TBS binding (the dominant cost) can be replaced with `VarShiftLeft` from `@zk-email/circuits/utils/array.circom`, reducing the TBS binding cost from ~4.3M constraints to ~500K constraints (~8.3M total based on measured baseline, still within the pot24 ceremony class).
+Done: the per-byte `SelectByte` reads (TBS binding, SPKI, and Validity) were replaced with `VarShiftLeft` windows from `@zk-email/circuits/utils/array.circom`, taking the circuit from 12,208,271 to 4,776,263 constraints (-61%). See [roadmap item 2](#2-quick-circuit-win-cheaper-byte-reads-).
 
 #### Efficient ECDSA
 
@@ -159,11 +158,11 @@ The **Efficient ECDSA** technique (sometimes called the "NOPE" circuit, from [Pe
 
 #### Cryptographic improvements
 
-These restructure the protocol rather than the circuit. They generally trade an assumption (CA cooperation, an out-of-band trust artefact, or a different proof system) for a substantially smaller and/or faster proof. Constraint savings below are relative to the ~12M measured baseline.
+These restructure the protocol rather than the circuit. They generally trade an assumption (CA cooperation, an out-of-band trust artefact, or a different proof system) for a substantially smaller and/or faster proof. Constraint savings below are relative to the 4,776,263-constraint circuit.
 
 ##### CA-published accumulator of issued SPKIs
 
-Replace the in-circuit CA signature verification with a Merkle membership proof against a CA-published accumulator over currently-valid subject public keys. The CA periodically publishes a signed root; the ZK proof becomes "the committed SPKI is a leaf under that root, and the prover holds its private key." This eliminates the CA ECDSA verification (~1.97M), the SHA-256 over TBS (~720K), and the TBS-binding logic (~4.3M with `SelectByte`) — together more than half the circuit. RFC 5280 field validity (`notBefore`, `notAfter`, EKU, key usage) is enforced by the CA at root-publication time rather than in-circuit, and revocation reduces to "drop the leaf from the next root." Trade-off: verifiers must fetch a fresh signed root, and the anonymity set becomes "valid at root time" rather than "ever issued."
+Replace the in-circuit CA signature verification with a Merkle membership proof against a CA-published accumulator over currently-valid subject public keys. The CA periodically publishes a signed root; the ZK proof becomes "the committed SPKI is a leaf under that root, and the prover holds its private key." This eliminates the CA ECDSA verification (~1.97M), the SHA-256 over TBS (~760K), and the TBS view and binding (~40K) — together more than half the circuit. RFC 5280 field validity (`notBefore`, `notAfter`, EKU, key usage) is enforced by the CA at root-publication time rather than in-circuit, and revocation reduces to "drop the leaf from the next root." Trade-off: verifiers must fetch a fresh signed root, and the anonymity set becomes "valid at root time" rather than "ever issued."
 
 ##### Sigma-protocol key possession bound to the SNARK
 
@@ -200,7 +199,7 @@ circuits/
 │       ├── p256.circom               # Curve operations
 │       └── bigint arithmetic         # 256-bit register arithmetic
 │
-└── x509_parse.circom                 # X.509 DER parser — SelectByte, BytesToRegisters, X509Parse
+└── x509_parse.circom                 # X.509 DER parser — X509Parse, field-placement checks
 ```
 
 `x509_issue_and_possession.circom` is the sole proof circuit. It accepts the raw DER
@@ -213,13 +212,12 @@ pairing someone else's CA-signed certificate with their own key pair.
 
 | Metric | Value | Notes |
 |--------|-------|-------|
-| Constraints | **12,208,271** (measured) | Two ECDSA verifs (~3.9M) + TBS binding + SHA-256 (~720K) + field placement (~158K) + parsing + UTCTime |
-| Constraints (with VarShiftLeft TBS binding) | ~8,250,000 (estimated) | Replace 1536 × SelectByte with VarShiftLeft from @zk-email/circuits; depends on the TBS-binding estimate above |
-| Constraints (with Efficient ECDSA for Step 4) | ~11,470,000 (estimated) | See optimisation note above — soundness caveat applies |
-| Proving key size | ~2.3 GB (measured) | Native Rust key generated by `ark-groth16` from `.r1cs` |
+| Constraints | **4,776,263** (measured) | Two ECDSA verifs (3.95M) + SHA-256 (758K) + TBS view/binding (~38K) + field windows (~33K) + parsing |
+| Constraints (with Efficient ECDSA for Step 4) | ~4,180,000 (estimated) | See optimisation note above — soundness caveat applies |
+| Proving key size | ~1.0 GB (measured) | Native Rust key generated by `ark-groth16` from `.r1cs` |
 | Verifying key size | 872 bytes (measured) | Constant for Groth16 |
 | Proof size | ~1 KB | Constant for Groth16 |
-| Production ceremony class | pot24 (~16.7M constraints) | Not needed for this demo — `ark-groth16` runs local setup |
+| Production ceremony class | pot23 (~8.4M constraints) | Not needed for this demo — `ark-groth16` runs local setup |
 
 ### Performance
 
@@ -227,12 +225,14 @@ Measured on a 20-core machine with 31 GB of RAM (WSL2). Expect different times o
 
 | Phase | Time | Peak RAM | Notes |
 |-------|------|----------|-------|
-| Circuit compilation | ~15 min | ~23 GB | One-time (`circom`) |
-| Trusted setup | ~6.5 min | ~24 GB | One-time, native Rust |
-| Anonymization (witness + proof) | ~20 min | ~28 GB | Per asset; witness generation runs the circuit's WASM |
-| Verification | ~0.03 s | ~13 MB | Per asset |
+| Circuit compilation | ~4 min | ~6.3 GB | One-time (`circom`) |
+| Trusted setup | ~1 min | ~10.4 GB | One-time, native Rust |
+| Anonymization (witness + proof) | ~10.5 min | ~11.8 GB | Per asset; witness generation runs the circuit's WASM |
+| Verification | ~0.02 s | ~13 MB | Per asset |
 
-**A machine with at least 32 GB of RAM is required** for the real-proof flow; on 16 GB machines compilation, setup, and proving will fail. Use [Placeholder Mode](#placeholder-mode) on smaller machines.
+Peak memory for the real-proof flow is ~12 GB, so a 16 GB machine should be enough (not tested). Use [Placeholder Mode](#placeholder-mode) on smaller machines.
+
+Constraints fell 61% with the switch to `VarShiftLeft` (see [Constraint Count](#constraint-count)), but anonymization time fell only ~50% (from ~20 minutes), which suggests WASM witness generation is a large share of proving time.
 
 ### COSE Integration
 
@@ -263,7 +263,7 @@ circom circuits/x509_issue_and_possession.circom \
   -l circuits/node_modules \
   -o circuits/build/
 
-# Run trusted setup (~6.5 minutes, ~24 GB RAM) — generates proving and verifying keys
+# Run trusted setup (~1 minute, ~10 GB RAM) — generates proving and verifying keys
 # Must run from zk-proofs/, not circuits/
 cargo run --release --bin c2pa-x509-zk-setup -- --circuits-dir circuits
 ```
@@ -275,9 +275,10 @@ This generates the proving and verifying keys in `circuits/build/`.
 > external Powers of Tau ceremony file is needed — `ark-groth16::generate_random_parameters_with_reduction`
 > handles the setup in one pass.
 >
-> If keys already exist, setup does nothing, even if the circuit has changed. After
-> recompiling a modified circuit, delete `circuits/build/x509_issue_and_possession_native.{pk,vk}`
-> before re-running setup, or proofs will fail.
+> Setup records a SHA-256 of the `.r1cs` next to the keys (`*_native.r1cs.sha256`).
+> If the circuit has been recompiled since, setup refuses to reuse the keys and the
+> anonymizer refuses to prove with them, instead of producing a proof that cannot
+> verify. Re-run setup with `--force` to regenerate the keys.
 
 ## Certificate Requirements
 
@@ -294,7 +295,7 @@ Generate test certificates and a signed test asset:
 
 ## Placeholder Mode
 
-If you haven't completed the circuit setup, the anonymizer can embed a placeholder proof instead of a real ZK proof. This lets you exercise the full manifest pipeline — sign, anonymize, verify — immediately after `cargo build`, without circuit compilation (~15 min), trusted setup (~6.5 min), or ~20-minute proof generation, and without needing 32 GB of RAM.
+If you haven't completed the circuit setup, the anonymizer can embed a placeholder proof instead of a real ZK proof. This lets you exercise the full manifest pipeline — sign, anonymize, verify — immediately after `cargo build`, without circuit compilation (~4 min), trusted setup (~1 min), or ~10-minute proof generation, and without needing ~12 GB of RAM.
 
 The verifier will detect a placeholder and exit with a non-zero status (exit code 2) along with a warning. This is intentional: placeholder mode is for development and structural testing only.
 
@@ -342,11 +343,19 @@ Result: `c2patool` now displays BBS-signed assets and reports `algorithm.unsuppo
 
 Both prototypes' manifests also lack a `c2pa.created` action, which `c2patool` reports as `assertion.action.malformed`; this should be fixed alongside item 5.
 
-### 2. Quick circuit win: cheaper TBS binding
+### 2. Quick circuit win: cheaper byte reads ✅
 
-Replace the 1536 `SelectByte` calls in the TBS binding with `VarShiftLeft` from `@zk-email/circuits` (see [TBS binding](#tbs-binding)): an estimated reduction from ~12M to ~8.3M constraints, without changing what the circuit proves. That estimate rests on the per-component estimates in [Constraint Count](#constraint-count), which leave ~3M constraints unexplained, so the first step is to measure each component by compiling it on its own, and to report the gain as measured before and after. This lowers the cost of every later real-proof test run, and stays worthwhile whatever the architecture decisions below conclude.
+Done. Measuring each component showed that per-byte `SelectByte` reads (1,662 of them, ~4,500 constraints each) made up ~7.5M of the 12.2M constraints, far more than the earlier estimates suggested. All of them (TBS binding, SPKI, and Validity) now read through `VarShiftLeft` windows, without changing what the circuit proves:
 
-Because it changes the circuit, it also needs setup to detect a stale proving key (for example, by recording a hash of the `.r1cs` alongside the keys) instead of silently reusing keys from an older circuit.
+| | Before | After |
+|---|---|---|
+| Constraints | 12,208,271 | 4,776,263 (-61%) |
+| Circuit compilation | ~15 min, ~25 GB | ~4 min, ~6.3 GB |
+| Trusted setup | ~2.5-6.5 min, ~24 GB | ~1 min, ~10.4 GB |
+| Anonymization | ~20 min, ~28 GB | ~10.5 min, ~11.8 GB |
+| Proving key | 2.5 GB | 1.0 GB |
+
+Setup now also records a hash of the `.r1cs` alongside the keys, and setup and the anonymizer refuse keys from an older circuit (see [Building Circuits](#building-circuits)).
 
 ### 3. Architecture decisions
 
@@ -411,7 +420,7 @@ Removing the certificate is necessary but not sufficient. The anonymizer should 
 ### 13. Build, setup, and test infrastructure
 
 - Generate test PKI at test time rather than relying on committed certificates with short validity periods.
-- Run the placeholder-mode suite in CI, and periodically run the full real-proof end-to-end test (it needs ~28 GB of RAM).
+- Run the placeholder-mode suite in CI, and periodically run the full real-proof end-to-end test (it needs ~12 GB of RAM).
 - Fix key distribution. The committed `x509_issue_and_possession_native.vk` is not usable on its own: the matching proving key is not committed, so every user who runs setup generates new random keys and overwrites it. Either publish both keys from a single setup (the proving key is ~2.4 GB), or stop committing the verifying key.
 - Enable ark-circom's `sanity_check` in the prover. It is off by default, so witness generation does not check constraints: an input the circuit rejects still produces a proof after ~20 minutes, which then fails verification. With it on, such inputs fail immediately with the failing assertion.
 - Bring `circuits/build.sh` in line with the working steps above. It currently uses a snarkjs/pot20 flow that is too small for this circuit and omits the include paths.

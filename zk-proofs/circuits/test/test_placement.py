@@ -10,6 +10,7 @@ Requires circom and node. Run from anywhere:
 """
 
 import json
+import struct
 import subprocess
 import sys
 import tempfile
@@ -36,15 +37,39 @@ def compile_circuit(workdir: Path, name: str, main: str) -> Path:
     return workdir / f"{name}_js"
 
 
-def witness_ok(js_dir: Path, name: str, inputs: dict, workdir: Path) -> bool:
+def run_witness(js_dir: Path, name: str, inputs: dict, workdir: Path) -> list[int] | None:
+    """Return the witness values, or None if witness generation fails."""
     input_path = workdir / "input.json"
+    wtns_path = workdir / "witness.wtns"
     input_path.write_text(json.dumps(inputs))
     result = subprocess.run(
         ["node", str(js_dir / "generate_witness.js"), str(js_dir / f"{name}.wasm"),
-         str(input_path), str(workdir / "witness.wtns")],
+         str(input_path), str(wtns_path)],
         capture_output=True,
     )
-    return result.returncode == 0
+    return read_wtns(wtns_path) if result.returncode == 0 else None
+
+
+def read_wtns(path: Path) -> list[int]:
+    """Parse a circom .wtns file: section 1 is the header, section 2 the values."""
+    data = path.read_bytes()
+    assert data[:4] == b"wtns"
+    _version, n_sections = struct.unpack_from("<II", data, 4)
+    pos, n8, values = 12, None, None
+    for _ in range(n_sections):
+        section_type, size = struct.unpack_from("<IQ", data, pos)
+        body = data[pos + 12:pos + 12 + size]
+        if section_type == 1:
+            n8 = struct.unpack_from("<I", body)[0]
+        elif section_type == 2:
+            values = [int.from_bytes(body[i:i + n8], "little") for i in range(0, len(body), n8)]
+        pos += 12 + size
+    return values
+
+
+def outputs(witness: list[int], count: int) -> list[int]:
+    # Witness layout: the constant 1, then the main component's outputs.
+    return witness[1:1 + count]
 
 
 def spki_bytes(prefix_at: int = 10, mutate: dict | None = None) -> list[int]:
@@ -76,6 +101,7 @@ def marker_only_bytes() -> list[int]:
 
 
 # (name, inputs, should_accept). SPKI field: prefix at 10..36, X at 37, ends at 101.
+# Accepted cases must also output the 64 key bytes (written as 1..64).
 SPKI_CASES = [
     ("accepts SPKI inside region", dict(bytes=spki_bytes(), spkiXOffset=37, regionStart=4, regionEnd=120), True),
     ("accepts SPKI exactly filling region", dict(bytes=spki_bytes(), spkiXOffset=37, regionStart=10, regionEnd=101), True),
@@ -84,9 +110,12 @@ SPKI_CASES = [
     ("rejects wrong curve OID", dict(bytes=spki_bytes(mutate={32: 0x22}), spkiXOffset=37, regionStart=4, regionEnd=120), False),
     ("rejects bare 0x04 marker (original check)", dict(bytes=marker_only_bytes(), spkiXOffset=37, regionStart=4, regionEnd=120), False),
     ("rejects offset whose prefix would start below 0", dict(bytes=spki_bytes(), spkiXOffset=5, regionStart=0, regionEnd=120), False),
+    ("rejects region extending past the buffer", dict(bytes=spki_bytes(), spkiXOffset=37, regionStart=4, regionEnd=MAX_BYTES + 1), False),
 ]
+SPKI_OUTPUTS = list(range(1, 65))
 
 # Validity field: 30 1E at 20, notBefore tag at 22, notAfter tag at 37, ends at 52.
+# Accepted cases must also output the two YYMMDDHHMMSS digit strings.
 VALIDITY_CASES = [
     ("accepts Validity inside region", dict(bytes=validity_bytes(), notBeforeOffset=22, notAfterOffset=37, regionStart=4, regionEnd=120), True),
     ("accepts Validity exactly filling region", dict(bytes=validity_bytes(), notBeforeOffset=22, notAfterOffset=37, regionStart=20, regionEnd=52), True),
@@ -95,7 +124,9 @@ VALIDITY_CASES = [
     ("rejects notAfter not adjacent to notBefore", dict(bytes=validity_bytes(), notBeforeOffset=22, notAfterOffset=38, regionStart=4, regionEnd=120), False),
     ("rejects missing Validity SEQUENCE header", dict(bytes=validity_bytes(mutate={20: 0}), notBeforeOffset=22, notAfterOffset=37, regionStart=4, regionEnd=120), False),
     ("rejects notBefore without trailing Z", dict(bytes=validity_bytes(mutate={36: 0}), notBeforeOffset=22, notAfterOffset=37, regionStart=4, regionEnd=120), False),
+    ("rejects region extending past the buffer", dict(bytes=validity_bytes(), notBeforeOffset=22, notAfterOffset=37, regionStart=4, regionEnd=MAX_BYTES + 1), False),
 ]
+VALIDITY_OUTPUTS = list(b"260101000000") + list(b"270101000000")
 
 
 def main() -> int:
@@ -103,14 +134,19 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         workdir = Path(tmp)
         suites = [
-            ("p256_spki", f"P256SpkiInRegion({MAX_BYTES})", SPKI_CASES),
-            ("validity", f"ValidityInRegion({MAX_BYTES})", VALIDITY_CASES),
+            ("p256_spki", f"P256SpkiInRegion({MAX_BYTES})", SPKI_CASES, SPKI_OUTPUTS),
+            ("validity", f"ValidityInRegion({MAX_BYTES})", VALIDITY_CASES, VALIDITY_OUTPUTS),
         ]
-        for name, main_component, cases in suites:
+        for name, main_component, cases, expected_outputs in suites:
             js_dir = compile_circuit(workdir, name, main_component)
             for label, inputs, should_accept in cases:
-                accepted = witness_ok(js_dir, name, inputs, workdir)
-                ok = accepted == should_accept
+                witness = run_witness(js_dir, name, inputs, workdir)
+                ok = (witness is not None) == should_accept
+                if ok and witness is not None:
+                    got = outputs(witness, len(expected_outputs))
+                    if got != expected_outputs:
+                        ok = False
+                        label += f" (wrong outputs: {got[:8]}...)"
                 failures += not ok
                 print(f"{'ok  ' if ok else 'FAIL'} {label}")
     print(f"\n{failures} failure(s)")

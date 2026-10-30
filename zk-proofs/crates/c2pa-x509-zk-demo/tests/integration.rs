@@ -419,7 +419,7 @@ fn anonymized_asset_does_not_reveal_signer() {
 }
 
 /// Full end-to-end test with real ZK proof generation and verification.
-/// This test is slow (~20 minutes, ~28 GB of RAM) because it generates an actual Groth16 proof.
+/// This test is slow (~10 minutes, ~12 GB of RAM) because it generates an actual Groth16 proof.
 /// It's marked #[ignore] by default - run with `cargo test -- --ignored` to include.
 #[test]
 #[ignore]
@@ -444,7 +444,7 @@ fn full_e2e_with_real_zk_proof() {
         .stdout(predicate::str::contains("Signed asset written"));
 
     // Step 2: Anonymize with real ZK proof (no --placeholder flag)
-    // Note: This step takes ~20 minutes due to ZK proof generation
+    // Note: This step takes ~10 minutes due to ZK proof generation
     Command::cargo_bin("c2pa-x509-zk-anonymizer")
         .unwrap()
         .args([
@@ -487,7 +487,7 @@ fn full_e2e_with_real_zk_proof() {
 /// unsatisfied constraints do not stop proof generation; the resulting proof
 /// must instead fail verification.
 ///
-/// Slow (~20 minutes, ~28 GB of RAM) and needs the built circuit and keys, so
+/// Slow (~7-10 minutes, ~12 GB of RAM) and needs the built circuit and keys, so
 /// it is ignored by default:
 ///   cargo test --release -- --ignored forged_key_outside_signed_tbs_is_rejected
 #[tokio::test(flavor = "multi_thread")]

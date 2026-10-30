@@ -12,6 +12,7 @@ zk-proofs/circuits/build/*.pk
 zk-proofs/circuits/build/*.vk
 zk-proofs/circuits/build/*.zkey
 zk-proofs/circuits/build/*.wtns
+zk-proofs/circuits/build/*.r1cs.sha256
 zk-proofs/circuits/build/*.sym
 zk-proofs/circuits/build/*_js/
 zk-proofs/circuits/build/*_cpp/

@@ -52,55 +52,19 @@ include "./sha_bytes.circom";
  *   with this compile-time constant; the prover supplies the actual padded
  *   length as tbsHashPaddedLen.
  *
- * Constraint budget (n=43, k=6, maxCertBytes=1500):
- *   DER tag/length checks (4 × SelectByte):   ~18,000
- *   SPKI/Validity placement (35 × SelectByte
- *     + offset range checks):                 ~157,600
- *   SPKI byte extraction  (64 × SelectByte):  ~288,000
- *   TBS byte extraction   (1536 × SelectByte):~6,912,000  ← dominates
- *   BytesToRegisters (×3):                    ~1,542
- *   Sha256Bytes(1536):                        ~720,000
- *   UTCTime → Unix timestamp (×2):            ~400
- *   Total:                                    ~7,953,000
+ * Constraint budget (n=43, k=6, maxCertBytes=1500), measured:
+ *   Sha256Bytes(1536):                         758,254  ← dominates
+ *   TBS view (VarShiftLeft(1536, 1536)):        16,907
+ *   TBS binding (1536 × LessEqThan + product):  ~21,500
+ *   SPKI window (P256SpkiInRegion):             16,547
+ *   Validity window (ValidityInRegion):         16,547
+ *   BytesToRegisters, UTCTime, range checks:    ~700
+ *   Total (X509Parse):                         830,393
  *
- * NOTE: The 1536 × SelectByte calls for TBS extraction are the bottleneck
- * (~6.9M constraints).  A future optimisation can replace these with a single
- * VarShiftLeft from @zk-email/circuits/utils/array.circom (~4K constraints)
- * to reduce total to ~1.0M.
+ * Variable-index reads use VarShiftLeft windows (log2(n) × n constraints for
+ * an n-byte buffer, whatever the window size) rather than a per-byte mux,
+ * which cost ~4,500 constraints per byte read for a 1500-byte buffer.
  */
-
-// ---------------------------------------------------------------------------
-// SelectByte — select certDer[idx] where idx is a runtime signal.
-//
-// In Circom, array indices must be compile-time constants, so variable-index
-// access requires a mux: one IsEqual comparison per possible index, then an
-// accumulator that picks the matching byte.  For maxBytes=1500 this costs
-// ~4×1500 = 6,000 constraints per call.
-// ---------------------------------------------------------------------------
-template SelectByte(maxBytes) {
-    signal input bytes[maxBytes];
-    signal input idx;
-    signal output out;
-
-    signal indicator[maxBytes];
-    signal product[maxBytes];
-    signal acc[maxBytes];
-
-    component eq[maxBytes];
-    for (var i = 0; i < maxBytes; i++) {
-        eq[i] = IsEqual();
-        eq[i].in[0] <== i;
-        eq[i].in[1] <== idx;
-        indicator[i] <== eq[i].out;
-        product[i] <== indicator[i] * bytes[i];
-    }
-
-    acc[0] <== product[0];
-    for (var i = 1; i < maxBytes; i++) {
-        acc[i] <== acc[i-1] + product[i];
-    }
-    out <== acc[maxBytes-1];
-}
 
 // ---------------------------------------------------------------------------
 // BytesToRegisters — convert 32 big-endian bytes to k registers of n bits.
@@ -184,7 +148,7 @@ template AssertLessEq(bits) {
 
 // ---------------------------------------------------------------------------
 // P256SpkiInRegion — pin the subject public key to a real P-256
-// SubjectPublicKeyInfo inside [regionStart, regionEnd).
+// SubjectPublicKeyInfo inside [regionStart, regionEnd), and output its key.
 //
 // The 27 bytes before spkiXOffset must be the fixed DER encoding of a P-256
 // SPKI up to the uncompressed-point marker:
@@ -194,15 +158,21 @@ template AssertLessEq(bits) {
 //       06 08 2A8648CE3D030107 OID prime256v1
 //     03 42 00 04              BIT STRING (66 bytes), no unused bits, 0x04
 // followed by the 64 bytes of X || Y.  The whole 91-byte field must lie in
-// the region.
+// the region, and the region within the buffer.
+//
+// The field is read through one VarShiftLeft window (~log2(maxBytes) ×
+// maxBytes constraints) rather than a mux per byte.  VarShiftLeft rotates, so
+// the region check is what guarantees the window does not wrap.
 // ---------------------------------------------------------------------------
 template P256SpkiInRegion(maxBytes) {
     signal input bytes[maxBytes];
     signal input spkiXOffset;   // first X byte
     signal input regionStart;   // inclusive
     signal input regionEnd;     // exclusive
+    signal output key[64];      // X || Y
 
     var PREFIX_LEN = 27;
+    var FIELD_LEN = 91;         // PREFIX_LEN + 64
     var prefix[27] = [
         48, 89, 48, 19,                     // 30 59 30 13
         6, 7, 42, 134, 72, 206, 61, 2, 1,   // 06 07 2A 86 48 CE 3D 02 01
@@ -218,25 +188,34 @@ template P256SpkiInRegion(maxBytes) {
     endOk.a <== spkiXOffset + 64;
     endOk.b <== regionEnd;
 
-    component sel[PREFIX_LEN];
+    component regionInBuffer = AssertLessEq(12);
+    regionInBuffer.a <== regionEnd;
+    regionInBuffer.b <== maxBytes;
+
+    component window = VarShiftLeft(maxBytes, FIELD_LEN);
+    window.in <== bytes;
+    window.shift <== spkiXOffset - PREFIX_LEN;
+
     for (var i = 0; i < PREFIX_LEN; i++) {
-        sel[i] = SelectByte(maxBytes);
-        for (var j = 0; j < maxBytes; j++) sel[i].bytes[j] <== bytes[j];
-        sel[i].idx <== spkiXOffset - PREFIX_LEN + i;
-        sel[i].out === prefix[i];
+        window.out[i] === prefix[i];
+    }
+    for (var i = 0; i < 64; i++) {
+        key[i] <== window.out[PREFIX_LEN + i];
     }
 }
 
 // ---------------------------------------------------------------------------
 // ValidityInRegion — pin notBefore/notAfter to a real Validity field inside
-// [regionStart, regionEnd).
+// [regionStart, regionEnd), and output their YYMMDDHHMMSS digits.
 //
 //   30 1E                      Validity SEQUENCE (30 bytes)
 //     17 0D YYMMDDHHMMSS 5A    notBefore UTCTime   ← notBeforeOffset
 //     17 0D YYMMDDHHMMSS 5A    notAfter  UTCTime   ← notAfterOffset
 //
 // notAfter must immediately follow notBefore, and the whole 32-byte field
-// must lie in the region.  GeneralizedTime (dates from 2050) is not supported.
+// must lie in the region, and the region within the buffer.  GeneralizedTime
+// (dates from 2050) is not supported.  Read through one VarShiftLeft window,
+// as in P256SpkiInRegion.
 // ---------------------------------------------------------------------------
 template ValidityInRegion(maxBytes) {
     signal input bytes[maxBytes];
@@ -244,6 +223,10 @@ template ValidityInRegion(maxBytes) {
     signal input notAfterOffset;    // notAfter  UTCTime tag
     signal input regionStart;       // inclusive
     signal input regionEnd;         // exclusive
+    signal output notBeforeRaw[12]; // YYMMDDHHMMSS (ASCII)
+    signal output notAfterRaw[12];  // YYMMDDHHMMSS (ASCII)
+
+    var FIELD_LEN = 32;
 
     notAfterOffset === notBeforeOffset + 15;
 
@@ -255,17 +238,25 @@ template ValidityInRegion(maxBytes) {
     endOk.a <== notBeforeOffset + 30;
     endOk.b <== regionEnd;
 
-    // (position relative to notBeforeOffset, expected byte)
-    var NUM_FIXED = 8;
-    var fixedPos[8] = [-2, -1,  0,  1, 14, 15, 16, 29];
-    var fixedVal[8] = [48, 30, 23, 13, 90, 23, 13, 90];
+    component regionInBuffer = AssertLessEq(12);
+    regionInBuffer.a <== regionEnd;
+    regionInBuffer.b <== maxBytes;
 
-    component sel[NUM_FIXED];
+    component window = VarShiftLeft(maxBytes, FIELD_LEN);
+    window.in <== bytes;
+    window.shift <== notBeforeOffset - 2;
+
+    // (position in the window, expected byte)
+    var NUM_FIXED = 8;
+    var fixedPos[8] = [ 0,  1,  2,  3, 16, 17, 18, 31];
+    var fixedVal[8] = [48, 30, 23, 13, 90, 23, 13, 90];
     for (var i = 0; i < NUM_FIXED; i++) {
-        sel[i] = SelectByte(maxBytes);
-        for (var j = 0; j < maxBytes; j++) sel[i].bytes[j] <== bytes[j];
-        sel[i].idx <== notBeforeOffset + fixedPos[i];
-        sel[i].out === fixedVal[i];
+        window.out[fixedPos[i]] === fixedVal[i];
+    }
+
+    for (var i = 0; i < 12; i++) {
+        notBeforeRaw[i] <== window.out[4 + i];
+        notAfterRaw[i] <== window.out[19 + i];
     }
 }
 
@@ -316,33 +307,32 @@ template X509Parse(maxCertBytes, maxTbsPadded, n, k) {
     // (a) Outer Certificate SEQUENCE tag — index 0 is a compile-time constant.
     certDer[0] === 48;  // 0x30 = SEQUENCE
 
+    // TBS view: tbsView[i] = certDer[tbsOffset + i], read with one
+    // VarShiftLeft over certDer zero-extended to maxTbsPadded bytes.  The
+    // header checks and the TBS binding below both read from it.  VarShiftLeft
+    // rotates, but the checks in (e) keep every position read here below
+    // certLen <= maxCertBytes, so no read wraps.
+    assert(maxTbsPadded >= maxCertBytes);
+    signal certPadded[maxTbsPadded];
+    for (var i = 0; i < maxTbsPadded; i++) {
+        if (i < maxCertBytes) {
+            certPadded[i] <== certDer[i];
+        } else {
+            certPadded[i] <== 0;
+        }
+    }
+    component tbsView = VarShiftLeft(maxTbsPadded, maxTbsPadded);
+    tbsView.in <== certPadded;
+    tbsView.shift <== tbsOffset;
+
     // (b) TBSCertificate SEQUENCE tag at tbsOffset.
-    component selTbsTag = SelectByte(maxCertBytes);
-    for (var i = 0; i < maxCertBytes; i++) selTbsTag.bytes[i] <== certDer[i];
-    selTbsTag.idx <== tbsOffset;
-    selTbsTag.out === 48;  // 0x30 = SEQUENCE
+    tbsView.out[0] === 48;   // 0x30 = SEQUENCE
 
     // (c) Two-byte length indicator 0x82 at tbsOffset+1.
-    signal tbsOff1 <== tbsOffset + 1;
-    component selTbsLenType = SelectByte(maxCertBytes);
-    for (var i = 0; i < maxCertBytes; i++) selTbsLenType.bytes[i] <== certDer[i];
-    selTbsLenType.idx <== tbsOff1;
-    selTbsLenType.out === 130;  // 0x82 = two-byte length
+    tbsView.out[1] === 130;  // 0x82 = two-byte length
 
     // (d) Length bytes at tbsOffset+2 and tbsOffset+3 encode tbsLen.
-    signal tbsOff2 <== tbsOffset + 2;
-    signal tbsOff3 <== tbsOffset + 3;
-
-    component selTbsMSB = SelectByte(maxCertBytes);
-    for (var i = 0; i < maxCertBytes; i++) selTbsMSB.bytes[i] <== certDer[i];
-    selTbsMSB.idx <== tbsOff2;
-
-    component selTbsLSB = SelectByte(maxCertBytes);
-    for (var i = 0; i < maxCertBytes; i++) selTbsLSB.bytes[i] <== certDer[i];
-    selTbsLSB.idx <== tbsOff3;
-
-    signal declaredTbsLen <== selTbsMSB.out * 256 + selTbsLSB.out;
-    declaredTbsLen === tbsLen;
+    tbsView.out[2] * 256 + tbsView.out[3] === tbsLen;
 
     // (e) Bound every offset so the comparisons below cannot wrap around
     //     the field, and keep the TBS inside the certificate bytes.
@@ -388,49 +378,24 @@ template X509Parse(maxCertBytes, maxTbsPadded, n, k) {
     // in certDer (bytes tbsOffset .. tbsOffset+4+tbsLen), then hash the full
     // padded buffer in-circuit with Sha256Bytes(maxTbsPadded).
     //
-    // Binding check: for each of the (4 + tbsLen) TBS DER bytes we use
-    // SelectByte to read from certDer and assert equality with the corresponding
-    // entry in tbsHashPaddedBytes.  This prevents a malicious prover from
-    // supplying a tbsHashPaddedBytes that doesn't correspond to certDer.
+    // Binding check: for each i, enforce
+    //   isTbsDerByte[i] * (tbsView[i] - tbsHashPaddedBytes[i]) === 0
+    // where isTbsDerByte[i] = (i <= tbsLen + 3).  This prevents a malicious
+    // prover from supplying a tbsHashPaddedBytes that doesn't correspond to
+    // certDer.
     //
     // The SHA-256 padding bytes (beyond 4+tbsLen) are NOT verified — the
     // prover can set them to anything, but wrong padding produces a different
     // digest and the ECDSA check in Step 2 would fail.
     // =========================================================================
 
-    // Binding: certDer[tbsOffset + i] === tbsHashPaddedBytes[i]
-    // for i = 0 .. maxTbsPadded-1.
-    // We use SelectByte for each position.  Positions beyond the cert are
-    // zero (certDer is zero-padded), so the circuit enforces zero padding.
-    component tbsBindSel[maxTbsPadded];
-    for (var i = 0; i < maxTbsPadded; i++) {
-        tbsBindSel[i] = SelectByte(maxCertBytes);
-        for (var j = 0; j < maxCertBytes; j++) {
-            tbsBindSel[i].bytes[j] <== certDer[j];
-        }
-        // Index = tbsOffset + i; clamp to certDer bound via SelectByte semantics.
-        // When tbsOffset + i >= certLen, certDer is 0-padded so SelectByte returns 0.
-        tbsBindSel[i].idx <== tbsOffset + i;
-        // Only enforce equality for bytes that fall within the actual TBS DER region.
-        // The remaining bytes are SHA-256 padding — not in certDer, prover-supplied.
-        // We rely on Sha256Bytes's own enforcement + ECDSA for the padding bytes.
-        // Enforce for all i: the binding is "certDer byte at tbsOffset+i equals
-        // tbsHashPaddedBytes[i]".  For positions beyond certLen, certDer returns 0;
-        // we do NOT enforce those positions so the prover can write padding there.
-        // Implementation: enforce only for i < (4 + tbsLen).
-        // Because tbsLen is a runtime signal, we use a conditional constraint:
-        //   isTbsDerByte * (certDerByte - tbsHashPaddedBytes[i]) === 0
-        // where isTbsDerByte = LessEqThan(12){in[0]=i, in[1]=tbsLen+3}.
-    }
-    // Build the conditional equality constraints.
     component tbsBindLe[maxTbsPadded];
     signal tbsBindEq[maxTbsPadded];
     for (var i = 0; i < maxTbsPadded; i++) {
         tbsBindLe[i] = LessEqThan(12);  // maxTbsPadded=1536 < 2^12=4096
         tbsBindLe[i].in[0] <== i;
         tbsBindLe[i].in[1] <== tbsLen + 3;  // 4+tbsLen-1 = tbsLen+3 (last valid index)
-        // tbsBindLe[i].out == 1 iff i <= tbsLen + 3
-        tbsBindEq[i] <== tbsBindLe[i].out * (tbsBindSel[i].out - tbsHashPaddedBytes[i]);
+        tbsBindEq[i] <== tbsBindLe[i].out * (tbsView.out[i] - tbsHashPaddedBytes[i]);
         tbsBindEq[i] === 0;
     }
 
@@ -446,22 +411,13 @@ template X509Parse(maxCertBytes, maxTbsPadded, n, k) {
     // Extract SPKI bytes and pack into BigInt registers
     // =========================================================================
 
-    signal spkiRawBytes[64];
-    component spkiSel[64];
-    for (var i = 0; i < 64; i++) {
-        spkiSel[i] = SelectByte(maxCertBytes);
-        for (var j = 0; j < maxCertBytes; j++) {
-            spkiSel[i].bytes[j] <== certDer[j];
-        }
-        spkiSel[i].idx <== spkiXOffset + i;
-        spkiRawBytes[i] <== spkiSel[i].out;
-    }
-
+    // The key bytes come from the P256SpkiInRegion window in (f), which also
+    // pinned them inside the signed TBS.
     signal xBytes[32];
     signal yBytes[32];
     for (var i = 0; i < 32; i++) {
-        xBytes[i] <== spkiRawBytes[i];
-        yBytes[i] <== spkiRawBytes[32 + i];
+        xBytes[i] <== spkiPlacement.key[i];
+        yBytes[i] <== spkiPlacement.key[32 + i];
     }
 
     component xRegs = BytesToRegisters(n, k);
@@ -497,28 +453,13 @@ template X509Parse(maxCertBytes, maxTbsPadded, n, k) {
     // years).  All arithmetic is small integers — well within the BN254 field.
     // =========================================================================
 
-    // Read 12 bytes of notBefore (YY MM DD HH MM SS), skip the trailing 'Z'.
+    // The date digits come from the ValidityInRegion window in (g), which also
+    // pinned them inside the signed TBS.
     signal nbRaw[12];
-    component nbSel[12];
-    for (var i = 0; i < 12; i++) {
-        nbSel[i] = SelectByte(maxCertBytes);
-        for (var j = 0; j < maxCertBytes; j++) {
-            nbSel[i].bytes[j] <== certDer[j];
-        }
-        nbSel[i].idx <== notBeforeOffset + 2 + i;  // +2: skip tag + length byte
-        nbRaw[i] <== nbSel[i].out;
-    }
-
-    // Read 12 bytes of notAfter.
     signal naRaw[12];
-    component naSel[12];
     for (var i = 0; i < 12; i++) {
-        naSel[i] = SelectByte(maxCertBytes);
-        for (var j = 0; j < maxCertBytes; j++) {
-            naSel[i].bytes[j] <== certDer[j];
-        }
-        naSel[i].idx <== notAfterOffset + 2 + i;
-        naRaw[i] <== naSel[i].out;
+        nbRaw[i] <== validityPlacement.notBeforeRaw[i];
+        naRaw[i] <== validityPlacement.notAfterRaw[i];
     }
 
     // Convert ASCII digit pairs to integers: digit value = byte - 48 ('0')

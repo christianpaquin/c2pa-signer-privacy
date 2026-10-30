@@ -18,6 +18,10 @@ struct Args {
     /// Circuit name (without extension)
     #[arg(long, default_value = "x509_issue_and_possession")]
     circuit_name: String,
+
+    /// Regenerate the keys even if they already exist
+    #[arg(long)]
+    force: bool,
 }
 
 #[tokio::main]
@@ -35,12 +39,20 @@ async fn main() -> Result<()> {
     println!("  Verifying key output: {:?}", paths.verifying_key);
     println!();
     
-    if paths.setup_complete() {
-        println!("⚠️  Setup already complete. Keys exist at:");
-        println!("    {:?}", paths.proving_key);
-        println!("    {:?}", paths.verifying_key);
-        println!("\nDelete these files to re-run setup.");
-        return Ok(());
+    if paths.setup_complete() && !args.force {
+        if paths.keys_match_circuit()? {
+            println!("✅ Setup already complete for the current circuit. Keys exist at:");
+            println!("    {:?}", paths.proving_key);
+            println!("    {:?}", paths.verifying_key);
+            println!("\nUse --force to regenerate them.");
+            return Ok(());
+        }
+        anyhow::bail!(
+            "keys at {:?} were not generated from the current circuit ({:?}); \
+             re-run with --force to regenerate them",
+            paths.proving_key,
+            paths.r1cs,
+        );
     }
     
     native_setup(&paths)?;

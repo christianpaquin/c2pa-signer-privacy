@@ -476,3 +476,70 @@ fn full_e2e_with_real_zk_proof() {
         .success()
         .stdout(predicate::str::contains("ZK proof verified successfully"));
 }
+
+/// Regression test for the certificate field-binding forgery: a prover with no
+/// certificate takes a genuine certificate issued by the trusted CA, appends
+/// their own public key and forged validity dates after it (outside the
+/// TBSCertificate the CA signed), and points the circuit's offsets there.
+/// The result must not be a proof that verifies.
+///
+/// Witness generation runs with ark-circom's default `sanity_check: false`, so
+/// unsatisfied constraints do not stop proof generation; the resulting proof
+/// must instead fail verification.
+///
+/// Slow (~20 minutes, ~28 GB of RAM) and needs the built circuit and keys, so
+/// it is ignored by default:
+///   cargo test --release -- --ignored forged_key_outside_signed_tbs_is_rejected
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn forged_key_outside_signed_tbs_is_rejected() {
+    use c2pa_x509_zk_demo::{circuit, compute_manifest_stripped_asset_digest, ManifestData, NativeCircuitPaths};
+    use p256::ecdsa::SigningKey;
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let victim_cert_der = std::fs::read(root.join("fixtures/certs/signer-cert.der")).unwrap();
+    let ca_cert_der = std::fs::read(root.join("fixtures/certs/ca-cert.der")).unwrap();
+
+    // Attacker key: never certified by anyone.
+    let attacker = SigningKey::from_bytes(&[0x42u8; 32].into()).unwrap();
+    let point = attacker.verifying_key().to_encoded_point(false);
+
+    let manifest_data = ManifestData {
+        claim_hash: compute_manifest_stripped_asset_digest(&root.join("fixtures/cards.png")).unwrap(),
+        leaf_cert_der: victim_cert_der.clone(),
+        ca_certs_der: vec![ca_cert_der.clone()],
+        cose_signature: Vec::new(),
+        photo_timestamp: 1_893_456_000, // 2030-01-01, after the victim cert expires
+    };
+    let proof_inputs =
+        circuit::prepare_inputs(&manifest_data, &attacker.to_bytes(), &ca_cert_der).unwrap();
+    let mut inputs = circuit::proof_inputs_to_circuit(&proof_inputs).unwrap();
+
+    // Append 0x04 || X || Y and two UTCTime fields after the certificate.
+    let mut appended = point.as_bytes().to_vec();
+    let not_before_offset = victim_cert_der.len() + appended.len();
+    appended.extend_from_slice(&[0x17, 0x0d]);
+    appended.extend_from_slice(b"200101000000Z");
+    let not_after_offset = victim_cert_der.len() + appended.len();
+    appended.extend_from_slice(&[0x17, 0x0d]);
+    appended.extend_from_slice(b"491231235959Z");
+    for (i, b) in appended.iter().enumerate() {
+        inputs.cert_der[victim_cert_der.len() + i] = b.to_string();
+    }
+    inputs.spki_x_offset = (victim_cert_der.len() + 1).to_string();
+    inputs.not_before_offset = not_before_offset.to_string();
+    inputs.not_after_offset = not_after_offset.to_string();
+
+    let paths = NativeCircuitPaths::default_for_circuit(&root.join("circuits"), "x509_issue_and_possession");
+    assert!(paths.setup_complete(), "circuit setup required: see README Building Circuits");
+
+    // Either proof generation fails, or the proof it produces does not verify.
+    let accepted = match c2pa_x509_zk_demo::generate_proof_native(&inputs, &paths) {
+        Err(_) => false,
+        Ok(proof) => c2pa_x509_zk_demo::verify_proof_native(&proof, &paths).unwrap_or(false),
+    };
+    assert!(
+        !accepted,
+        "circuit accepted a public key from outside the CA-signed TBSCertificate"
+    );
+}

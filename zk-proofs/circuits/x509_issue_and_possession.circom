@@ -12,11 +12,12 @@ include "circomlib/circuits/comparators.circom";
  * holds a private key whose corresponding certificate was issued by a trusted
  * CA, without revealing which certificate was used.
  *
- * The raw DER certificate bytes are a private input.  X509Parse verifies the
- * DER structure and extracts the subject public key in-circuit.  Binding the
- * SPKI to the same DER bytes that carry the CA signature (Step 2) prevents
- * the key-mixing attack where a prover pairs someone else's CA-signed cert
- * with their own key pair.
+ * The raw DER certificate bytes are a private input.  X509Parse extracts the
+ * subject public key and validity period in-circuit and pins both inside the
+ * TBSCertificate, the bytes covered by the CA signature (Step 2).  This
+ * prevents the key-mixing attack where a prover pairs someone else's CA-signed
+ * cert with their own key pair: certDer is prover-supplied, so a field outside
+ * the signed TBS (e.g. appended after the certificate) must not be accepted.
  *
  * Current implementation status:
  *
@@ -101,9 +102,9 @@ template X509IssueAndPossession(maxCertBytes, n, k) {
     // Step 1: Parse Certificate
     // =========================================================================
     // Feed the raw DER bytes into X509Parse, which verifies the DER structure
-    // and extracts the subject public key.  Doing this in-circuit is what
-    // prevents the key-mixing attack: the SPKI is provably from the same
-    // certificate bytes that the CA signed (once Step 2 is complete).
+    // and extracts the subject public key.  X509Parse pins the SPKI and
+    // Validity fields inside the TBS bytes that Step 2 checks the CA signed,
+    // which is what prevents the key-mixing attack.
     // maxTbsPadded = next multiple of 64 >= maxCertBytes-16 = 1536 for 1500.
     var maxTbsPadded = 1536;
     component parser = X509Parse(maxCertBytes, maxTbsPadded, n, k);

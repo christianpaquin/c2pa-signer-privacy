@@ -91,20 +91,39 @@ The ZK approach uses a Groth16 zkSNARK to prove that the signer possesses a vali
 - `claimSigR[6]`, `claimSigS[6]`: Signer's ECDSA signature over the manifest-stripped asset digest carried in `claimHash`
 
 **Relations proved:**
-1. `x509_parse.circom` extracts the TBSCertificate hash and SPKI from `certDer` in-circuit — the certificate structure is enforced by the proof itself
+1. `x509_parse.circom` extracts the TBSCertificate hash, the subject public key, and the validity period from `certDer` in-circuit. The public key and validity fields must carry their exact DER encoding and lie inside the TBSCertificate, the bytes the CA signed (see [Certificate field binding](#certificate-field-binding))
 2. `caPubKeyX/Y` verifies the CA signature over the parsed TBSCertificate — the cert was issued by the trusted CA
 3. The parsed subject public key verifies the signer's signature over `claimHash` — the prover holds the corresponding private key
 4. `parser.notBefore ≤ photoTimestamp ≤ parser.notAfter` — the cert was valid when the asset was anonymized/processed (timestamps parsed in-circuit from certDer)
 
 **Pending (required for production soundness):**
 - RFC 5280 field validation (version, algorithm OID, key-usage extensions)
+- A full DER walk of the TBSCertificate (see [Certificate field binding](#certificate-field-binding))
 - Optional: revocation check via short-lived certs or an accumulator commitment
+
+### Certificate field binding
+
+The prover supplies the whole certificate buffer (`certDer`, 1500 bytes) and the byte offsets of the fields the circuit reads. Only the TBSCertificate slice of that buffer is covered by the CA's signature; everything else, including the space after the certificate, is under the prover's control. Each field the circuit uses must therefore be pinned inside the signed slice:
+
+- **Subject public key:** the 27 bytes before `spkiXOffset` must be the DER encoding of a P-256 SubjectPublicKeyInfo (`30 59 30 13 06 07 2A8648CE3D0201 06 08 2A8648CE3D030107 03 42 00 04`), and the whole 91-byte field must lie within `[tbsOffset + 4, tbsOffset + 4 + tbsLen)`.
+- **Validity:** a `30 1E` SEQUENCE header must precede `notBefore`, `notAfter` must immediately follow it, both UTCTimes must end in `Z`, and the whole 32-byte field must lie within the same range.
+- **Offsets** are range-checked to 11 bits so the comparisons cannot wrap around the field, and the TBSCertificate must end within `certLen ≤ 1500`.
+
+Earlier versions checked only the local tags (a `0x04` before the key, `17 0D` before each date) without tying them to the signed slice. A prover with no certificate could then append their own key and arbitrary validity dates after any genuine certificate from the CA and produce a proof that verified. `forged_key_outside_signed_tbs_is_rejected` in the integration tests replays that attack.
+
+Remaining limitation: this is not a full DER walk of the TBSCertificate. A byte sequence matching the SPKI or Validity encoding inside another TBS field (for example, an extension) would also be accepted; exploiting that requires the CA to have signed a certificate containing such content. A full walk is part of [roadmap item 7](#7-full-certificate-validation-in-the-circuit).
+
+The placement checks have fast tests (a few seconds, needs `circom` and `node`):
+
+```bash
+python3 circuits/test/test_placement.py
+```
 
 The in-circuit SHA-256 is implemented via `Sha256Bytes(1536)` from `@zk-email/circuits`.  The prover supplies `tbsHashPaddedBytes[1536]` (the TBS DER bytes with standard SHA-256 padding) and the circuit verifies that the first `4+tbsLen` bytes match `certDer[tbsOffset..]`, then hashes the buffer in-circuit and feeds the result into the CA ECDSA check.
 
 ### Constraint Count
 
-The compiled circuit has **12,073,163 constraints** (measured: reported by `circom` and recorded in the `.r1cs` header). Use this value for capacity planning.
+The compiled circuit has **12,208,271 constraints** (measured: reported by `circom` and recorded in the `.r1cs` header). Use this value for capacity planning.
 
 The per-component figures below are estimates, not measurements:
 
@@ -114,10 +133,11 @@ The per-component figures below are estimates, not measurements:
 | `X509Parse` TBS binding (1536 × `SelectByte` + 1536 × `LessEqThan`) | ~4,320,000 |
 | `Sha256Bytes(1536)` | ~720,000 |
 | SPKI extraction (64 × `SelectByte`) | ~90,000 |
+| SPKI / Validity placement checks (35 × `SelectByte` + range checks) | ~157,600 |
 | UTCTime parsing (2 × `UTCTimeToUnix`) | ~500 |
 | Validity period range checks (`Num2Bits(32)` × 2) | ~70 |
-| Sum of estimates | ~9,076,000 |
-| **Measured total** | **12,073,163** |
+| Sum of estimates | ~9,234,000 |
+| **Measured total** | **12,208,271** |
 
 > **Note:** The estimates leave ~3M constraints (about a quarter of the circuit) unaccounted for. Wiring, `BytesToRegisters` conversions, and other glue logic explain some of the gap, but at least one component estimate is probably too low. Per-component measurements are planned as part of [roadmap item 2](#2-quick-circuit-win-cheaper-tbs-binding).
 
@@ -184,16 +204,16 @@ circuits/
 ```
 
 `x509_issue_and_possession.circom` is the sole proof circuit. It accepts the raw DER
-certificate bytes and parses them in-circuit via `x509_parse.circom`, ensuring that
-the CA signature, the subject public key, and the validity period are all bound to the
-same certificate — preventing key-mixing attacks that would otherwise be possible if
-fields were pre-computed off-circuit.
+certificate bytes and parses them in-circuit via `x509_parse.circom`, which pins the
+subject public key and the validity period inside the TBSCertificate the CA signed (see
+[Certificate field binding](#certificate-field-binding)). This prevents a prover from
+pairing someone else's CA-signed certificate with their own key pair.
 
 ### Circuit Statistics
 
 | Metric | Value | Notes |
 |--------|-------|-------|
-| Constraints | **12,073,163** (measured) | Two ECDSA verifs (~3.9M) + TBS binding (~4.3M) + SHA-256 (~720K) + parsing + UTCTime |
+| Constraints | **12,208,271** (measured) | Two ECDSA verifs (~3.9M) + TBS binding + SHA-256 (~720K) + field placement (~158K) + parsing + UTCTime |
 | Constraints (with VarShiftLeft TBS binding) | ~8,250,000 (estimated) | Replace 1536 × SelectByte with VarShiftLeft from @zk-email/circuits; depends on the TBS-binding estimate above |
 | Constraints (with Efficient ECDSA for Step 4) | ~11,470,000 (estimated) | See optimisation note above — soundness caveat applies |
 | Proving key size | ~2.3 GB (measured) | Native Rust key generated by `ark-groth16` from `.r1cs` |
@@ -364,7 +384,7 @@ The `photoTimestamp` public input is chosen by the prover and ignored by the ver
 
 ### 7. Full certificate validation in the circuit
 
-Complete the RFC 5280 / C2PA certificate-profile checks listed under [Pending](#zk-proof-statement): certificate version, signature algorithm OID, key usage, `CA:FALSE`, and the C2PA / document-signing EKU. Without these, any certificate the CA has issued (including a CA certificate) can produce a valid proof.
+Complete the RFC 5280 / C2PA certificate-profile checks listed under [Pending](#zk-proof-statement): certificate version, signature algorithm OID, key usage, `CA:FALSE`, and the C2PA / document-signing EKU. Without these, any certificate the CA has issued (including a CA certificate) can produce a valid proof. This includes walking the TBSCertificate's DER structure in-circuit, so the public key and validity fields are located by structure rather than by matching their encoding (see [Certificate field binding](#certificate-field-binding)).
 
 Depends on decision D1: with a CA-published accumulator, the CA validates certificates when it builds the root, and most of this item becomes unnecessary.
 
@@ -393,6 +413,7 @@ Removing the certificate is necessary but not sufficient. The anonymizer should 
 - Generate test PKI at test time rather than relying on committed certificates with short validity periods.
 - Run the placeholder-mode suite in CI, and periodically run the full real-proof end-to-end test (it needs ~28 GB of RAM).
 - Fix key distribution. The committed `x509_issue_and_possession_native.vk` is not usable on its own: the matching proving key is not committed, so every user who runs setup generates new random keys and overwrites it. Either publish both keys from a single setup (the proving key is ~2.4 GB), or stop committing the verifying key.
+- Enable ark-circom's `sanity_check` in the prover. It is off by default, so witness generation does not check constraints: an input the circuit rejects still produces a proof after ~20 minutes, which then fails verification. With it on, such inputs fail immediately with the failing assertion.
 - Bring `circuits/build.sh` in line with the working steps above. It currently uses a snarkjs/pot20 flow that is too small for this circuit and omits the include paths.
 
 ## Toolchain

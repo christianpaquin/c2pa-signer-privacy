@@ -26,8 +26,11 @@ thiserror = "1.0"
 clap = { version = "4.4", features = ["derive"] }
 
 # Crypto primitives (for hashing, signatures before circuit)
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["oid"] }
 p256 = { version = "0.13", features = ["ecdsa"] }
+p384 = { version = "0.13", features = ["ecdsa"] }
+rsa = "0.9"
+const-oid = { version = "0.9", features = ["db"] }
 x509-cert = "0.2"
 der = "0.7"
 num-bigint = "0.4"

@@ -1,339 +1,242 @@
+//! CLI integration tests. Each test generates its own C2PA-like test PKI
+//! (root -> issuing CA -> signer) with generate-test-pki.sh.
+
+use assert_cmd::assert::Assert;
 use assert_cmd::Command;
-use c2pa::{settings::Settings, Reader};
+use c2pa_x509_zk_demo::{
+    compute_manifest_stripped_asset_digest, extract_subject_dn,
+    manifest::{read_anonymized_asset, rewrite_manifest_with_zk_proof},
+    pem_to_der_certs, spki_key_id, X509ZkSignerProofAssertion,
+};
 use predicates::prelude::*;
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
-use tempfile::tempdir;
+use std::process::Stdio;
+use tempfile::{tempdir, TempDir};
 
-fn parse_pem_chain(pem_chain: &str) -> Vec<Vec<u8>> {
-    let start_marker = "-----BEGIN CERTIFICATE-----";
-    let end_marker = "-----END CERTIFICATE-----";
+/// The zk-proofs/ directory.
+fn zk_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
 
-    let mut certs = Vec::new();
-    let mut remaining = pem_chain;
+fn cards() -> PathBuf {
+    zk_root().join("fixtures/cards.png")
+}
 
-    while let Some(start) = remaining.find(start_marker) {
-        let after_start = &remaining[start + start_marker.len()..];
-        let end = after_start.find(end_marker).expect("malformed PEM chain");
-        let base64_content: String = after_start[..end]
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-        use base64::Engine;
-        let der = base64::engine::general_purpose::STANDARD
-            .decode(base64_content)
-            .expect("invalid base64 in PEM chain");
-        certs.push(der);
-        remaining = &after_start[end + end_marker.len()..];
+/// A generated test PKI in a temporary directory.
+struct Pki {
+    _dir: TempDir,
+    path: PathBuf,
+}
+
+impl Pki {
+    fn generate(name: &str) -> Self {
+        let dir = tempdir().unwrap();
+        let ok = std::process::Command::new("bash")
+            .arg(zk_root().join("generate-test-pki.sh"))
+            .arg(dir.path())
+            .arg(name)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "generate-test-pki.sh failed");
+        let path = dir.path().to_path_buf();
+        Self { _dir: dir, path }
     }
 
-    certs
-}
-
-fn read_cert_chain_from_asset(asset_path: &Path, disable_verify: bool) -> Vec<Vec<u8>> {
-    if disable_verify {
-        let settings_json = r#"{
-            "verify": {
-                "verify_after_reading": false
-            }
-        }"#;
-        Settings::from_string(settings_json, "json").expect("failed to disable verification");
+    fn file(&self, name: &str) -> PathBuf {
+        self.path.join(name)
     }
 
-    let reader = Reader::from_file(asset_path).expect("failed to read asset manifest");
-    let manifest = reader.active_manifest().expect("missing active manifest");
-    let signature = manifest.signature_info().expect("missing signature info");
-    parse_pem_chain(signature.cert_chain())
+    fn read(&self, name: &str) -> Vec<u8> {
+        std::fs::read(self.file(name)).unwrap()
+    }
 }
 
-fn run_openssl(args: &[&str], cwd: &Path) {
-    let status = ProcessCommand::new("openssl")
-        .args(args)
-        .current_dir(cwd)
-        .status()
-        .expect("failed to run openssl");
-    assert!(status.success(), "openssl command failed: {:?}", args);
+fn path_str(p: &Path) -> &str {
+    p.to_str().unwrap()
 }
 
-fn write_leaf_extensions(path: &Path) {
-    std::fs::write(
-        path,
-        "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,nonRepudiation\nextendedKeyUsage=critical,1.3.6.1.5.5.7.3.36\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always\n",
-    )
-    .expect("failed to write leaf extension file");
-}
-
-fn generate_alternate_cert_chain(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
-    let ca_key = dir.join("alt-ca.key");
-    let ca_cert = dir.join("alt-ca.pem");
-    let signer_key = dir.join("alt-signer.key");
-    let signer_csr = dir.join("alt-signer.csr");
-    let signer_cert = dir.join("alt-signer.pem");
-    let signer_ext = dir.join("alt-signer.ext");
-
-    run_openssl(
-        &["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", ca_key.to_str().unwrap()],
-        dir,
-    );
-    run_openssl(
-        &[
-            "req", "-x509", "-new", "-nodes",
-            "-key", ca_key.to_str().unwrap(),
-            "-sha256",
-            "-days", "365",
-            "-out", ca_cert.to_str().unwrap(),
-            "-subj", "/CN=Alt ZK Test CA/O=C2PA Alt Test/C=US",
-            "-addext", "basicConstraints=critical,CA:TRUE",
-            "-addext", "keyUsage=critical,keyCertSign,cRLSign",
-        ],
-        dir,
-    );
-
-    run_openssl(
-        &["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", signer_key.to_str().unwrap()],
-        dir,
-    );
-    run_openssl(
-        &[
-            "req", "-new",
-            "-key", signer_key.to_str().unwrap(),
-            "-out", signer_csr.to_str().unwrap(),
-            "-subj", "/CN=Alt ZK Test Signer/O=C2PA Alt Test/C=US",
-        ],
-        dir,
-    );
-
-    write_leaf_extensions(&signer_ext);
-    run_openssl(
-        &[
-            "x509", "-req",
-            "-in", signer_csr.to_str().unwrap(),
-            "-CA", ca_cert.to_str().unwrap(),
-            "-CAkey", ca_key.to_str().unwrap(),
-            "-CAcreateserial",
-            "-out", signer_cert.to_str().unwrap(),
-            "-days", "90",
-            "-sha256",
-            "-extfile", signer_ext.to_str().unwrap(),
-        ],
-        dir,
-    );
-
-    (signer_cert, signer_key, ca_cert)
-}
-
-/// Test the sign CLI creates a valid C2PA asset
-#[test]
-fn sign_creates_valid_asset() {
-    let dir = tempdir().expect("failed to create temp dir");
-    let output_path = dir.path().join("signed.png");
-
+/// Sign `cards.png` with the PKI's signer; the chain is signer + issuing CA.
+fn sign(pki: &Pki, output: &Path) {
     Command::cargo_bin("c2pa-x509-zk-sign")
         .unwrap()
         .args([
-            "--input", "fixtures/cards.png",
-            "--output", output_path.to_str().unwrap(),
-            "--cert", "fixtures/certs/signer-cert.pem",
-            "--key", "fixtures/certs/signer-key.pem",
-            "--ca", "fixtures/certs/ca-cert.pem",
+            "--input", path_str(&cards()),
+            "--output", path_str(output),
+            "--cert", path_str(&pki.file("signer.pem")),
+            "--key", path_str(&pki.file("signer.key")),
+            "--ca", path_str(&pki.file("issuing-ca.pem")),
         ])
-        .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
         .assert()
         .success()
         .stdout(predicate::str::contains("Signed asset written"));
-
-    assert!(output_path.exists());
 }
 
-/// Test the anonymizer CLI creates an anonymized asset with placeholder proof
-#[test]
-fn anonymizer_creates_anonymized_asset_placeholder() {
-    let dir = tempdir().expect("failed to create temp dir");
-    let signed_path = dir.path().join("signed.png");
-    let anon_path = dir.path().join("anon.png");
-
-    // First sign the asset
-    Command::cargo_bin("c2pa-x509-zk-sign")
-        .unwrap()
-        .args([
-            "--input", "fixtures/cards.png",
-            "--output", signed_path.to_str().unwrap(),
-            "--cert", "fixtures/certs/signer-cert.pem",
-            "--key", "fixtures/certs/signer-key.pem",
-            "--ca", "fixtures/certs/ca-cert.pem",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
-        .assert()
-        .success();
-
-    // Then anonymize it (use --placeholder for testing without full ZK setup)
+fn anonymize_placeholder(signed: &Path, output: &Path, trust_list: &Path) -> Assert {
     Command::cargo_bin("c2pa-x509-zk-anonymizer")
         .unwrap()
         .args([
-            "--input", signed_path.to_str().unwrap(),
-            "--output", anon_path.to_str().unwrap(),
-            "--ca", "fixtures/certs/ca-cert.pem",
+            "--input", path_str(signed),
+            "--output", path_str(output),
+            "--trust-list", path_str(trust_list),
             "--placeholder",
         ])
-        .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
+        .current_dir(zk_root())
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Anonymized asset written"));
-
-    assert!(anon_path.exists());
 }
 
-/// Test the verify CLI correctly identifies placeholder proofs
-#[test]
-fn verify_recognizes_placeholder_proof() {
-    let dir = tempdir().expect("failed to create temp dir");
-    let signed_path = dir.path().join("signed.png");
-    let anon_path = dir.path().join("anon.png");
-
-    // Sign
-    Command::cargo_bin("c2pa-x509-zk-sign")
-        .unwrap()
-        .args([
-            "--input", "fixtures/cards.png",
-            "--output", signed_path.to_str().unwrap(),
-            "--cert", "fixtures/certs/signer-cert.pem",
-            "--key", "fixtures/certs/signer-key.pem",
-            "--ca", "fixtures/certs/ca-cert.pem",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
-        .assert()
-        .success();
-
-    // Anonymize (use --placeholder for testing)
-    Command::cargo_bin("c2pa-x509-zk-anonymizer")
-        .unwrap()
-        .args([
-            "--input", signed_path.to_str().unwrap(),
-            "--output", anon_path.to_str().unwrap(),
-            "--ca", "fixtures/certs/ca-cert.pem",
-            "--placeholder",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
-        .assert()
-        .success();
-
-    // Verify (should recognize placeholder and exit non-zero)
+fn verify(anonymized: &Path, trust_list: &Path) -> Assert {
     Command::cargo_bin("c2pa-x509-zk-verify")
         .unwrap()
-        .args([
-            "--input", anon_path.to_str().unwrap(),
-            "--ca", "fixtures/certs/ca-cert.pem",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
+        .args(["--input", path_str(anonymized), "--trust-list", path_str(trust_list)])
+        .current_dir(zk_root())
         .assert()
-        .failure()
-        .stdout(predicate::str::contains("Issuer key ID matches trusted CA"))
-        .stderr(predicate::str::contains("placeholder"));
 }
 
-/// Test verification fails with wrong CA
+/// Sign and anonymize (placeholder proof) with the PKI's own trust list.
+fn signed_and_anonymized(pki: &Pki, dir: &Path) -> (PathBuf, PathBuf) {
+    let signed = dir.join("signed.png");
+    let anon = dir.join("anon.png");
+    sign(pki, &signed);
+    anonymize_placeholder(&signed, &anon, &pki.file("trust-list.pem")).success();
+    (signed, anon)
+}
+
+/// The signed asset's x5chain, read without c2pa-rs trust validation.
+fn signed_chain(asset: &Path) -> Vec<Vec<u8>> {
+    c2pa::settings::Settings::from_string(r#"{"verify": {"verify_after_reading": false}}"#, "json").unwrap();
+    let reader = c2pa::Reader::from_file(asset).unwrap();
+    let info = reader.active_manifest().unwrap().signature_info().unwrap().cert_chain().to_string();
+    pem_to_der_certs(&info).unwrap()
+}
+
+/// Build an anonymized asset directly through the library, with a chosen
+/// x5chain and assertion, to exercise verifier checks the CLI never violates.
+fn crafted_asset(dir: &Path, issuing_chain: Vec<Vec<u8>>, issuer: String, key_id: String) -> PathBuf {
+    let out = dir.join("crafted.png");
+    let assertion = X509ZkSignerProofAssertion::new(
+        issuer,
+        key_id,
+        hex::encode(compute_manifest_stripped_asset_digest(&cards()).unwrap()),
+        "PLACEHOLDER_PROOF".into(),
+    );
+    rewrite_manifest_with_zk_proof(&cards(), &out, assertion, issuing_chain).unwrap();
+    out
+}
+
 #[test]
-fn verify_fails_with_wrong_ca() {
-    let dir = tempdir().expect("failed to create temp dir");
-    let signed_path = dir.path().join("signed.png");
-    let anon_path = dir.path().join("anon.png");
-    
-    // Create a different CA for testing
-    let wrong_ca_path = dir.path().join("wrong-ca.pem");
-    std::fs::write(&wrong_ca_path, r#"-----BEGIN CERTIFICATE-----
-MIIBkTCB+wIJAKHBfpegDjlNMA0GCSqGSIb3DQEBCwUAMBExDzANBgNVBAMMBldyb25n
-Q0EwHhcNMjQwMTAxMDAwMDAwWhcNMjUwMTAxMDAwMDAwWjARMQ8wDQYDVQQDDAZXcm9u
-Z0NBMFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAMJe7M9gR7ylPEKVq0LV5V3kFr2ViPhn
-yY9hJaEqEdP+M3+KkP/nRJH9DMLE6BNzNKNb/9BQJEE7ZwA8vBqKNZ0CAwEAAaNTMFEw
-HQYDVR0OBBYEFDhXTvGcbQo/vDC/N6oNhHNHZIuQMB8GA1UdIwQYMBaAFDhXTvGcbQo/
-vDC/N6oNhHNHZIuQMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADQQBXkN3S
------END CERTIFICATE-----"#).unwrap();
-
-    // Sign with real CA
-    Command::cargo_bin("c2pa-x509-zk-sign")
-        .unwrap()
-        .args([
-            "--input", "fixtures/cards.png",
-            "--output", signed_path.to_str().unwrap(),
-            "--cert", "fixtures/certs/signer-cert.pem",
-            "--key", "fixtures/certs/signer-key.pem",
-            "--ca", "fixtures/certs/ca-cert.pem",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
-        .assert()
-        .success();
-
-    // Anonymize with real CA (use --placeholder for testing)
-    Command::cargo_bin("c2pa-x509-zk-anonymizer")
-        .unwrap()
-        .args([
-            "--input", signed_path.to_str().unwrap(),
-            "--output", anon_path.to_str().unwrap(),
-            "--ca", "fixtures/certs/ca-cert.pem",
-            "--placeholder",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
-        .assert()
-        .success();
-
-    // Verify with wrong CA should fail
-    Command::cargo_bin("c2pa-x509-zk-verify")
-        .unwrap()
-        .args([
-            "--input", anon_path.to_str().unwrap(),
-            "--ca", wrong_ca_path.to_str().unwrap(),
-        ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("key ID mismatch"));
+fn sign_embeds_signer_and_issuing_ca() {
+    let pki = Pki::generate("Sign Test");
+    let dir = tempdir().unwrap();
+    let signed = dir.path().join("signed.png");
+    sign(&pki, &signed);
+    assert_eq!(signed_chain(&signed), vec![pki.read("signer.der"), pki.read("issuing-ca.der")]);
 }
 
-/// Test verification fails if the anonymized asset bytes are modified.
+#[test]
+fn anonymized_x5chain_holds_only_the_issuing_ca() {
+    let pki = Pki::generate("Anon Test");
+    let dir = tempdir().unwrap();
+    let (_, anon) = signed_and_anonymized(&pki, dir.path());
+
+    let (assertion, chain) = read_anonymized_asset(&anon).unwrap();
+    assert_eq!(chain, vec![pki.read("issuing-ca.der")]);
+    assert_eq!(assertion.issuer, extract_subject_dn(&pki.read("issuing-ca.der")).unwrap());
+    assert_eq!(assertion.issuer_key_id, spki_key_id(&pki.read("issuing-ca.der")).unwrap());
+}
+
+/// The verifier gets through every trust check and stops at the placeholder
+/// proof (exit code 2), for each trust list form.
+#[test]
+fn verify_accepts_chain_to_trust_list_then_stops_at_placeholder() {
+    let pki = Pki::generate("Verify Test");
+    let dir = tempdir().unwrap();
+    let (_, anon) = signed_and_anonymized(&pki, dir.path());
+
+    // PEM bundle, the JSON trust list format, and a root-only trust list
+    // (the issuing CA is then validated by chaining to the root).
+    for trust_list in ["trust-list.pem", "trust-list.json", "root.pem"] {
+        verify(&anon, &pki.file(trust_list))
+            .code(2)
+            .stdout(predicate::str::contains("Issuing chain validates against the trust list"))
+            .stdout(predicate::str::contains("Assertion issuer matches the issuing CA"))
+            .stderr(predicate::str::contains("placeholder"));
+    }
+}
+
+#[test]
+fn verify_rejects_chain_not_in_trust_list() {
+    let pki = Pki::generate("Verify Test");
+    let other = Pki::generate("Other PKI");
+    let dir = tempdir().unwrap();
+    let (_, anon) = signed_and_anonymized(&pki, dir.path());
+
+    verify(&anon, &other.file("trust-list.pem"))
+        .failure()
+        .stderr(predicate::str::contains("Issuing chain is not trusted"));
+}
+
+#[test]
+fn anonymizer_rejects_signer_not_in_trust_list() {
+    let pki = Pki::generate("Anon Test");
+    let other = Pki::generate("Other PKI");
+    let dir = tempdir().unwrap();
+    let signed = dir.path().join("signed.png");
+    sign(&pki, &signed);
+
+    anonymize_placeholder(&signed, &dir.path().join("anon.png"), &other.file("trust-list.pem"))
+        .failure()
+        .stderr(predicate::str::contains("does not chain to the trust list"));
+}
+
+#[test]
+fn verify_rejects_assertion_not_matching_x5chain() {
+    let pki = Pki::generate("Verify Test");
+    let dir = tempdir().unwrap();
+    // x5chain holds the issuing CA, but the assertion names the root.
+    let anon = crafted_asset(
+        dir.path(),
+        vec![pki.read("issuing-ca.der")],
+        extract_subject_dn(&pki.read("root.der")).unwrap(),
+        spki_key_id(&pki.read("root.der")).unwrap(),
+    );
+    verify(&anon, &pki.file("trust-list.pem"))
+        .failure()
+        .stderr(predicate::str::contains("does not match the issuing CA"));
+}
+
+#[test]
+fn verify_rejects_signer_certificate_in_x5chain() {
+    let pki = Pki::generate("Verify Test");
+    let dir = tempdir().unwrap();
+    // A standard C2PA x5chain (signer first): not an issuing chain.
+    let anon = crafted_asset(
+        dir.path(),
+        vec![pki.read("signer.der"), pki.read("issuing-ca.der")],
+        extract_subject_dn(&pki.read("issuing-ca.der")).unwrap(),
+        spki_key_id(&pki.read("issuing-ca.der")).unwrap(),
+    );
+    verify(&anon, &pki.file("trust-list.pem"))
+        .failure()
+        .stderr(predicate::str::contains("not a CA certificate"));
+}
+
+/// Verification fails if the anonymized asset bytes are modified.
 #[test]
 fn verify_fails_for_tampered_asset() {
-    let dir = tempdir().expect("failed to create temp dir");
-    let signed_path = dir.path().join("signed.png");
-    let anon_path = dir.path().join("anon.png");
-    let tampered_path = dir.path().join("tampered.png");
+    let pki = Pki::generate("Tamper Test");
+    let dir = tempdir().unwrap();
+    let (_, anon) = signed_and_anonymized(&pki, dir.path());
 
-    Command::cargo_bin("c2pa-x509-zk-sign")
-        .unwrap()
-        .args([
-            "--input", "fixtures/cards.png",
-            "--output", signed_path.to_str().unwrap(),
-            "--cert", "fixtures/certs/signer-cert.pem",
-            "--key", "fixtures/certs/signer-key.pem",
-            "--ca", "fixtures/certs/ca-cert.pem",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
-        .assert()
-        .success();
-
-    Command::cargo_bin("c2pa-x509-zk-anonymizer")
-        .unwrap()
-        .args([
-            "--input", signed_path.to_str().unwrap(),
-            "--output", anon_path.to_str().unwrap(),
-            "--ca", "fixtures/certs/ca-cert.pem",
-            "--placeholder",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
-        .assert()
-        .success();
-
-    let mut bytes = std::fs::read(&anon_path).expect("failed to read anonymized asset");
-    let idx = bytes.iter().rposition(|byte| *byte != 0).expect("asset should contain non-zero bytes");
+    let mut bytes = std::fs::read(&anon).unwrap();
+    let idx = bytes.iter().rposition(|byte| *byte != 0).unwrap();
     bytes[idx] ^= 0x01;
-    std::fs::write(&tampered_path, bytes).expect("failed to write tampered asset");
+    let tampered = dir.path().join("tampered.png");
+    std::fs::write(&tampered, bytes).unwrap();
 
-    Command::cargo_bin("c2pa-x509-zk-verify")
-        .unwrap()
-        .args([
-            "--input", tampered_path.to_str().unwrap(),
-            "--ca", "fixtures/certs/ca-cert.pem",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
-        .assert()
+    verify(&tampered, &pki.file("trust-list.pem"))
         .failure()
         .stderr(predicate::str::contains("Asset binding digest mismatch"));
 }
@@ -351,67 +254,28 @@ fn anonymized_asset_does_not_reveal_signer() {
     use der::{Decode, Encode};
     use x509_cert::Certificate;
 
-    let dir = tempdir().expect("failed to create temp dir");
-    let signed_path = dir.path().join("signed-alt.png");
-    let anon_path = dir.path().join("anon-alt.png");
-    let (signer_cert, signer_key, ca_cert) = generate_alternate_cert_chain(dir.path());
+    let pki = Pki::generate("Leak Test");
+    let dir = tempdir().unwrap();
+    let (signed, anon) = signed_and_anonymized(&pki, dir.path());
 
-    Command::cargo_bin("c2pa-x509-zk-sign")
+    let signed_label = c2pa::Reader::from_file(&signed)
         .unwrap()
-        .args([
-            "--input", "fixtures/cards.png",
-            "--output", signed_path.to_str().unwrap(),
-            "--cert", signer_cert.to_str().unwrap(),
-            "--key", signer_key.to_str().unwrap(),
-            "--ca", ca_cert.to_str().unwrap(),
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
-        .assert()
-        .success();
-
-    Command::cargo_bin("c2pa-x509-zk-anonymizer")
-        .unwrap()
-        .args([
-            "--input", signed_path.to_str().unwrap(),
-            "--output", anon_path.to_str().unwrap(),
-            "--ca", ca_cert.to_str().unwrap(),
-            "--placeholder",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
-        .assert()
-        .success();
-
-    let signed_chain = read_cert_chain_from_asset(&signed_path, false);
-    let signed_label = Reader::from_file(&signed_path)
-        .expect("failed to read signed asset")
         .active_label()
         .expect("signed asset has no active manifest")
         .to_string();
-    let anonymized_bytes = std::fs::read(&anon_path).expect("failed to read anonymized asset");
+    let anonymized_bytes = std::fs::read(&anon).unwrap();
 
-    let signer_cert_der = &signed_chain[0];
-    let signer = Certificate::from_der(signer_cert_der).expect("failed to parse signer cert");
+    let signer_cert_der = pki.read("signer.der");
+    let signer = Certificate::from_der(&signer_cert_der).unwrap();
     let tbs = &signer.tbs_certificate;
     let signer_pubkey = tbs.subject_public_key_info.subject_public_key.raw_bytes();
     let signer_serial = tbs.serial_number.as_bytes();
-    let signer_subject = tbs.subject.to_der().expect("failed to encode signer subject");
+    let signer_subject = tbs.subject.to_der().unwrap();
 
-    assert!(
-        !contains(&anonymized_bytes, signer_cert_der),
-        "anonymized asset contains the signer certificate"
-    );
-    assert!(
-        !contains(&anonymized_bytes, signer_pubkey),
-        "anonymized asset contains the signer public key"
-    );
-    assert!(
-        !contains(&anonymized_bytes, signer_serial),
-        "anonymized asset contains the signer certificate serial number"
-    );
-    assert!(
-        !contains(&anonymized_bytes, &signer_subject),
-        "anonymized asset contains the signer subject DN"
-    );
+    assert!(!contains(&anonymized_bytes, &signer_cert_der), "anonymized asset contains the signer certificate");
+    assert!(!contains(&anonymized_bytes, signer_pubkey), "anonymized asset contains the signer public key");
+    assert!(!contains(&anonymized_bytes, signer_serial), "anonymized asset contains the signer certificate serial number");
+    assert!(!contains(&anonymized_bytes, &signer_subject), "anonymized asset contains the signer subject DN");
     assert!(
         !contains(&anonymized_bytes, signed_label.as_bytes()),
         "anonymized asset still contains the original signed manifest"
@@ -424,55 +288,30 @@ fn anonymized_asset_does_not_reveal_signer() {
 #[test]
 #[ignore]
 fn full_e2e_with_real_zk_proof() {
-    let dir = tempdir().expect("failed to create temp dir");
-    let signed_path = dir.path().join("signed.png");
-    let anon_path = dir.path().join("anon.png");
+    let pki = Pki::generate("E2E Test");
+    let dir = tempdir().unwrap();
+    let signed = dir.path().join("signed.png");
+    let anon = dir.path().join("anon.png");
+    sign(&pki, &signed);
 
-    // Step 1: Sign the asset with standard X.509/ECDSA
-    Command::cargo_bin("c2pa-x509-zk-sign")
-        .unwrap()
-        .args([
-            "--input", "fixtures/cards.png",
-            "--output", signed_path.to_str().unwrap(),
-            "--cert", "fixtures/certs/signer-cert.pem",
-            "--key", "fixtures/certs/signer-key.pem",
-            "--ca", "fixtures/certs/ca-cert.pem",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Signed asset written"));
-
-    // Step 2: Anonymize with real ZK proof (no --placeholder flag)
     // Note: This step takes ~10 minutes due to ZK proof generation
     Command::cargo_bin("c2pa-x509-zk-anonymizer")
         .unwrap()
         .args([
-            "--input", signed_path.to_str().unwrap(),
-            "--output", anon_path.to_str().unwrap(),
-            "--ca", "fixtures/certs/ca-cert.pem",
-            "--signer-key", "fixtures/certs/signer-key.pem",
+            "--input", path_str(&signed),
+            "--output", path_str(&anon),
+            "--trust-list", path_str(&pki.file("trust-list.json")),
+            "--signer-key", path_str(&pki.file("signer.key")),
             "--circuits-dir", "circuits",
         ])
-        .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
+        .current_dir(zk_root())
         .timeout(std::time::Duration::from_secs(45 * 60))
         .assert()
         .success()
         .stdout(predicate::str::contains("Proof generated"))
         .stdout(predicate::str::contains("Anonymized asset written"));
 
-    assert!(anon_path.exists());
-
-    // Step 3: Verify the ZK proof
-    Command::cargo_bin("c2pa-x509-zk-verify")
-        .unwrap()
-        .args([
-            "--input", anon_path.to_str().unwrap(),
-            "--ca", "fixtures/certs/ca-cert.pem",
-            "--circuits-dir", "circuits",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR").to_owned() + "/../..")
-        .assert()
+    verify(&anon, &pki.file("trust-list.pem"))
         .success()
         .stdout(predicate::str::contains("ZK proof verified successfully"));
 }
@@ -493,19 +332,19 @@ fn full_e2e_with_real_zk_proof() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn forged_key_outside_signed_tbs_is_rejected() {
-    use c2pa_x509_zk_demo::{circuit, compute_manifest_stripped_asset_digest, ManifestData, NativeCircuitPaths};
+    use c2pa_x509_zk_demo::{circuit, ManifestData, NativeCircuitPaths};
     use p256::ecdsa::SigningKey;
 
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let victim_cert_der = std::fs::read(root.join("fixtures/certs/signer-cert.der")).unwrap();
-    let ca_cert_der = std::fs::read(root.join("fixtures/certs/ca-cert.der")).unwrap();
+    let pki = Pki::generate("Forgery Test");
+    let victim_cert_der = pki.read("signer.der");
+    let ca_cert_der = pki.read("issuing-ca.der");
 
     // Attacker key: never certified by anyone.
     let attacker = SigningKey::from_bytes(&[0x42u8; 32].into()).unwrap();
     let point = attacker.verifying_key().to_encoded_point(false);
 
     let manifest_data = ManifestData {
-        claim_hash: compute_manifest_stripped_asset_digest(&root.join("fixtures/cards.png")).unwrap(),
+        claim_hash: compute_manifest_stripped_asset_digest(&cards()).unwrap(),
         leaf_cert_der: victim_cert_der.clone(),
         ca_certs_der: vec![ca_cert_der.clone()],
         cose_signature: Vec::new(),
@@ -530,7 +369,7 @@ async fn forged_key_outside_signed_tbs_is_rejected() {
     inputs.not_before_offset = not_before_offset.to_string();
     inputs.not_after_offset = not_after_offset.to_string();
 
-    let paths = NativeCircuitPaths::default_for_circuit(&root.join("circuits"), "x509_issue_and_possession");
+    let paths = NativeCircuitPaths::default_for_circuit(&zk_root().join("circuits"), "x509_issue_and_possession");
     assert!(paths.setup_complete(), "circuit setup required: see README Building Circuits");
 
     // Either proof generation fails, or the proof it produces does not verify.

@@ -16,7 +16,7 @@ Designs target the official [C2PA trust list](https://github.com/c2pa-org/confor
 | D1 | Trust model: what the circuit proves about issuance | Prototype and compare A, B, C | [E3](README.md#e3-trust-model-b-merkle-membership), [E4](README.md#e4-trust-model-c-snark-friendly-credential) (A is the current baseline) |
 | D2 | Proof system | Prototype and compare | [E6](README.md#e6-proof-systems) |
 | D3 | Curve | Compare BN254 and BLS12-381 | [E7](README.md#e7-curve-bn254-vs-bls12-381) |
-| D4 | Where the issuing CA chain lives | **Decided:** in `x5chain`, without the signer's certificate | [F1](README.md#f1-c2pa-like-test-pki-and-trust-lists) |
+| D4 | Where the issuing CA chain lives | **Decided:** in `x5chain`, without the signer's certificate | [F1](README.md#test-pki-and-trust-lists) |
 | D5 | How key possession is proved | Prototype and compare | [E5](README.md#e5-key-possession) |
 | D6 | Who anonymizes: signer-side or third-party | Prototype and compare | [E2](README.md#e2-anonymization-mode-signer-side-vs-third-party) |
 
@@ -36,7 +36,7 @@ Trade-offs:
 
 - A keeps the "no change to existing PKI" property but must verify each CA's actual signature algorithm in-circuit, and still needs a revocation answer.
 - With a registration entity, B and C make the circuit independent of the CA's key type, and the anonymity set can span every CA on the trust list (see [H4](README.md#h4-hiding-the-issuing-ca)). In exchange, the entity becomes a trust anchor (its key compromise allows forgery), learns who registered (but not what they later sign), and the anonymity set is limited to registered signers.
-- B's anonymity set is "keys valid at the time of the root", and verifiers must fetch fresh roots. Short-lived signer certificates (Pixel's last about 90 days and appear to be issued per capture or session) mean frequent registrations.
+- B's anonymity set is "keys valid at the time of the root", and verifiers must fetch fresh roots. Short-lived signer certificates (some deployments use ~90-day certificates that appear to be issued per capture or session) mean frequent registrations.
 - The interim trust list's directly trusted end-entity certificates map naturally onto B: membership in a published set of keys, buildable by anyone from the public list ([R3](README.md#r3-interim-list-allowed-signers-via-merkle-membership)).
 
 ## D2. Proof system
@@ -70,7 +70,7 @@ For a production privacy system, BN254's margin is hard to justify. Moot for pro
 
 ## D4. Where the issuing CA chain lives: decided
 
-**Decision:** the anonymized asset's `x5chain` carries the issuing CA chain (intermediates up to, but excluding, the trust anchor) and never the signer's certificate. When the issuing CA is itself a trust anchor, as for Pixel, the chain may be just that certificate.
+**Decision:** the anonymized asset's `x5chain` carries the issuing CA chain (intermediates up to, but excluding, the trust anchor) and never the signer's certificate. When the issuing CA is itself a trust anchor, as is common on the C2PA trust list, the chain may be just that certificate. Implemented in F1.
 
 This follows `x5chain`'s purpose but departs from C2PA's requirements for it:
 
@@ -93,4 +93,4 @@ Whichever proof carries possession is the one that must bind to the claim. In th
 - **Signer-side** (current): the anonymizer re-signs the asset with the signer's private key, and the circuit verifies that fresh signature. Only the original signer can anonymize, and only while they hold the key.
 - **Third-party**: the circuit verifies the **original** COSE signature over the **original** claim, under a certificate chaining to the trust list. No private key is needed, so anyone holding the asset (a newsroom receiving it, for example) can anonymize it, and the proof covers the original claim and all its assertions.
 
-Why it matters: device keys are often not exportable (Pixel keys are generated in the Titan M2 chip and appear to be short-lived), and keys for existing content are generally unavailable. For goal 2, third-party mode is likely the only way to anonymize content that already exists. Its costs: hashing the serialized claim in-circuit, and verifying the original signature with whatever algorithm the signer used (ES256 for Pixel; PS256 for many interim-list signers). It also lets parties other than the signer anonymize content, which may or may not be desirable.
+Why it matters: device keys are often not exportable (they are typically generated in secure hardware and may be short-lived), and keys for existing content are generally unavailable. For goal 2, third-party mode is likely the only way to anonymize content that already exists. Its costs: hashing the serialized claim in-circuit, and verifying the original signature with whatever algorithm the signer used (ES256 with P-256 signer keys is common on devices; PS256 for many interim-list signers). It also lets parties other than the signer anonymize content, which may or may not be desirable.

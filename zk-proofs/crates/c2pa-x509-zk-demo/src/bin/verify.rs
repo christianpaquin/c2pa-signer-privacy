@@ -1,10 +1,11 @@
 //! X.509 ZK Proof Verifier CLI
 //!
-//! Verifies that an anonymized C2PA asset contains a valid ZK proof
-//! that the original signer's certificate was issued by a trusted CA.
+//! Verifies that an anonymized C2PA asset contains a valid ZK proof that the
+//! original signer's certificate was issued by a CA whose chain (carried in
+//! the asset's x5chain) validates against a trust list.
 //!
 //! Usage:
-//!   c2pa-x509-zk-verify --input anon.jpg --ca root.pem
+//!   c2pa-x509-zk-verify --input anon.jpg --trust-list trust-list.pem
 
 use anyhow::{bail, Result};
 use clap::Parser;
@@ -14,22 +15,21 @@ use c2pa_x509_zk_demo::{
     bytes_to_registers, pubkey_registers_from_der,
     circuit_native::{NativeCircuitPaths, NativeProof, verify_proof_native},
     compute_manifest_stripped_asset_digest,
-    compute_key_id,
-    types::TrustedCaParams,
-    X509ZkSignerProofAssertion, ASSERTION_TYPE,
+    manifest::read_anonymized_asset,
+    spki_key_id, validate_issuing_chain, TrustList,
 };
 
 #[derive(Parser, Debug)]
 #[command(name = "c2pa-x509-zk-verify")]
-#[command(about = "Verify a ZK-anonymized C2PA asset against a trusted CA")]
+#[command(about = "Verify a ZK-anonymized C2PA asset against a trust list")]
 struct Args {
     /// Path to the anonymized asset
     #[arg(short, long)]
     input: PathBuf,
 
-    /// Path to the trusted CA certificate (PEM or DER)
+    /// Trust list: a PEM bundle of trust anchors, or the C2PA trust list JSON
     #[arg(long)]
-    ca: PathBuf,
+    trust_list: PathBuf,
 
     /// Expected issuer DN (optional, for additional validation)
     #[arg(long)]
@@ -45,21 +45,13 @@ fn main() -> Result<()> {
 
     println!("=== C2PA X.509 ZK Proof Verifier ===\n");
 
-    // Load trusted CA certificate
-    println!("Loading CA certificate from {:?}...", args.ca);
-    let ca_params = if args.ca.extension().map(|e| e == "pem").unwrap_or(false) {
-        TrustedCaParams::from_pem_file(&args.ca)?
-    } else {
-        TrustedCaParams::from_der_file(&args.ca)?
-    };
+    println!("Loading trust list from {:?}...", args.trust_list);
+    let trust = TrustList::from_file(&args.trust_list)?;
+    println!("  {} trust anchors ({} skipped)", trust.anchors.len(), trust.skipped);
 
-    // Compute expected CA key ID
-    let expected_key_id = compute_key_id(&ca_params.ca_cert_der);
-    println!("  Expected CA Key ID: {expected_key_id}");
-
-    // Extract ZK assertion from the asset (bypassing signature validation)
+    // Extract ZK assertion and issuing chain (bypassing signature validation)
     println!("\nReading ZK assertion from {:?}...", args.input);
-    let assertion = extract_zk_assertion_no_verify(&args.input)?;
+    let (assertion, issuing_chain) = read_anonymized_asset(&args.input)?;
 
     println!("  Assertion type: {}", assertion.assertion_type);
     println!("  Version: {}", assertion.version);
@@ -68,15 +60,30 @@ fn main() -> Result<()> {
     println!("  Claim Hash: {}", assertion.claim_hash);
     println!("  Circuit ID: {}", assertion.circuit_id);
     println!("  Backend: {}", assertion.backend);
+    println!("  x5chain: {} certificate(s)", issuing_chain.len());
 
-    // Verify issuer key ID matches trusted CA
-    if assertion.issuer_key_id != expected_key_id {
-        eprintln!("\n❌ Issuer key ID mismatch!");
-        eprintln!("   Expected: {expected_key_id}");
-        eprintln!("   Got: {}", assertion.issuer_key_id);
+    // The x5chain carries the issuing chain, issuing CA first. It must chain
+    // to the trust list at verification time.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    if let Err(e) = validate_issuing_chain(&issuing_chain, &trust, now) {
+        eprintln!("\n❌ Issuing chain is not trusted: {e:#}");
         std::process::exit(1);
     }
-    println!("\n✓ Issuer key ID matches trusted CA");
+    let issuing_ca_der = &issuing_chain[0];
+    println!("\n✓ Issuing chain validates against the trust list");
+
+    // The assertion's issuer name and key ID must describe that issuing CA.
+    let issuing_ca_dn = c2pa_x509_zk_demo::extract_subject_dn(issuing_ca_der)?;
+    let issuing_ca_key_id = spki_key_id(issuing_ca_der)?;
+    if assertion.issuer != issuing_ca_dn || assertion.issuer_key_id != issuing_ca_key_id {
+        eprintln!("\n❌ Assertion does not match the issuing CA in x5chain!");
+        eprintln!("   x5chain issuing CA: {issuing_ca_dn} (key ID {issuing_ca_key_id})");
+        eprintln!("   Assertion:          {} (key ID {})", assertion.issuer, assertion.issuer_key_id);
+        std::process::exit(1);
+    }
+    println!("✓ Assertion issuer matches the issuing CA");
 
     let expected_claim_hash = hex::encode(compute_manifest_stripped_asset_digest(&args.input)?);
     if assertion.claim_hash != expected_claim_hash {
@@ -146,15 +153,16 @@ fn main() -> Result<()> {
         );
     }
 
-    // Reconstruct expected caPubKeyX/Y registers from the trusted CA cert.
+    // Reconstruct expected caPubKeyX/Y registers from the issuing CA, whose
+    // chain was validated above.
     let (expected_ca_x, expected_ca_y) =
-        pubkey_registers_from_der(&ca_params.ca_cert_der)
+        pubkey_registers_from_der(issuing_ca_der)
             .map_err(|e| anyhow::anyhow!("failed to extract CA public key registers: {e}"))?;
 
     for (i, expected) in expected_ca_x.iter().enumerate() {
         if &proof.public_inputs[i] != expected {
             eprintln!("\n❌ Public signal mismatch: caPubKeyX[{i}]");
-            eprintln!("   Expected (from trusted CA cert):  {expected}");
+            eprintln!("   Expected (from issuing CA):  {expected}");
             eprintln!("   Embedded in proof:                {}", proof.public_inputs[i]);
             eprintln!("\n   The proof was generated for a DIFFERENT CA public key.");
             std::process::exit(1);
@@ -163,13 +171,13 @@ fn main() -> Result<()> {
     for (i, expected) in expected_ca_y.iter().enumerate() {
         if &proof.public_inputs[K + i] != expected {
             eprintln!("\n❌ Public signal mismatch: caPubKeyY[{i}]");
-            eprintln!("   Expected (from trusted CA cert):  {expected}");
+            eprintln!("   Expected (from issuing CA):  {expected}");
             eprintln!("   Embedded in proof:                {}", proof.public_inputs[K + i]);
             eprintln!("\n   The proof was generated for a DIFFERENT CA public key.");
             std::process::exit(1);
         }
     }
-    println!("✓ Proof CA public key matches trusted CA");
+    println!("✓ Proof CA public key matches the issuing CA");
 
     // Reconstruct expected claimHash registers from the recomputed asset digest.
     let claim_hash_bytes: [u8; 32] = hex::decode(&expected_claim_hash)
@@ -193,7 +201,7 @@ fn main() -> Result<()> {
         Ok(true) => {
             println!("\n✅ ZK proof verified successfully!");
             println!("   Issuer: {}", assertion.issuer);
-            println!("   The asset was anonymized using a certificate issued by the trusted CA.");
+            println!("   The asset was anonymized using a certificate issued by a CA that chains to the trust list.");
         }
         Ok(false) => {
             eprintln!("\n❌ ZK proof verification failed!");
@@ -206,31 +214,4 @@ fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Extract ZK assertion without verifying the COSE signature.
-/// 
-/// For ZK-anonymized manifests, the COSE signature uses a private-use algorithm
-/// that c2pa-rs doesn't recognize. We need to disable signature verification
-/// and directly read the assertion.
-fn extract_zk_assertion_no_verify(path: &PathBuf) -> Result<X509ZkSignerProofAssertion> {
-    use c2pa::{Reader, settings::Settings};
-    
-    // Disable signature verification for custom algorithms
-    let settings_json = r#"{
-        "verify": {
-            "verify_after_reading": false
-        }
-    }"#;
-    Settings::from_string(settings_json, "json")
-        .map_err(|e| anyhow::anyhow!("failed to load settings: {e}"))?;
-    
-    let reader = Reader::from_file(path)
-        .map_err(|e| anyhow::anyhow!("failed to read manifest: {e}"))?;
-    
-    let manifest = reader.active_manifest()
-        .ok_or_else(|| anyhow::anyhow!("no active manifest in asset"))?;
-    
-    manifest.find_assertion(ASSERTION_TYPE)
-        .map_err(|e| anyhow::anyhow!("missing {ASSERTION_TYPE} assertion: {e}"))
 }

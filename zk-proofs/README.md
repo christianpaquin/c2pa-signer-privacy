@@ -1,6 +1,6 @@
 # X.509 Zero-Knowledge Anonymizer for C2PA
 
-This project implements privacy-preserving signatures for C2PA manifests using zero-knowledge proofs. It replaces an existing X.509/COSE signature with a ZK proof that the asset was signed by a certificate issued by a trusted CA, without revealing the signer's identity.
+This project implements privacy-preserving signatures for C2PA manifests using zero-knowledge proofs. It replaces an existing X.509/COSE signature with a ZK proof that the asset was signed by a certificate issued by a CA that chains to a trust list, without revealing the signer's identity.
 
 ## Overview
 
@@ -9,7 +9,7 @@ This approach keeps standard X.509/ECDSA-P256 signing, then adds a post-processi
 - Generates a Groth16 ZK proof demonstrating valid CA issuance
 - Replaces the manifest signature with the proof
 
-The verifier can confirm the asset was anonymized from an asset signed by *someone* with a certificate from the trusted CA, without learning *who*.
+The verifier can confirm the asset was anonymized from an asset signed by *someone* with a certificate from a trusted CA, without learning *who*. The anonymized asset's `x5chain` carries the issuing CA chain (never the signer's certificate), which the verifier validates against a trust list.
 
 ## Quick Start
 
@@ -19,13 +19,16 @@ The verifier can confirm the asset was anonymized from an asset signed by *someo
 # Build
 cargo build --release
 
-# 1. Sign an asset with standard X.509/ECDSA
+# Generate a test PKI and trust lists in fixtures/pki (see Test PKI)
+./generate-test-pki.sh
+
+# 1. Sign an asset with standard X.509/ECDSA (x5chain: signer + issuing CA)
 cargo run --release --bin c2pa-x509-zk-sign -- \
   --input fixtures/cards.png \
   --output /tmp/signed.png \
-  --cert fixtures/certs/signer-cert.pem \
-  --key fixtures/certs/signer-key.pem \
-  --ca fixtures/certs/ca-cert.pem
+  --cert fixtures/pki/signer.pem \
+  --key fixtures/pki/signer.key \
+  --ca fixtures/pki/issuing-ca.pem
 
 # 2. Anonymize: Replace signature with a Groth16 ZK proof
 # This step is slow: ~10 minutes and ~12 GB of RAM (see Performance).
@@ -34,14 +37,14 @@ cargo run --release --bin c2pa-x509-zk-sign -- \
 cargo run --release --bin c2pa-x509-zk-anonymizer -- \
   --input /tmp/signed.png \
   --output /tmp/anon.png \
-  --ca fixtures/certs/ca-cert.pem \
-  --signer-key fixtures/certs/signer-key.pem \
-  --cert fixtures/certs/signer-cert.pem
+  --trust-list fixtures/pki/trust-list.json \
+  --signer-key fixtures/pki/signer.key \
+  --cert fixtures/pki/signer.pem
 
-# 3. Verify the anonymized asset
+# 3. Verify the anonymized asset against a trust list (PEM or JSON)
 cargo run --release --bin c2pa-x509-zk-verify -- \
   --input /tmp/anon.png \
-  --ca fixtures/certs/ca-cert.pem
+  --trust-list fixtures/pki/trust-list.pem
 ```
 
 ## CLI Tools
@@ -50,7 +53,7 @@ cargo run --release --bin c2pa-x509-zk-verify -- \
 |--------|-------------|
 | `c2pa-x509-zk-sign` | Create standard C2PA signed assets (ES256/P-256) |
 | `c2pa-x509-zk-anonymizer` | Anonymize signed assets by replacing COSE signature with ZK proof |
-| `c2pa-x509-zk-verify` | Verify anonymized assets against trusted CA |
+| `c2pa-x509-zk-verify` | Verify anonymized assets against a trust list |
 
 ## Project Structure
 
@@ -242,7 +245,7 @@ Constraints fell 61% with the switch to `VarShiftLeft` (see [Constraint Count](#
 - Critical header: `crit = ["c2pa-x509-zk"]` (COSE header label 2), so verifiers that don't understand the extension must reject the signature
 - Extension map with circuit metadata
 - Padding: a `pad` byte string in the unprotected header fills the space `c2pa-rs` reserves for the signature, as `c2pa-rs` does for its own signatures
-- No `x5chain`: the anonymized output carries no certificates. Embedding the signer's leaf certificate would reveal the identity the proof hides, and the verifier supplies the trusted CA certificate itself (`--ca`). Thanks to Iman Attia (EBU) for reporting the earlier leak ([#6](https://github.com/christianpaquin/c2pa-signer-privacy/issues/6)).
+- `x5chain` (in the protected header) carries the issuing CA chain only: the issuing CA first, then any further intermediates, never the signer's certificate, which would reveal the identity the proof hides (decision [D4](ARCHITECTURE-DECISIONS.md#d4-where-the-issuing-ca-chain-lives-decided)). Thanks to Iman Attia (EBU) for reporting the earlier leak of the signer's certificate ([#6](https://github.com/christianpaquin/c2pa-signer-privacy/issues/6)).
 
 ## Building Circuits
 
@@ -282,20 +285,23 @@ This generates the proving and verifying keys in `circuits/build/`.
 > anonymizer refuses to prove with them, instead of producing a proof that cannot
 > verify. Re-run setup with `--force` to regenerate the keys.
 
-## Certificate Requirements
+## Test PKI and Trust Lists
 
-Certificates must use:
-- **P-256 ECDSA** (secp256r1 / prime256v1)
-- **Document Signing EKU** (1.3.6.1.5.5.7.3.36) for C2PA compatibility
+`./generate-test-pki.sh [OUT_DIR] [NAME]` generates a PKI that mimics a real C2PA deployment, with a 3-cert chain (default `OUT_DIR`: `fixtures/pki`, gitignored):
 
-Production C2PA certificates use the C2PA claim-signing EKU (`1.3.6.1.4.1.62558.2.1`) instead, and real CAs sign with P-384 or RSA rather than P-256 (see [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md)). [F1](#f1-c2pa-like-test-pki-and-trust-lists) moves the test PKI closer to that.
+| File | Contents |
+|---|---|
+| `root.{pem,der,key}` | Root CA |
+| `issuing-ca.{pem,der,key}` | Issuing CA (`pathlen:0`), signed by the root |
+| `signer.{pem,der,key}` | Signer: `CA:FALSE`, C2PA claim-signing EKU (`1.3.6.1.4.1.62558.2.1`), 90-day lifetime |
+| `trust-list.pem` | Trust anchors: the root and the issuing CA |
+| `trust-list.json` | The same anchors in the C2PA trust list JSON format |
 
-Generate test certificates and a signed test asset:
-```bash
-./generate-test-assets.sh
-```
+Both the root and the issuing CA are trust anchors, as on the C2PA trust list, where issuing CAs are often listed directly. The tests generate a fresh PKI for each run, so no certificates are committed. Re-run the script when the signer certificate expires; the web UI does this automatically.
 
-> **Note**: To create a signed test asset, `c2patool` must be installed. See the [c2patool documentation](https://github.com/contentauth/c2pa-rs/blob/main/cli/README.md) for details.
+The circuit currently requires P-256 keys and ECDSA-SHA256 signatures throughout. Real C2PA CAs sign with P-384 or RSA (see [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md)); [E1](#e1-cost-of-reality-p-384-sha-384-and-rsa-in-circuit) measures what supporting them in-circuit would cost.
+
+**Trust lists.** `--trust-list` accepts a PEM bundle of anchors, a single DER certificate, or the C2PA trust list JSON ([`C2PA-TRUST-LIST.json`](https://github.com/c2pa-org/conformance-public/tree/main/trust-list)). From the JSON, only services whose status is `http://c2pa.org/conformance/trust-list/trusted` are loaded; the count of skipped certificates is reported. (The official list currently has two certificates with an empty status, which appear in its PEM version but are skipped from the JSON.) Issuing chains are validated off-circuit: each link's signature (ECDSA P-256/P-384 with SHA-256/384, or RSA PKCS#1 v1.5), `CA:TRUE`, and validity, until a certificate is an anchor or is issued by one.
 
 ## Placeholder Mode
 
@@ -307,25 +313,26 @@ The verifier will detect a placeholder and exit with a non-zero status (exit cod
 cargo build --release
 
 # 1. Sign
+./generate-test-pki.sh
+
 cargo run --release --bin c2pa-x509-zk-sign -- \
   --input fixtures/cards.png \
   --output /tmp/signed.png \
-  --cert fixtures/certs/signer-cert.pem \
-  --key fixtures/certs/signer-key.pem \
-  --ca fixtures/certs/ca-cert.pem
+  --cert fixtures/pki/signer.pem \
+  --key fixtures/pki/signer.key \
+  --ca fixtures/pki/issuing-ca.pem
 
 # 2. Anonymize with placeholder proof (no circuit setup required)
 cargo run --release --bin c2pa-x509-zk-anonymizer -- \
   --input /tmp/signed.png \
   --output /tmp/anon.png \
-  --ca fixtures/certs/ca-cert.pem \
-  --signer-key fixtures/certs/signer-key.pem \
+  --trust-list fixtures/pki/trust-list.json \
   --placeholder
 
 # 3. Verify (will print a placeholder warning — expected)
 cargo run --release --bin c2pa-x509-zk-verify -- \
   --input /tmp/anon.png \
-  --ca fixtures/certs/ca-cert.pem
+  --trust-list fixtures/pki/trust-list.pem
 
 # The integration test suite also runs in placeholder mode:
 cargo test --release
@@ -340,6 +347,7 @@ The prototype is a feasibility study with two goals, set out in [ARCHITECTURE-DE
 - **Signer certificate removed from anonymized output** ([#6](https://github.com/christianpaquin/c2pa-signer-privacy/issues/6)).
 - **Certificate field binding:** the circuit pins the signer key and validity period inside the CA-signed TBSCertificate; previously a prover with no certificate could forge a proof (see [Certificate field binding](#certificate-field-binding)).
 - **Certificate dates computed one month late:** the in-circuit UTCTime conversion indexed its days-before-month table off by one, shifting every `notBefore`/`notAfter` 28-31 days later. Certificates less than about a month old could not produce valid proofs, and certificates expired up to about a month earlier were still accepted. Fixed, with tests against Python's calendar for every month, leap days, and both ends of the UTCTime range.
+- **F1. C2PA-like test PKI and trust lists:** a generated 3-cert PKI (root → issuing CA that is itself a trust anchor → signer with the claim-signing EKU and a 90-day lifetime); trust lists in PEM and the C2PA JSON format; the anonymized asset's `x5chain` carries the issuing chain (decision D4), which the verifier validates against the trust list before checking the issuing CA's key against the proof's public inputs; `issuer_key_id` is now the SHA-256 of the issuing CA's public key, so it survives certificate renewal (see [Test PKI and Trust Lists](#test-pki-and-trust-lists)). Privacy note: the issuing CA is disclosed, so the anonymity set is everyone that CA has issued certificates to; a narrowly scoped CA can nearly identify the signer (see [H4](#h4-hiding-the-issuing-ca)).
 
 #### Standards-conformant COSE encoding ✅
 
@@ -350,7 +358,7 @@ Done for both prototypes. The COSE structures previously could not be parsed by 
 - `crit` was written under the text label `"crit"` rather than COSE header label 2, so nothing was actually marked critical.
 - The structure was padded with trailing zero bytes. Padding is now a `pad` field in the unprotected header, as `c2pa-rs` does.
 
-Result: `c2patool` now displays BBS-signed assets and reports `algorithm.unsupported`, the correct outcome for a custom algorithm. ZK-anonymized assets still fail in `c2patool`'s default (validating) mode, now with "could not find signing certificate chain": `c2pa-rs` treats a missing signing certificate as a fatal error rather than a validation failure (`get_signing_cert_serial_num` in `claim_verify.rs`). With verification disabled, `c2patool` displays the manifest. See [H8](#h8-c2patool-support).
+Result: `c2patool` now displays BBS-signed assets and reports `algorithm.unsupported`, the correct outcome for a custom algorithm. ZK-anonymized assets at first still failed in `c2patool`'s default (validating) mode with "could not find signing certificate chain", because `c2pa-rs` treats a missing signing certificate as fatal; since F1 added the issuing chain to `x5chain`, they display too. See [H8](#h8-c2patool-support).
 
 Both prototypes' manifests also lack a `c2pa.created` action, which `c2patool` reports as `assertion.action.malformed`; to be fixed with [E2](#e2-anonymization-mode-signer-side-vs-third-party).
 
@@ -370,17 +378,6 @@ Done. Measuring each component showed that per-byte `SelectByte` reads (1,662 of
 Setup now also records a hash of the `.r1cs` alongside the keys, and setup and the anonymizer refuse keys from an older circuit (see [Building Circuits](#building-circuits)).
 
 ### Foundation
-
-#### F1. C2PA-like test PKI and trust lists
-
-A test setup that mimics a real C2PA deployment, kept on P-256 for speed, modelled on the Pixel chain ([DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md#real-signed-assets)):
-
-- Root → issuing CA (`pathlen:0`, itself a trust anchor) → signer certificate with the C2PA claim-signing EKU and a ~90-day lifetime, generated at test time rather than committed.
-- Trust lists loaded in the official formats (PEM and the JSON list of trusted entities), with test anchors.
-- Decision D4: the anonymized asset's `x5chain` carries the issuing chain, never the signer's certificate; the verifier validates it against the trust list and checks the issuing CA's key against the proof's public inputs.
-- `issuer_key_id` becomes a stable identifier (hash of the CA's SPKI, or its Subject Key Identifier), so it survives CA certificate renewal.
-
-Privacy note: the issuing CA is disclosed, so the anonymity set is everyone that CA has issued certificates to. A narrowly scoped CA can nearly identify the signer (see [H4](#h4-hiding-the-issuing-ca)).
 
 #### F2. Benchmark harness
 
@@ -422,9 +419,9 @@ Decision D3: the same circuit and prover on both curves, comparing proving time,
 
 For each deployment segment (official trust list; interim anchors; interim allowed list), which options work, at what measured cost, who must run what, and what remains unknown.
 
-#### R2. Anonymizing a real Pixel photo
+#### R2. Anonymizing real signed content
 
-Third-party anonymization (E2) of a real Pixel photo, proving issuance by Google's listed P-384 issuing CA (E1). An end-to-end demonstration that the approach works on content signed today.
+Third-party anonymization (E2) of a real asset signed under the official trust list, proving issuance by a listed P-384 issuing CA (E1). An end-to-end demonstration that the approach works on content signed today.
 
 #### R3. Interim-list allowed signers via Merkle membership
 
@@ -444,7 +441,7 @@ Complete the RFC 5280 / C2PA certificate-profile checks listed under [Pending](#
 
 #### H3. Revocation
 
-Support revoked or compromised signer keys, through short-lived certificates (as Pixel already uses) or through Merkle roots that drop revoked keys (trust model B).
+Support revoked or compromised signer keys, through short-lived certificates (already used by some C2PA deployments) or through Merkle roots that drop revoked keys (trust model B).
 
 #### H4. Hiding the issuing CA
 
@@ -469,7 +466,7 @@ Removing the certificate is necessary but not sufficient. The anonymizer should 
 
 #### H8. c2patool support
 
-Displaying and verifying anonymized assets in `c2patool` (likely in a fork of `c2pa-rs`): `c2pa-rs` treats a missing signing certificate as fatal, and with decision D4 it will read the issuing CA as the signer's certificate and fail its end-entity profile check. Both need handling for the prototype's private-use algorithm, and eventually a verifier for its proofs.
+Displaying and verifying anonymized assets in `c2patool` (likely in a fork of `c2pa-rs`). Since F1, `c2patool` displays ZK-anonymized assets and reports `algorithm.unsupported` (before, with no `x5chain`, it aborted with "could not find signing certificate chain"). It presents the issuing CA as the signer, since `x5chain`'s first certificate is the signer's by definition, which is misleading for these assets. Both the presentation and, eventually, verification of the proofs need handling for the prototype's private-use algorithm.
 
 ## Toolchain
 

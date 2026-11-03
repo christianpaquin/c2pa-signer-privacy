@@ -442,34 +442,33 @@ pub fn verify_proof_native(
     proof: &NativeProof,
     paths: &NativeCircuitPaths,
 ) -> Result<bool> {
-    use std::str::FromStr;
-    
     println!("Loading verifying key...");
-    let vk = load_verifying_key(&paths.verifying_key)?;
-    let pvk = GrothBn::process_vk(&vk)
-        .map_err(|e| anyhow!("failed to process verifying key: {e}"))?;
-    
-    // Parse public inputs back to field elements
-    let public_inputs: Result<Vec<Fr>> = proof.public_inputs
-        .iter()
-        .map(|s| {
-            Fr::from_str(s).map_err(|_| anyhow!("invalid public input: {s}"))
-        })
-        .collect();
-    let public_inputs = public_inputs?;
-    
-    // Verify
+    let pvk = prepare_verifying_key(&load_verifying_key(&paths.verifying_key)?)?;
+
     println!("Verifying proof...");
-    let valid = GrothBn::verify_with_processed_vk(&pvk, &public_inputs, &proof.proof)
-        .map_err(|e| anyhow!("verification error: {e}"))?;
-    
+    let valid = verify_proof_prepared(proof, &pvk)?;
     if valid {
         println!("✅ Proof verified!");
     } else {
         println!("❌ Proof verification failed!");
     }
-    
     Ok(valid)
+}
+
+/// Preprocess a verifying key for verification (Groth16's prepared key).
+pub fn prepare_verifying_key(vk: &VerifyingKey<Bn254>) -> Result<ark_groth16::PreparedVerifyingKey<Bn254>> {
+    GrothBn::process_vk(vk).map_err(|e| anyhow!("failed to process verifying key: {e}"))
+}
+
+/// Verify a proof against a prepared verifying key.
+pub fn verify_proof_prepared(proof: &NativeProof, pvk: &ark_groth16::PreparedVerifyingKey<Bn254>) -> Result<bool> {
+    use std::str::FromStr;
+    let public_inputs = proof
+        .public_inputs
+        .iter()
+        .map(|s| Fr::from_str(s).map_err(|_| anyhow!("invalid public input: {s}")))
+        .collect::<Result<Vec<Fr>>>()?;
+    GrothBn::verify_with_processed_vk(pvk, &public_inputs, &proof.proof).map_err(|e| anyhow!("verification error: {e}"))
 }
 
 /// Set circuit inputs on the builder using the x509_issue_and_possession signal layout.

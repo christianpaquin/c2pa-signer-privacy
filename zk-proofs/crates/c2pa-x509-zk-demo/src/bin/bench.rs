@@ -1,18 +1,34 @@
 //! Benchmark harness (roadmap F2).
 //!
 //! `c2pa-x509-zk-bench run` measures the current statement end to end on fixed
-//! inputs and writes one JSON record. Each phase (compile, setup, witness,
-//! prove, verify) runs as a separate subprocess of this binary, so its wall
-//! time and peak memory are its own (`wait4` resource usage of that process);
-//! loading and serialization steps inside a phase are timed separately and
-//! reported with it, so no cost falls between phases.
+//! inputs and writes one JSON record. Every phase runs as a separate
+//! subprocess of this binary (or of circom), so its wall time and peak memory
+//! are its own (`wait4` resource usage of that process); steps inside a phase
+//! are timed separately and reported with it, so no cost falls between
+//! phases.
 //!
-//! Everything happens in a private work directory: the harness compiles (or,
-//! with --reuse-build, links) the circuit there and generates its own keys,
+//! Phases and their accounting categories:
+//!
+//! | Phase    | Category          | Work                                                         |
+//! |----------|-------------------|--------------------------------------------------------------|
+//! | fixtures | test-fixture      | generate the test PKI, sign the sample asset                 |
+//! | compile  | one-time          | compile the circuit (circom)                                 |
+//! | setup    | one-time          | Groth16 setup                                                |
+//! | prepare  | anonymization     | read the signed manifest, validate the chain, build inputs   |
+//! | witness  | anonymization     | load the circuit, compute and check the witness              |
+//! | prove    | anonymization     | load R1CS, witness, and proving key; prove                   |
+//! | package  | anonymization     | build the assertion, rewrite the manifest, check the digest  |
+//! | verify   | verification      | load and prepare the verifying key, verify the proof         |
+//! | verify_cli | verification-full | the verifier CLI on the anonymized asset (trust list, checks, proof) |
+//!
+//! The harness works in a directory it creates exclusively (an existing
+//! `--work-dir` is refused) and, unless `--keep`, removes only that directory
+//! afterwards. `--out` may not point inside it. It compiles (or, with
+//! `--reuse-build`, links) the circuit there and generates its own keys,
 //! leaving circuits/build untouched.
 //!
 //! Usage:
-//!   c2pa-x509-zk-bench run [--reuse-build] [--keep] [--out results.json]
+//!   c2pa-x509-zk-bench run [--reuse-build] [--keep] [--work-dir NEW_DIR] [--out results.json]
 //!
 //! Peak memory comes from the child's ru_maxrss, in KiB on Linux.
 
@@ -26,11 +42,11 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use c2pa_x509_zk_demo::{
-    check_witness, circuit, circuit_builder, compute_manifest_stripped_asset_digest, compute_witness, extract_issuer_dn,
-    issuing_path_for, load_proving_key, load_r1cs, load_verifying_key,
+    check_witness, circuit, circuit_builder, compute_manifest_stripped_asset_digest, compute_witness,
+    extract_issuer_dn, issuing_path_for, load_proving_key, load_r1cs, load_verifying_key,
     manifest::{extract_manifest_data, rewrite_manifest_with_zk_proof},
-    native_setup, prove_circuit, read_witness, spki_key_id, verify_proof_native, write_witness, CircuitInputs,
-    NativeCircuitPaths, NativeProof, TrustList, X509ZkSignerProofAssertion,
+    native_setup, prepare_verifying_key, prove_circuit, read_witness, spki_key_id, verify_proof_prepared,
+    write_witness, CircuitInputs, NativeCircuitPaths, NativeProof, TrustList, X509ZkSignerProofAssertion,
 };
 
 const CIRCUIT: &str = "x509_issue_and_possession";
@@ -43,6 +59,15 @@ signed the manifest-stripped asset digest (a public input), and the certificate'
 contains a prover-chosen timestamp (a public input the verifier does not check). Off-circuit, the issuing CA chain \
 in x5chain is validated against a trust list.";
 
+/// What each total covers, recorded with every result so variants count the same work.
+const ACCOUNTING: &str = "one_time = compile + setup (per circuit and keys). anonymization_per_asset = prepare + \
+witness + prove + package: the complete latency of anonymizing one asset, from a signed asset to an anonymized \
+one, excluding one-time work; anonymization_witness_plus_prove is the subtotal for proof generation alone. \
+verification = loading and preparing the verifying key and verifying the proof; verification_full = the verifier \
+CLI on the anonymized asset (trust-list chain validation, assertion and digest checks, and the proof). \
+test_fixture (generating the test PKI and signing the sample asset) is not part of any total. Peak memory per \
+category is the maximum over its phases, each a separate process.";
+
 #[derive(Parser)]
 #[command(name = "c2pa-x509-zk-bench", about = "Benchmark the ZK anonymizer (roadmap F2)")]
 struct Args {
@@ -54,7 +79,7 @@ struct Args {
 enum Cmd {
     /// Run every phase and write a JSON record
     Run {
-        /// Work directory (default: target/bench/<unix time>)
+        /// Work directory to create; must not exist (default: a new directory under target/bench)
         #[arg(long)]
         work_dir: Option<PathBuf>,
         /// Circom circuits directory (sources, and the build to reuse)
@@ -66,7 +91,7 @@ enum Cmd {
         /// Keep the work directory (circuit, keys, witness) after the run
         #[arg(long)]
         keep: bool,
-        /// Write the JSON record here (default: stdout)
+        /// Write the JSON record here (default: stdout); must be outside the work directory
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -76,18 +101,75 @@ enum Cmd {
         name: String,
         #[arg(long)]
         work_dir: PathBuf,
+        #[arg(long)]
+        zk_root: PathBuf,
     },
 }
 
 fn main() -> Result<()> {
     match Args::parse().command {
         Cmd::Run { work_dir, circuits_dir, reuse_build, keep, out } => run(work_dir, &circuits_dir, reuse_build, keep, out),
-        Cmd::Phase { name, work_dir } => {
+        Cmd::Phase { name, work_dir, zk_root } => {
             // wasmer (witness generation) needs a Tokio runtime.
-            tokio::runtime::Runtime::new()?.block_on(async { phase(&name, &work_dir) })
+            tokio::runtime::Runtime::new()?.block_on(async { phase(&name, &work_dir, &zk_root) })
         }
     }
 }
+
+// ---- Work directory lifecycle ------------------------------------------------
+
+/// Create the run's work directory exclusively. A requested directory must
+/// not exist (its parent is created if needed); otherwise a new uniquely named
+/// directory is created under `default_parent`. The run owns, and may later
+/// delete, only the directory returned here.
+fn create_workspace(requested: Option<&Path>, default_parent: &Path) -> Result<PathBuf> {
+    if let Some(dir) = requested {
+        let dir = std::path::absolute(dir)?;
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::create_dir(&dir).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                anyhow!("--work-dir {} already exists; the harness only uses a directory it creates", dir.display())
+            } else {
+                anyhow!("failed to create {}: {e}", dir.display())
+            }
+        })?;
+        return Ok(dir);
+    }
+    let parent = std::path::absolute(default_parent)?;
+    std::fs::create_dir_all(&parent)?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    for attempt in 0..1000 {
+        let dir = parent.join(format!("run-{stamp}-{}-{attempt}", std::process::id()));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => bail!("failed to create {}: {e}", dir.display()),
+        }
+    }
+    bail!("could not create a unique work directory under {}", parent.display())
+}
+
+/// The output file must not be inside the work directory, which may be deleted.
+fn check_output_location(out: Option<&Path>, work_dir: &Path) -> Result<()> {
+    if let Some(out) = out {
+        if std::path::absolute(out)?.starts_with(work_dir) {
+            bail!("--out {} is inside the work directory {}, which is removed after the run", out.display(), work_dir.display());
+        }
+    }
+    Ok(())
+}
+
+/// Remove the work directory created by `create_workspace`, unless `keep`.
+fn finish_workspace(work_dir: &Path, keep: bool) -> Result<()> {
+    if !keep {
+        std::fs::remove_dir_all(work_dir)?;
+    }
+    Ok(())
+}
+
+// ---- Phases (each runs in its own subprocess) --------------------------------
 
 fn paths(work_dir: &Path) -> NativeCircuitPaths {
     NativeCircuitPaths::default_for_circuit(work_dir, CIRCUIT)
@@ -101,21 +183,75 @@ fn timed<T>(steps: &mut serde_json::Map<String, Value>, name: &str, f: impl FnOn
     Ok(value)
 }
 
+/// Decode a PEM private key (SEC1 "EC PRIVATE KEY" or PKCS#8) to DER.
+fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
+    let b64: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+    Ok(base64::engine::general_purpose::STANDARD.decode(b64)?)
+}
+
+fn b64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 /// One phase, run inside a subprocess. Prints a `BENCH-RESULT` JSON line.
-fn phase(name: &str, work_dir: &Path) -> Result<()> {
+fn phase(name: &str, work_dir: &Path, zk_root: &Path) -> Result<()> {
     let paths = paths(work_dir);
+    let pki = work_dir.join("pki");
+    let signed = work_dir.join("signed.png");
     let mut steps = serde_json::Map::new();
     let mut data = serde_json::Map::new();
     match name {
+        "fixtures" => {
+            timed(&mut steps, "generate_pki", || {
+                let ok = Command::new("bash").arg(zk_root.join("generate-test-pki.sh")).arg(&pki).arg("Bench")
+                    .stdout(Stdio::null()).stderr(Stdio::null()).status()?.success();
+                if !ok { bail!("generate-test-pki.sh failed") }
+                Ok(())
+            })?;
+            timed(&mut steps, "sign_asset", || {
+                let sign = std::env::current_exe()?.with_file_name("c2pa-x509-zk-sign");
+                let ok = Command::new(sign)
+                    .arg("--input").arg(zk_root.join("fixtures/cards.png")).arg("--output").arg(&signed)
+                    .arg("--cert").arg(pki.join("signer.pem")).arg("--key").arg(pki.join("signer.key"))
+                    .arg("--ca").arg(pki.join("issuing-ca.pem"))
+                    .stdout(Stdio::null()).status()?.success();
+                if !ok { bail!("signing failed") }
+                Ok(())
+            })?;
+        }
         "setup" => {
             timed(&mut steps, "setup", || native_setup(&paths))?;
             data.insert("proving_key_bytes".into(), json!(std::fs::metadata(&paths.proving_key)?.len()));
             data.insert("verifying_key_bytes".into(), json!(std::fs::metadata(&paths.verifying_key)?.len()));
         }
+        "prepare" => {
+            let trust = timed(&mut steps, "load_trust_list", || TrustList::from_file(&pki.join("trust-list.pem")))?;
+            let manifest_data = timed(&mut steps, "read_signed_manifest", || extract_manifest_data(&signed))?;
+            let chain = timed(&mut steps, "validate_issuing_chain", || {
+                issuing_path_for(&manifest_data.leaf_cert_der, &manifest_data.ca_certs_der, &trust, manifest_data.photo_timestamp)
+            })?;
+            let inputs = timed(&mut steps, "build_circuit_inputs", || {
+                let key = pem_to_der(&std::fs::read_to_string(pki.join("signer.key"))?)?;
+                let proof_inputs = circuit::prepare_inputs(&manifest_data, &key, &chain[0])?;
+                circuit::proof_inputs_to_circuit(&proof_inputs)
+            })?;
+            timed(&mut steps, "write_inputs", || {
+                std::fs::write(work_dir.join("inputs.json"), serde_json::to_vec(&inputs)?)?;
+                let context = json!({
+                    "issuer": extract_issuer_dn(&manifest_data.leaf_cert_der)?,
+                    "issuer_key_id": spki_key_id(&chain[0])?,
+                    "claim_hash": hex::encode(&manifest_data.claim_hash),
+                    "issuing_chain": chain.iter().map(|c| b64(c)).collect::<Vec<_>>(),
+                });
+                Ok(std::fs::write(work_dir.join("context.json"), serde_json::to_vec(&context)?)?)
+            })?;
+            data.insert("signer_certificate_bytes".into(), json!(manifest_data.leaf_cert_der.len()));
+            data.insert("tbs_certificate_bytes".into(), json!(inputs.tbs_len.parse::<usize>()? + 4));
+            data.insert("issuing_chain_certificates".into(), json!(chain.len()));
+        }
         "witness" => {
             let inputs: CircuitInputs =
                 timed(&mut steps, "read_inputs", || Ok(serde_json::from_slice(&std::fs::read(work_dir.join("inputs.json"))?)?))?;
-            // The steps of compute_checked_witness, timed separately.
             let builder = timed(&mut steps, "load_circuit", || circuit_builder(&inputs, &paths))?;
             let circuit = timed(&mut steps, "compute_witness", || compute_witness(builder))?;
             timed(&mut steps, "check_witness", || check_witness(&circuit))?;
@@ -132,11 +268,54 @@ fn phase(name: &str, work_dir: &Path) -> Result<()> {
             let proof = timed(&mut steps, "prove", || prove_circuit(circuit, &pk))?;
             timed(&mut steps, "write_proof", || Ok(std::fs::write(work_dir.join("proof.b64"), proof.to_base64()?)?))?;
         }
+        "package" => {
+            let context: Value = timed(&mut steps, "read_context", || Ok(serde_json::from_slice(&std::fs::read(work_dir.join("context.json"))?)?))?;
+            let proof_b64 = std::fs::read_to_string(work_dir.join("proof.b64"))?;
+            let chain = context["issuing_chain"]
+                .as_array()
+                .ok_or_else(|| anyhow!("context has no issuing chain"))?
+                .iter()
+                .map(|c| Ok(base64::engine::general_purpose::STANDARD.decode(c.as_str().unwrap_or_default())?))
+                .collect::<Result<Vec<Vec<u8>>>>()?;
+            let anonymized = work_dir.join("anon.png");
+            let assertion = timed(&mut steps, "build_assertion", || {
+                let build = paths.read_build_manifest()?.ok_or_else(|| anyhow!("setup wrote no build manifest"))?;
+                Ok(X509ZkSignerProofAssertion::new(
+                    context["issuer"].as_str().unwrap_or_default().to_string(),
+                    context["issuer_key_id"].as_str().unwrap_or_default().to_string(),
+                    context["claim_hash"].as_str().unwrap_or_default().to_string(),
+                    proof_b64.clone(),
+                )
+                .with_artifacts(&build))
+            })?;
+            timed(&mut steps, "rewrite_manifest", || rewrite_manifest_with_zk_proof(&signed, &anonymized, assertion.clone(), chain.clone()))?;
+            timed(&mut steps, "check_digest", || {
+                if hex::encode(compute_manifest_stripped_asset_digest(&anonymized)?) != assertion.claim_hash {
+                    bail!("anonymized asset digest does not match the proof");
+                }
+                Ok(())
+            })?;
+
+            // Sizes (not timed): the manifest store is the anonymized file minus
+            // the same file with its JUMBF removed.
+            let stripped = work_dir.join("stripped.png");
+            std::fs::copy(&anonymized, &stripped)?;
+            c2pa::jumbf_io::remove_jumbf_from_file(&stripped).map_err(|e| anyhow!("failed to strip manifest: {e}"))?;
+            let proof = NativeProof::from_base64(&proof_b64)?;
+            let mut groth16 = Vec::new();
+            ark_serialize::CanonicalSerialize::serialize_compressed(&proof.proof, &mut groth16)?;
+            data.insert("groth16_proof_bytes".into(), json!(groth16.len()));
+            data.insert("public_inputs".into(), json!(proof.public_inputs.len()));
+            data.insert("proof_container_bytes".into(), json!(proof_b64.len()));
+            data.insert("assertion_json_bytes".into(), json!(serde_json::to_vec(&assertion)?.len()));
+            data.insert("x5chain_bytes".into(), json!(chain.iter().map(Vec::len).sum::<usize>()));
+            data.insert("manifest_store_bytes".into(), json!(std::fs::metadata(&anonymized)?.len() - std::fs::metadata(&stripped)?.len()));
+        }
         "verify" => {
             let proof = timed(&mut steps, "read_proof", || NativeProof::from_base64(&std::fs::read_to_string(work_dir.join("proof.b64"))?))?;
-            // verify_proof_native loads and processes the verifying key itself; time loading separately too.
-            timed(&mut steps, "load_verifying_key", || load_verifying_key(&paths.verifying_key).map(|_| ()))?;
-            let valid = timed(&mut steps, "load_and_verify", || verify_proof_native(&proof, &paths))?;
+            let vk = timed(&mut steps, "load_verifying_key", || load_verifying_key(&paths.verifying_key))?;
+            let pvk = timed(&mut steps, "prepare_verifying_key", || prepare_verifying_key(&vk))?;
+            let valid = timed(&mut steps, "verify", || verify_proof_prepared(&proof, &pvk))?;
             if !valid {
                 bail!("proof did not verify");
             }
@@ -146,6 +325,8 @@ fn phase(name: &str, work_dir: &Path) -> Result<()> {
     println!("{RESULT_PREFIX}{}", json!({ "steps": steps, "data": data }));
     Ok(())
 }
+
+// ---- Measurement ------------------------------------------------------------
 
 /// A subprocess's wall time, peak memory, and parsed BENCH-RESULT line.
 struct Measured {
@@ -181,14 +362,29 @@ fn run_measured(cmd: &mut Command) -> Result<Measured> {
     Ok(Measured { wall_s, peak_rss_kib: usage.ru_maxrss, result })
 }
 
-fn phase_record(name: &str, m: &Measured) -> Value {
+fn phase_record(name: &str, category: &str, m: &Measured) -> Value {
     let result = m.result.clone().unwrap_or(json!({}));
     json!({
         "name": name,
+        "category": category,
         "wall_s": m.wall_s,
         "peak_rss_mib": m.peak_rss_kib as f64 / 1024.0,
         "steps": result["steps"],
         "data": result["data"],
+    })
+}
+
+/// Sum of wall time and maximum peak RSS over the phases named.
+fn total(phases: &[Value], names: &[&str]) -> Value {
+    let selected: Vec<&Value> = phases.iter().filter(|p| names.contains(&p["name"].as_str().unwrap_or(""))).collect();
+    let measured = selected.iter().all(|p| p["wall_s"].is_number()) && selected.len() == names.len();
+    if !measured {
+        return json!({ "phases": names, "measured": false });
+    }
+    json!({
+        "phases": names,
+        "wall_s": selected.iter().map(|p| p["wall_s"].as_f64().unwrap()).sum::<f64>(),
+        "peak_rss_mib": selected.iter().map(|p| p["peak_rss_mib"].as_f64().unwrap()).fold(0.0, f64::max),
     })
 }
 
@@ -238,106 +434,89 @@ fn environment(zk_root: &Path) -> Value {
     })
 }
 
-/// Decode a PEM private key (SEC1 "EC PRIVATE KEY" or PKCS#8) to DER.
-fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
-    let b64: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
-    Ok(base64::engine::general_purpose::STANDARD.decode(b64)?)
-}
+// ---- The run ----------------------------------------------------------------
 
 fn run(work_dir: Option<PathBuf>, circuits_dir: &Path, reuse_build: bool, keep: bool, out: Option<PathBuf>) -> Result<()> {
     let zk_root = std::env::current_dir()?;
     let exe = std::env::current_exe()?;
-    let bin_dir = exe.parent().unwrap().to_path_buf();
-    let work_dir = work_dir.unwrap_or_else(|| {
-        zk_root.join("target/bench").join(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs().to_string())
-    });
-    let build = work_dir.join("build");
-    std::fs::create_dir_all(&build)?;
     let circuits_dir = std::fs::canonicalize(circuits_dir)?;
+
+    let work_dir = create_workspace(work_dir.as_deref(), &zk_root.join("target/bench"))?;
+    if let Err(e) = check_output_location(out.as_deref(), &work_dir) {
+        // Only the empty directory just created is removed.
+        std::fs::remove_dir(&work_dir)?;
+        return Err(e);
+    }
     eprintln!("Work directory: {}", work_dir.display());
+    let record = measure(&exe, &zk_root, &work_dir, &circuits_dir, reuse_build)?;
 
-    // ---- Fixed inputs: a generated test PKI and a signed sample asset -------
-    let pki = work_dir.join("pki");
-    let ok = Command::new("bash").arg(zk_root.join("generate-test-pki.sh")).arg(&pki).arg("Bench")
-        .stdout(Stdio::null()).stderr(Stdio::null()).status()?.success();
-    if !ok {
-        bail!("generate-test-pki.sh failed");
+    let text = serde_json::to_string_pretty(&record)?;
+    match &out {
+        Some(path) => std::fs::write(path, text + "\n")?,
+        None => println!("{text}"),
     }
-    let asset = zk_root.join("fixtures/cards.png");
-    let signed = work_dir.join("signed.png");
-    let ok = Command::new(bin_dir.join("c2pa-x509-zk-sign"))
-        .args(["--input"]).arg(&asset).args(["--output"]).arg(&signed)
-        .args(["--cert"]).arg(pki.join("signer.pem")).args(["--key"]).arg(pki.join("signer.key"))
-        .args(["--ca"]).arg(pki.join("issuing-ca.pem"))
-        .stdout(Stdio::null()).status()?.success();
-    if !ok {
-        bail!("signing failed");
+    eprintln!("\nPhase              category        wall (s)   peak RSS (MiB)");
+    for p in record["phases"].as_array().unwrap() {
+        let (name, category) = (p["name"].as_str().unwrap(), p["category"].as_str().unwrap());
+        match (p["wall_s"].as_f64(), p["peak_rss_mib"].as_f64()) {
+            (Some(w), Some(r)) => eprintln!("{name:<18} {category:<15} {w:>8.1}   {r:>14.0}"),
+            _ => eprintln!("{name:<18} {category:<15} {}", p["skipped"].as_str().unwrap_or("")),
+        }
     }
+    eprintln!("Per-asset anonymization: {:.1} s", record["totals"]["anonymization_per_asset"]["wall_s"].as_f64().unwrap_or(f64::NAN));
+    finish_workspace(&work_dir, keep)
+}
 
-    let trust = TrustList::from_file(&pki.join("trust-list.pem"))?;
-    let manifest_data = extract_manifest_data(&signed)?;
-    let issuing_chain = issuing_path_for(&manifest_data.leaf_cert_der, &manifest_data.ca_certs_der, &trust, manifest_data.photo_timestamp)?;
-    let signer_key = pem_to_der(&std::fs::read_to_string(pki.join("signer.key"))?)?;
-    let proof_inputs = circuit::prepare_inputs(&manifest_data, &signer_key, &issuing_chain[0])?;
-    let inputs = circuit::proof_inputs_to_circuit(&proof_inputs)?;
-    std::fs::write(work_dir.join("inputs.json"), serde_json::to_vec(&inputs)?)?;
-    let tbs_len: usize = inputs.tbs_len.parse()?;
-
-    // ---- Phases, each in its own subprocess --------------------------------
+fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, circuits_dir: &Path, reuse_build: bool) -> Result<Value> {
+    let build = work_dir.join("build");
+    std::fs::create_dir(&build)?;
+    let phase_cmd = |name: &str| {
+        let mut cmd = Command::new(exe);
+        cmd.args(["phase", name, "--work-dir"]).arg(work_dir).arg("--zk-root").arg(zk_root);
+        cmd
+    };
     let mut phases = Vec::new();
-    let circuit_src = circuits_dir.join(format!("{CIRCUIT}.circom"));
+    let run_phase = |phases: &mut Vec<Value>, name: &str, category: &str, cmd: &mut Command| -> Result<()> {
+        eprintln!("Phase: {name}...");
+        phases.push(phase_record(name, category, &run_measured(cmd)?));
+        Ok(())
+    };
+
+    run_phase(&mut phases, "fixtures", "test-fixture", &mut phase_cmd("fixtures"))?;
     if reuse_build {
         let source_build = circuits_dir.join("build");
         std::os::unix::fs::symlink(source_build.join(format!("{CIRCUIT}.r1cs")), build.join(format!("{CIRCUIT}.r1cs")))?;
         std::os::unix::fs::symlink(source_build.join(format!("{CIRCUIT}_js")), build.join(format!("{CIRCUIT}_js")))?;
-        phases.push(json!({ "name": "compile", "skipped": "reused circuits/build" }));
+        phases.push(json!({ "name": "compile", "category": "one-time", "skipped": "reused circuits/build" }));
     } else {
-        eprintln!("Compiling the circuit...");
-        let m = run_measured(
-            Command::new("circom").arg(&circuit_src).args(["--r1cs", "--wasm", "-l"]).arg(&circuits_dir)
-                .arg("-l").arg(circuits_dir.join("node_modules")).arg("-o").arg(&build),
+        run_phase(
+            &mut phases,
+            "compile",
+            "one-time",
+            Command::new("circom").arg(circuits_dir.join(format!("{CIRCUIT}.circom"))).args(["--r1cs", "--wasm", "-l"])
+                .arg(circuits_dir).arg("-l").arg(circuits_dir.join("node_modules")).arg("-o").arg(&build),
         )?;
-        phases.push(phase_record("compile", &m));
     }
-    for name in ["setup", "witness", "prove", "verify"] {
-        eprintln!("Phase: {name}...");
-        let m = run_measured(Command::new(&exe).args(["phase", name, "--work-dir"]).arg(&work_dir))?;
-        phases.push(phase_record(name, &m));
+    run_phase(&mut phases, "setup", "one-time", &mut phase_cmd("setup"))?;
+    for name in ["prepare", "witness", "prove", "package"] {
+        run_phase(&mut phases, name, "anonymization", &mut phase_cmd(name))?;
     }
-
-    // ---- Package the anonymized asset and check it with the verifier CLI ---
-    let paths = paths(&work_dir);
-    let build_manifest = paths.read_build_manifest()?.ok_or_else(|| anyhow!("setup wrote no build manifest"))?;
-    let proof_b64 = std::fs::read_to_string(work_dir.join("proof.b64"))?;
-    let proof = NativeProof::from_base64(&proof_b64)?;
-    let assertion = X509ZkSignerProofAssertion::new(
-        extract_issuer_dn(&manifest_data.leaf_cert_der)?,
-        spki_key_id(&issuing_chain[0])?,
-        hex::encode(&manifest_data.claim_hash),
-        proof_b64.clone(),
-    )
-    .with_artifacts(&build_manifest);
-    let anonymized = work_dir.join("anon.png");
-    rewrite_manifest_with_zk_proof(&signed, &anonymized, assertion.clone(), issuing_chain.clone())?;
-    if hex::encode(compute_manifest_stripped_asset_digest(&anonymized)?) != assertion.claim_hash {
-        bail!("anonymized asset digest does not match the proof");
-    }
-    eprintln!("Phase: verify (CLI, full anonymized-asset verification)...");
-    let m = run_measured(
-        Command::new(bin_dir.join("c2pa-x509-zk-verify")).arg("--input").arg(&anonymized)
-            .arg("--trust-list").arg(pki.join("trust-list.pem")).arg("--circuits-dir").arg(&work_dir),
+    run_phase(&mut phases, "verify", "verification", &mut phase_cmd("verify"))?;
+    run_phase(
+        &mut phases,
+        "verify_cli",
+        "verification-full",
+        Command::new(exe.with_file_name("c2pa-x509-zk-verify")).arg("--input").arg(work_dir.join("anon.png"))
+            .arg("--trust-list").arg(work_dir.join("pki/trust-list.pem")).arg("--circuits-dir").arg(work_dir),
     )?;
-    phases.push(phase_record("verify_cli", &m));
 
-    // Manifest store size: the anonymized file minus the same file with its JUMBF removed.
-    let stripped = work_dir.join("stripped.png");
-    std::fs::copy(&anonymized, &stripped)?;
-    c2pa::jumbf_io::remove_jumbf_from_file(&stripped).map_err(|e| anyhow!("failed to strip manifest: {e}"))?;
-    let mut groth16 = Vec::new();
-    ark_serialize::CanonicalSerialize::serialize_compressed(&proof.proof, &mut groth16)?;
+    let data_of = |name: &str| phases.iter().find(|p| p["name"] == name).map(|p| p["data"].clone()).unwrap_or(Value::Null);
+    let (prepare, package, setup, witness) = (data_of("prepare"), data_of("package"), data_of("setup"), data_of("witness"));
+    let paths = paths(work_dir);
+    let build_manifest = paths.read_build_manifest()?.ok_or_else(|| anyhow!("setup wrote no build manifest"))?;
 
-    let record = json!({
-        "schema": "c2pa-x509-zk-bench/1",
+    Ok(json!({
+        "schema": "c2pa-x509-zk-bench/2",
         "variant": {
             "mode": "signer-side",
             "trust_model": "A",
@@ -348,47 +527,104 @@ fn run(work_dir: Option<PathBuf>, circuits_dir: &Path, reuse_build: bool, keep: 
             "circuit": CIRCUIT,
         },
         "statement": STATEMENT,
-        "environment": environment(&zk_root),
+        "accounting": ACCOUNTING,
+        "environment": environment(zk_root),
         "artifacts": {
             "r1cs_sha256": build_manifest.r1cs_sha256,
             "verifying_key_sha256": build_manifest.verifying_key_sha256,
             "r1cs_bytes": std::fs::metadata(&paths.r1cs)?.len(),
             "wasm_bytes": std::fs::metadata(&paths.wasm)?.len(),
+            "proving_key_bytes": setup["proving_key_bytes"],
+            "verifying_key_bytes": setup["verifying_key_bytes"],
+            "constraints": witness["constraints"],
+            "wires": witness["wires"],
         },
         "inputs": {
-            "signer_certificate_bytes": manifest_data.leaf_cert_der.len(),
-            "tbs_certificate_bytes": tbs_len + 4,
-            "issuing_chain_certificates": issuing_chain.len(),
-            "asset_bytes": std::fs::metadata(&asset)?.len(),
+            "signer_certificate_bytes": prepare["signer_certificate_bytes"],
+            "tbs_certificate_bytes": prepare["tbs_certificate_bytes"],
+            "issuing_chain_certificates": prepare["issuing_chain_certificates"],
+            "asset_bytes": std::fs::metadata(zk_root.join("fixtures/cards.png"))?.len(),
+        },
+        "totals": {
+            "one_time": total(&phases, &["compile", "setup"]),
+            "anonymization_per_asset": total(&phases, &["prepare", "witness", "prove", "package"]),
+            "anonymization_witness_plus_prove": total(&phases, &["witness", "prove"]),
+            "verification": total(&phases, &["verify"]),
+            "verification_full": total(&phases, &["verify_cli"]),
         },
         "phases": phases,
         "output": {
-            "groth16_proof_bytes": groth16.len(),
-            "public_inputs": proof.public_inputs.len(),
-            "proof_container_bytes": proof_b64.len(),
-            "assertion_json_bytes": serde_json::to_vec(&assertion)?.len(),
-            "x5chain_bytes": issuing_chain.iter().map(Vec::len).sum::<usize>(),
-            "manifest_store_bytes": std::fs::metadata(&anonymized)?.len() - std::fs::metadata(&stripped)?.len(),
+            "groth16_proof_bytes": package["groth16_proof_bytes"],
+            "public_inputs": package["public_inputs"],
+            "proof_container_bytes": package["proof_container_bytes"],
+            "assertion_json_bytes": package["assertion_json_bytes"],
+            "x5chain_bytes": package["x5chain_bytes"],
+            "manifest_store_bytes": package["manifest_store_bytes"],
             "note": "manifest_store_bytes is the whole C2PA store added to the asset, including the COSE signature's \
                      reserved padding; proof_container_bytes is the proof as embedded (base64 of JSON with the \
                      public inputs); the COSE signature field holds the same container decoded once.",
         },
-    });
+    }))
+}
 
-    let text = serde_json::to_string_pretty(&record)?;
-    match out {
-        Some(path) => std::fs::write(&path, text + "\n")?,
-        None => println!("{text}"),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn existing_work_dir_is_refused_and_left_intact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let existing = tmp.path().join("mine");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::write(existing.join("notes.txt"), "keep me").unwrap();
+
+        let err = create_workspace(Some(&existing), tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert_eq!(std::fs::read_to_string(existing.join("notes.txt")).unwrap(), "keep me");
     }
-    eprintln!("\nPhase              wall (s)   peak RSS (MiB)");
-    for p in record["phases"].as_array().unwrap() {
-        match (p["wall_s"].as_f64(), p["peak_rss_mib"].as_f64()) {
-            (Some(w), Some(r)) => eprintln!("{:<18} {:>8.1}   {:>14.0}", p["name"].as_str().unwrap(), w, r),
-            _ => eprintln!("{:<18} {}", p["name"].as_str().unwrap(), p["skipped"].as_str().unwrap_or("")),
-        }
+
+    #[test]
+    fn requested_work_dir_collision_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("run");
+        assert_eq!(create_workspace(Some(&dir), tmp.path()).unwrap(), std::path::absolute(&dir).unwrap());
+        assert!(create_workspace(Some(&dir), tmp.path()).is_err());
     }
-    if !keep {
-        std::fs::remove_dir_all(&work_dir)?;
+
+    #[test]
+    fn default_work_dirs_are_distinct_and_new() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = create_workspace(None, tmp.path()).unwrap();
+        let b = create_workspace(None, tmp.path()).unwrap();
+        assert_ne!(a, b);
+        assert!(a.is_dir() && b.is_dir());
+        assert_eq!(std::fs::read_dir(&a).unwrap().count(), 0);
     }
-    Ok(())
+
+    #[test]
+    fn output_inside_work_dir_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = create_workspace(Some(&tmp.path().join("run")), tmp.path()).unwrap();
+        assert!(check_output_location(Some(&work.join("results.json")), &work).is_err());
+        assert!(check_output_location(Some(&work.join("sub/results.json")), &work).is_err());
+        assert!(check_output_location(Some(&tmp.path().join("results.json")), &work).is_ok());
+        assert!(check_output_location(None, &work).is_ok());
+    }
+
+    #[test]
+    fn cleanup_removes_only_the_owned_work_dir_unless_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("sibling.txt"), "untouched").unwrap();
+
+        let kept = create_workspace(None, tmp.path()).unwrap();
+        std::fs::write(kept.join("witness.bin"), "data").unwrap();
+        finish_workspace(&kept, true).unwrap();
+        assert!(kept.join("witness.bin").exists());
+
+        let removed = create_workspace(None, tmp.path()).unwrap();
+        std::fs::write(removed.join("witness.bin"), "data").unwrap();
+        finish_workspace(&removed, false).unwrap();
+        assert!(!removed.exists());
+        assert_eq!(std::fs::read_to_string(tmp.path().join("sibling.txt")).unwrap(), "untouched");
+    }
 }

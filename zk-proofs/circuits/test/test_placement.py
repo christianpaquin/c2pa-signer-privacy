@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Fast tests for the certificate field-placement checks in x509_parse.circom.
+"""Fast tests for templates in x509_parse.circom.
 
-Compiles P256SpkiInRegion and ValidityInRegion with a small buffer (128 bytes)
-and runs circom's witness generator on inputs that must be accepted or
-rejected. A rejected input fails witness generation on a constraint.
+Compiles P256SpkiInRegion and ValidityInRegion with a small buffer (128 bytes),
+and UTCTimeToUnix, and runs circom's witness generator on inputs that must be
+accepted or rejected, checking the outputs of accepted ones. A rejected input
+fails witness generation on a constraint.
 
 Requires circom and node. Run from anywhere:
     python3 zk-proofs/circuits/test/test_placement.py
 """
 
+import calendar
 import json
 import struct
 import subprocess
@@ -129,6 +131,27 @@ VALIDITY_CASES = [
 VALIDITY_OUTPUTS = list(b"260101000000") + list(b"270101000000")
 
 
+# UTCTimeToUnix: YYMMDDHHMMSS (ASCII) -> Unix timestamp, against Python's
+# calendar for every month, leap days, year boundaries, and UTCTime's range
+# (YY 50-99 -> 19YY, 00-49 -> 20YY).
+UTCTIME_DATES = [
+    "700101000000", "991231235959", "000101000000", "000229120000",
+    "240228235959", "240229000000", "240301000000", "251231235959",
+    "260101000000", "490101000000", "491231235959",
+] + [f"27{month:02d}15123456" for month in range(1, 13)]
+
+
+def utctime_case(yymmddhhmmss: str):
+    yy = int(yymmddhhmmss[:2])
+    full = f"{1900 + yy if yy >= 50 else 2000 + yy}{yymmddhhmmss[2:]}"
+    expected = calendar.timegm((int(full[:4]), int(full[4:6]), int(full[6:8]),
+                                int(full[8:10]), int(full[10:12]), int(full[12:14])))
+    return (f"converts {yymmddhhmmss} to {expected}", dict(raw=list(yymmddhhmmss.encode())), True, [expected])
+
+
+UTCTIME_CASES = [utctime_case(d) for d in UTCTIME_DATES]
+
+
 def main() -> int:
     failures = 0
     with tempfile.TemporaryDirectory() as tmp:
@@ -136,10 +159,12 @@ def main() -> int:
         suites = [
             ("p256_spki", f"P256SpkiInRegion({MAX_BYTES})", SPKI_CASES, SPKI_OUTPUTS),
             ("validity", f"ValidityInRegion({MAX_BYTES})", VALIDITY_CASES, VALIDITY_OUTPUTS),
+            ("utctime", "UTCTimeToUnix()", UTCTIME_CASES, None),
         ]
-        for name, main_component, cases, expected_outputs in suites:
+        for name, main_component, cases, suite_outputs in suites:
             js_dir = compile_circuit(workdir, name, main_component)
-            for label, inputs, should_accept in cases:
+            for label, inputs, should_accept, *case_outputs in cases:
+                expected_outputs = case_outputs[0] if case_outputs else suite_outputs
                 witness = run_witness(js_dir, name, inputs, workdir)
                 ok = (witness is not None) == should_accept
                 if ok and witness is not None:

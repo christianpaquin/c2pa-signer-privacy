@@ -32,6 +32,7 @@ The X.509 + ZK prototype is a feasibility study of using zero-knowledge proofs t
 - [ZK roadmap](zk-proofs/README.md#roadmap): the experiment plan
 - [ARCHITECTURE-DECISIONS.md](zk-proofs/ARCHITECTURE-DECISIONS.md): the goals and the decisions being prototyped
 - [DEPLOYMENT-FINDINGS.md](zk-proofs/DEPLOYMENT-FINDINGS.md): what the C2PA trust lists and real signed assets look like
+- [FEASIBILITY.md](zk-proofs/FEASIBILITY.md): the comparison matrix of measured variants, with targets and stop rules
 
 ## Project Structure
 

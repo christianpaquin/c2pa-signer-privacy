@@ -1,0 +1,115 @@
+{
+  "schema": "c2pa-x509-zk-bench/1",
+  "variant": {
+    "mode": "signer-side",
+    "trust_model": "A",
+    "signer_key": "P-256",
+    "ca_signature": "ECDSA P-256 with SHA-256",
+    "proof_system": "Groth16 (ark-groth16, ark-circom witness generation in WASM)",
+    "curve": "BN254",
+    "circuit": "x509_issue_and_possession"
+  },
+  "statement": "Signer-side anonymization, trust model A: the issuing CA's P-256 key (a public input) signed, with ECDSA-SHA256, a certificate whose P-256 subject key (pinned inside the signed TBSCertificate) signed the manifest-stripped asset digest (a public input), and the certificate's validity period (also pinned) contains a prover-chosen timestamp (a public input the verifier does not check). Off-circuit, the issuing CA chain in x5chain is validated against a trust list.",
+  "environment": {
+    "cpu": "13th Gen Intel(R) Core(TM) i7-13800H",
+    "logical_cpus": 20,
+    "memory": "32774804 kB",
+    "os": "Ubuntu 24.04.2 LTS",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "wsl": true,
+    "rustc": "rustc 1.93.0 (254b59607 2026-01-19)",
+    "circom": "circom compiler 2.1.6",
+    "git_commit": "b4e38292f6e93fa1a7d6ca5038f7fc88eb2c5575",
+    "git_changed_files": [],
+    "build_profile": "release"
+  },
+  "artifacts": {
+    "r1cs_sha256": "f3bddeaa5047b0ac93f2bfd70f1de9c733b5e406855e22fb0606bac332abda0c",
+    "verifying_key_sha256": "32e5b4bbca7d7436a23bb92af4940fd986813c8f47d4ffaab49b96d18c26db50",
+    "r1cs_bytes": 1139579408,
+    "wasm_bytes": 25465820
+  },
+  "inputs": {
+    "signer_certificate_bytes": 505,
+    "tbs_certificate_bytes": 414,
+    "issuing_chain_certificates": 1,
+    "asset_bytes": 1887546
+  },
+  "phases": [
+    {
+      "name": "compile",
+      "wall_s": 198.593322828,
+      "peak_rss_mib": 6194.73828125,
+      "steps": null,
+      "data": null
+    },
+    {
+      "name": "setup",
+      "wall_s": 50.579044926,
+      "peak_rss_mib": 10177.43359375,
+      "steps": {
+        "setup_s": 50.282613737
+      },
+      "data": {
+        "proving_key_bytes": 1026490480,
+        "verifying_key_bytes": 872
+      }
+    },
+    {
+      "name": "witness",
+      "wall_s": 229.271509048,
+      "peak_rss_mib": 4099.6328125,
+      "steps": {
+        "read_inputs_s": 0.000325109,
+        "load_circuit_s": 4.190026023,
+        "compute_witness_s": 223.563140083,
+        "check_witness_s": 0.865427115,
+        "write_witness_s": 0.136813691
+      },
+      "data": {
+        "constraints": 4776263,
+        "wires": 4737842
+      }
+    },
+    {
+      "name": "prove",
+      "wall_s": 378.642626556,
+      "peak_rss_mib": 11327.00390625,
+      "steps": {
+        "load_r1cs_s": 2.769418511,
+        "read_witness_s": 0.255359557,
+        "load_proving_key_s": 342.301515728,
+        "prove_s": 32.970535132,
+        "write_proof_s": 0.000171317
+      },
+      "data": {}
+    },
+    {
+      "name": "verify",
+      "wall_s": 0.03379665,
+      "peak_rss_mib": 18.73828125,
+      "steps": {
+        "read_proof_s": 0.000768567,
+        "load_verifying_key_s": 0.010471241,
+        "load_and_verify_s": 0.010078862
+      },
+      "data": {}
+    },
+    {
+      "name": "verify_cli",
+      "wall_s": 0.020555788,
+      "peak_rss_mib": 26.8125,
+      "steps": null,
+      "data": null
+    }
+  ],
+  "output": {
+    "groth16_proof_bytes": 128,
+    "public_inputs": 19,
+    "proof_container_bytes": 668,
+    "assertion_json_bytes": 1183,
+    "x5chain_bytes": 481,
+    "manifest_store_bytes": 11385,
+    "note": "manifest_store_bytes is the whole C2PA store added to the asset, including the COSE signature's reserved padding; proof_container_bytes is the proof as embedded (base64 of JSON with the public inputs); the COSE signature field holds the same container decoded once."
+  }
+}

@@ -715,13 +715,10 @@ mod tests {
         use der::Decode;
         use x509_cert::Certificate;
 
-        // Load test fixtures using CARGO_MANIFEST_DIR (zk-proofs/crates/c2pa-x509-zk-demo)
-        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let fixtures = manifest_dir.join("../../fixtures/certs");
-        let cert_der = std::fs::read(fixtures.join("signer-cert.der"))
-            .expect("signer-cert.der not found");
-        let ca_cert_der = std::fs::read(fixtures.join("ca-cert.der"))
-            .expect("ca-cert.der not found");
+        // A generated test PKI: the signer certificate and its issuing CA.
+        let pki = crate::test_pki::TestPki::generate("Circuit Test");
+        let cert_der = pki.read("signer.der");
+        let ca_cert_der = pki.read("issuing-ca.der");
 
         // ---- Compute structural hints ----------------------------------------
         let tbs_offset = compute_tbs_offset(&cert_der).unwrap();

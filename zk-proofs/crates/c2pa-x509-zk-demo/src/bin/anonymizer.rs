@@ -4,7 +4,7 @@
 //! with a ZK proof that the signer's cert was issued by a trusted CA.
 //!
 //! Usage:
-//!   c2pa-x509-zk-anonymizer --input signed.jpg --output anon.jpg --ca root.pem
+//!   c2pa-x509-zk-anonymizer --input signed.jpg --output anon.jpg --trust-list trust-list.pem
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
@@ -14,9 +14,8 @@ use c2pa_x509_zk_demo::{
     circuit,
     circuit_native::{self, NativeCircuitPaths},
     manifest::{extract_manifest_data, rewrite_manifest_with_zk_proof},
-    types::TrustedCaParams,
     X509ZkSignerProofAssertion,
-    extract_issuer_dn, compute_key_id,
+    extract_issuer_dn, issuing_path_for, spki_key_id, TrustList,
 };
 
 #[derive(Parser, Debug)]
@@ -31,9 +30,9 @@ struct Args {
     #[arg(short, long)]
     output: PathBuf,
 
-    /// Path to the trusted CA certificate (PEM or DER)
+    /// Trust list: a PEM bundle of trust anchors, or the C2PA trust list JSON
     #[arg(long)]
-    ca: PathBuf,
+    trust_list: PathBuf,
 
     /// Path to the signer's private key (for generating proof-of-possession)
     /// In production, this would be done on the signer's secure device
@@ -64,13 +63,9 @@ async fn main() -> Result<()> {
 
     println!("=== C2PA X.509 ZK Anonymizer ===\n");
 
-    // Load trusted CA certificate
-    println!("Loading CA certificate from {:?}...", args.ca);
-    let ca_params = if args.ca.extension().map(|e| e == "pem").unwrap_or(false) {
-        TrustedCaParams::from_pem_file(&args.ca)?
-    } else {
-        TrustedCaParams::from_der_file(&args.ca)?
-    };
+    println!("Loading trust list from {:?}...", args.trust_list);
+    let trust = TrustList::from_file(&args.trust_list)?;
+    println!("  {} trust anchors ({} skipped)", trust.anchors.len(), trust.skipped);
 
     // Extract manifest data from the signed asset
     println!("Reading manifest from {:?}...", args.input);
@@ -86,6 +81,9 @@ async fn main() -> Result<()> {
     // which changes the TBS bytes and invalidates the CA signature check
     // inside the ZK circuit.  Using the on-disk bytes guarantees exactness.
     let mut manifest_data = manifest_data;
+    // The signer's key, as it appears in the signed asset. Used below to make
+    // sure no certificate for that key is embedded in the output.
+    let signer_key_id = spki_key_id(&manifest_data.leaf_cert_der)?;
     if let Some(cert_path) = &args.cert {
         let cert_bytes = if cert_path.extension().map(|e| e == "pem").unwrap_or(false) {
             // PEM: decode to DER
@@ -109,13 +107,31 @@ async fn main() -> Result<()> {
             manifest_data.leaf_cert_der.len(), cert_path);
     }
 
-    // Extract issuer DN from leaf certificate
+    // The issuing path to embed in x5chain: from the signed asset's
+    // intermediates, or the trust anchor that issued the signer certificate,
+    // validated now rather than after a ~10 minute proof. Only the validated
+    // path is embedded: certificates after the trust anchor are not part of
+    // it and could be anything, including the signer's own.
+    let issuing_chain = issuing_path_for(
+        &manifest_data.leaf_cert_der,
+        &manifest_data.ca_certs_der,
+        &trust,
+        manifest_data.photo_timestamp,
+    )?;
+    // Both the signed asset's signer certificate and a --cert override.
+    let signer_keys = [signer_key_id, spki_key_id(&manifest_data.leaf_cert_der)?];
+    for cert in &issuing_chain {
+        if signer_keys.contains(&spki_key_id(cert)?) {
+            anyhow::bail!("refusing to embed a certificate for the signer's key in x5chain");
+        }
+    }
+    let issuing_ca_der = issuing_chain[0].clone();
+    println!("  Issuing chain: {} certificate(s), validated against the trust list", issuing_chain.len());
+
     let issuer_dn = extract_issuer_dn(&manifest_data.leaf_cert_der)?;
     println!("  Issuer: {issuer_dn}");
-
-    // Compute CA key ID
-    let ca_key_id = compute_key_id(&ca_params.ca_cert_der);
-    println!("  CA Key ID: {ca_key_id}");
+    let ca_key_id = spki_key_id(&issuing_ca_der)?;
+    println!("  Issuing CA key ID: {ca_key_id}");
 
     // Check if native setup is complete (use x509_issue_and_possession circuit)
     let native_paths = NativeCircuitPaths::default_for_circuit(
@@ -150,7 +166,7 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&assertion)?);
 
         // Try to rewrite manifest (will fail until custom signer is implemented)
-        match rewrite_manifest_with_zk_proof(&args.input, &args.output, assertion) {
+        match rewrite_manifest_with_zk_proof(&args.input, &args.output, assertion, issuing_chain) {
             Ok(()) => println!("\n✅ Anonymized asset written to {:?}", args.output),
             Err(e) => {
                 eprintln!("\n❌ Manifest rewrite not yet implemented: {e}");
@@ -180,7 +196,7 @@ async fn main() -> Result<()> {
         let proof_inputs = circuit::prepare_inputs(
             &manifest_data,
             &signer_key,
-            &ca_params.ca_cert_der,
+            &issuing_ca_der,
         )?;
 
         // Convert to circuit format — parses the leaf cert internally to
@@ -199,7 +215,7 @@ async fn main() -> Result<()> {
         );
 
         println!("Rewriting manifest with ZK proof...");
-        rewrite_manifest_with_zk_proof(&args.input, &args.output, assertion)?;
+        rewrite_manifest_with_zk_proof(&args.input, &args.output, assertion, issuing_chain)?;
 
         println!("\n✅ Anonymized asset written to {:?}", args.output);
     }

@@ -38,7 +38,7 @@ BBS_BIN = ROOT / "bbs-signatures" / "target" / "release"
 ZK_BIN = ROOT / "zk-proofs" / "target" / "release"
 BBS_FIXTURES = ROOT / "bbs-signatures" / "fixtures"
 ZK_FIXTURES = ROOT / "zk-proofs" / "fixtures"
-ZK_CERTS = ZK_FIXTURES / "certs"
+ZK_PKI = ZK_FIXTURES / "pki"
 ZK_CIRCUITS = ROOT / "zk-proofs" / "circuits"
 
 UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="c2pa_web_"))
@@ -83,6 +83,26 @@ def resolve_input_image(fixtures_dir: Path) -> Path | None:
             return dest
 
     return None
+
+
+def ensure_zk_pki() -> None:
+    """Create the ZK test PKI if there is none, and renew the signer
+    certificate (same key, same trust anchors) when it expires within a day.
+
+    Never replaces the trust anchors, which would make every previously
+    anonymized asset untrusted: a full reset is a manual run of
+    zk-proofs/generate-test-pki.sh.
+    """
+    script = ROOT / "zk-proofs" / "generate-test-pki.sh"
+    if not (ZK_PKI / "trust-list.pem").exists():
+        subprocess.run(["bash", str(script), str(ZK_PKI)], check=True, capture_output=True)
+        return
+    expiring = subprocess.run(
+        ["openssl", "x509", "-checkend", "86400", "-noout", "-in", str(ZK_PKI / "signer.pem")],
+        capture_output=True,
+    ).returncode != 0
+    if expiring:
+        subprocess.run(["bash", str(script), "--renew-signer", str(ZK_PKI)], check=True, capture_output=True)
 
 
 def run_cli(args: list[str], cwd: str | None = None) -> subprocess.CompletedProcess:
@@ -273,6 +293,7 @@ def zk_index():
 @app.route("/zk/sign", methods=["GET", "POST"])
 def zk_sign():
     if request.method == "POST":
+        ensure_zk_pki()
         input_path = resolve_input_image(ZK_FIXTURES)
         if not input_path:
             flash("Please upload or select an image.", "error")
@@ -284,9 +305,9 @@ def zk_sign():
             str(ZK_BIN / "c2pa-x509-zk-sign"),
             "--input", str(input_path),
             "--output", str(output_path),
-            "--cert", str(ZK_CERTS / "signer-cert.pem"),
-            "--key", str(ZK_CERTS / "signer-key.pem"),
-            "--ca", str(ZK_CERTS / "ca-cert.pem"),
+            "--cert", str(ZK_PKI / "signer.pem"),
+            "--key", str(ZK_PKI / "signer.key"),
+            "--ca", str(ZK_PKI / "issuing-ca.pem"),
         ])
 
         if result.returncode != 0:
@@ -306,6 +327,7 @@ def zk_sign():
 @app.route("/zk/anonymize", methods=["GET", "POST"])
 def zk_anonymize():
     if request.method == "POST":
+        ensure_zk_pki()
         image = request.files.get("image")
         use_placeholder = "placeholder" in request.form
 
@@ -322,9 +344,9 @@ def zk_anonymize():
             str(ZK_BIN / "c2pa-x509-zk-anonymizer"),
             "--input", str(input_path),
             "--output", str(output_path),
-            "--ca", str(ZK_CERTS / "ca-cert.pem"),
-            "--signer-key", str(ZK_CERTS / "signer-key.pem"),
-            "--cert", str(ZK_CERTS / "signer-cert.pem"),
+            "--trust-list", str(ZK_PKI / "trust-list.json"),
+            "--signer-key", str(ZK_PKI / "signer.key"),
+            "--cert", str(ZK_PKI / "signer.pem"),
             "--circuits-dir", str(ZK_CIRCUITS),
         ]
         if use_placeholder:
@@ -389,6 +411,10 @@ def job_status_api(job_id: str):
 @app.route("/zk/verify", methods=["GET", "POST"])
 def zk_verify():
     if request.method == "POST":
+        # Verification only reads the trust list; it never creates or renews keys.
+        if not (ZK_PKI / "trust-list.pem").exists():
+            flash("No test PKI yet: sign an image first.", "error")
+            return render_template("zk/verify.html")
         image = request.files.get("image")
         if not image or not allowed_file(image.filename):
             flash("Please upload an anonymized PNG or JPEG image.", "error")
@@ -401,7 +427,7 @@ def zk_verify():
         result = run_cli([
             str(ZK_BIN / "c2pa-x509-zk-verify"),
             "--input", str(input_path),
-            "--ca", str(ZK_CERTS / "ca-cert.pem"),
+            "--trust-list", str(ZK_PKI / "trust-list.pem"),
             "--circuits-dir", str(ZK_CIRCUITS),
         ], cwd=str(ROOT / "zk-proofs"))
 

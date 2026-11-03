@@ -5,7 +5,7 @@
 //!
 //! Usage:
 //!   c2pa-x509-zk-sign --input unsigned.png --output signed.png \
-//!       --cert signer.pem --key signer-key.pem --ca ca.pem
+//!       --cert signer.pem --key signer.key --ca issuing-ca.pem
 
 use anyhow::{anyhow, Result};
 use c2pa::{create_signer, SigningAlg};
@@ -33,7 +33,8 @@ struct Args {
     #[arg(long)]
     key: PathBuf,
 
-    /// Path to the CA certificate (PEM) - included in chain
+    /// Issuing CA certificate(s) (PEM), included after the signer certificate
+    /// in x5chain. The root is not included, per the C2PA specification.
     #[arg(long)]
     ca: PathBuf,
 }
@@ -53,7 +54,7 @@ fn main() -> Result<()> {
     let ca_cert_pem = fs::read_to_string(&args.ca)
         .map_err(|e| anyhow!("failed to read CA cert: {e}"))?;
 
-    // Concatenate cert chain: signer + CA
+    // x5chain: signer + issuing CA(s)
     let cert_chain = format!("{}\n{}", signer_cert_pem.trim(), ca_cert_pem.trim());
 
     println!("Loaded signer cert from {:?}", args.cert);

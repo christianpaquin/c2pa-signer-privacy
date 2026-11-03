@@ -13,7 +13,11 @@ use serde::{Deserialize, Serialize};
 pub mod circuit;
 pub mod circuit_native;
 pub mod manifest;
+pub mod trust;
 pub mod types;
+
+#[cfg(test)]
+pub(crate) mod test_pki;
 
 // Re-exports
 pub use circuit::{
@@ -29,6 +33,9 @@ pub use manifest::{
     compute_manifest_stripped_asset_digest,
     extract_manifest_data,
     rewrite_manifest_with_zk_proof,
+};
+pub use trust::{
+    issuing_path_for, pem_to_der_certs, spki_key_id, validate_issuing_chain, verify_issued_by, TrustList,
 };
 pub use types::*;
 
@@ -47,7 +54,7 @@ pub struct X509ZkSignerProofAssertion {
     pub version: String,
     /// Canonical issuer DN (e.g., "CN=Example Root CA,O=Example Org,C=US")
     pub issuer: String,
-    /// Hash of the CA public key for quick lookup
+    /// Hex SHA-256 of the issuing CA's SubjectPublicKeyInfo (see `spki_key_id`)
     pub issuer_key_id: String,
     /// Hex-encoded manifest-stripped asset digest used for proof binding.
     pub claim_hash: String,
@@ -79,6 +86,17 @@ impl X509ZkSignerProofAssertion {
     }
 }
 
+/// Extract the subject DN from a DER-encoded X.509 certificate
+pub fn extract_subject_dn(cert_der: &[u8]) -> Result<String> {
+    use der::Decode;
+    use x509_cert::Certificate;
+
+    let cert = Certificate::from_der(cert_der)
+        .map_err(|e| anyhow!("failed to parse X.509 certificate: {e}"))?;
+
+    Ok(cert.tbs_certificate.subject.to_string())
+}
+
 /// Extract the issuer DN from a DER-encoded X.509 certificate
 pub fn extract_issuer_dn(cert_der: &[u8]) -> Result<String> {
     use der::Decode;
@@ -88,13 +106,6 @@ pub fn extract_issuer_dn(cert_der: &[u8]) -> Result<String> {
         .map_err(|e| anyhow!("failed to parse X.509 certificate: {e}"))?;
     
     Ok(cert.tbs_certificate.issuer.to_string())
-}
-
-/// Compute a key ID from a public key (SHA-256 of the SPKI)
-pub fn compute_key_id(spki_der: &[u8]) -> String {
-    use sha2::{Sha256, Digest};
-    let hash = Sha256::digest(spki_der);
-    hex::encode(&hash[..8]) // First 8 bytes as truncated key ID
 }
 
 #[cfg(test)]

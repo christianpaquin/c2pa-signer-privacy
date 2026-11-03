@@ -113,7 +113,7 @@ Earlier versions checked only the local tags (a `0x04` before the key, `17 0D` b
 
 Remaining limitation: this is not a full DER walk of the TBSCertificate. A byte sequence matching the SPKI or Validity encoding inside another TBS field (for example, an extension) would also be accepted; exploiting that requires the CA to have signed a certificate containing such content. A full walk is part of [H2](#h2-full-certificate-validation-in-the-circuit).
 
-The placement checks have fast tests (a few seconds, needs `circom` and `node`):
+The placement checks and the in-circuit date conversion (`UTCTimeToUnix`) have fast tests (a few seconds, needs `circom` and `node`):
 
 ```bash
 python3 circuits/test/test_placement.py
@@ -339,6 +339,7 @@ The prototype is a feasibility study with two goals, set out in [ARCHITECTURE-DE
 
 - **Signer certificate removed from anonymized output** ([#6](https://github.com/christianpaquin/c2pa-signer-privacy/issues/6)).
 - **Certificate field binding:** the circuit pins the signer key and validity period inside the CA-signed TBSCertificate; previously a prover with no certificate could forge a proof (see [Certificate field binding](#certificate-field-binding)).
+- **Certificate dates computed one month late:** the in-circuit UTCTime conversion indexed its days-before-month table off by one, shifting every `notBefore`/`notAfter` 28-31 days later. Certificates less than about a month old could not produce valid proofs, and certificates expired up to about a month earlier were still accepted. Fixed, with tests against Python's calendar for every month, leap days, and both ends of the UTCTime range.
 
 #### Standards-conformant COSE encoding ✅
 

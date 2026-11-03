@@ -553,24 +553,24 @@ template UTCTimeToUnix() {
     yearMod4Zero.in <== yearMod4;
     signal isLeap <== yearMod4Zero.out;  // 1 if leap, 0 otherwise
 
-    // Cumulative days at start of each month (1-indexed), non-leap year.
-    // cumDays[m] = days elapsed before month m+1 (0-indexed), for m in 1..12.
-    // Jan=0, Feb=31, Mar=59, Apr=90, May=120, Jun=151,
-    // Jul=181, Aug=212, Sep=243, Oct=273, Nov=304, Dec=334
+    // Days elapsed before the start of month m (1-indexed, matching `mm`),
+    // non-leap year: Jan=0, Feb=31, Mar=59, ..., Dec=334. Index 0 is unused.
+    // (An earlier version shifted this table by one entry, so every date was
+    // computed one month late.)
     var cumDaysNonLeap[13];
     cumDaysNonLeap[0]  = 0;
-    cumDaysNonLeap[1]  = 31;
-    cumDaysNonLeap[2]  = 59;
-    cumDaysNonLeap[3]  = 90;
-    cumDaysNonLeap[4]  = 120;
-    cumDaysNonLeap[5]  = 151;
-    cumDaysNonLeap[6]  = 181;
-    cumDaysNonLeap[7]  = 212;
-    cumDaysNonLeap[8]  = 243;
-    cumDaysNonLeap[9]  = 273;
-    cumDaysNonLeap[10] = 304;
-    cumDaysNonLeap[11] = 334;
-    cumDaysNonLeap[12] = 365;
+    cumDaysNonLeap[1]  = 0;
+    cumDaysNonLeap[2]  = 31;
+    cumDaysNonLeap[3]  = 59;
+    cumDaysNonLeap[4]  = 90;
+    cumDaysNonLeap[5]  = 120;
+    cumDaysNonLeap[6]  = 151;
+    cumDaysNonLeap[7]  = 181;
+    cumDaysNonLeap[8]  = 212;
+    cumDaysNonLeap[9]  = 243;
+    cumDaysNonLeap[10] = 273;
+    cumDaysNonLeap[11] = 304;
+    cumDaysNonLeap[12] = 334;
 
     // Select cumulative days for month `mm` (1-indexed) using a mux.
     // Also add 1 to Feb's offset when it's a leap year and mm > 2.

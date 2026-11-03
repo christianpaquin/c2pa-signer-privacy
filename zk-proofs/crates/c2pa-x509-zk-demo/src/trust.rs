@@ -129,33 +129,50 @@ pub fn validate_issuing_chain(chain: &[Vec<u8>], trust: &TrustList, at: u64) -> 
             Some(next) => verify_issued_by(der, next)
                 .with_context(|| format!("issuing chain certificate {i} is not issued by certificate {}", i + 1))?,
             None => {
-                let anchor = trust
-                    .anchors
-                    .iter()
-                    .find(|a| verify_issued_by(der, a).is_ok())
-                    .ok_or_else(|| anyhow!("issuing chain does not chain to the trust list"))?;
-                check_ca(&parse(anchor)?, at, chain.len()).context("trust anchor")?;
-                return Ok(chain.to_vec());
+                // Several anchors can verify the signature (for example an
+                // expired and a renewed certificate for the same key); the
+                // path is valid if any of them is a valid anchor for it.
+                let mut last_err = None;
+                for anchor in trust.anchors.iter().filter(|a| verify_issued_by(der, a).is_ok()) {
+                    match check_ca(&parse(anchor)?, at, chain.len()) {
+                        Ok(()) => return Ok(chain.to_vec()),
+                        Err(e) => last_err = Some(e.context("trust anchor")),
+                    }
+                }
+                return Err(last_err.unwrap_or_else(|| anyhow!("issuing chain does not chain to the trust list")));
             }
         }
     }
     unreachable!("loop returns on the last certificate")
 }
 
-/// Find the issuing chain to embed for `leaf`: the provided intermediates if
-/// the first one issued `leaf`, otherwise the trust anchor that did.
-pub fn issuing_chain_for(leaf_der: &[u8], intermediates: &[Vec<u8>], trust: &TrustList) -> Result<Vec<Vec<u8>>> {
-    if let Some(first) = intermediates.first() {
-        if verify_issued_by(leaf_der, first).is_ok() {
-            return Ok(intermediates.to_vec());
+/// Find and validate the issuing path for `leaf` at Unix time `at`: the
+/// signed asset's intermediates if their first certificate issued `leaf`,
+/// otherwise a trust anchor that did. Every candidate is tried until one
+/// yields a fully valid path (see `validate_issuing_chain`), so the result
+/// does not depend on the order of the trust list.
+pub fn issuing_path_for(
+    leaf_der: &[u8],
+    intermediates: &[Vec<u8>],
+    trust: &TrustList,
+    at: u64,
+) -> Result<Vec<Vec<u8>>> {
+    let mut candidates: Vec<Vec<Vec<u8>>> = Vec::new();
+    if intermediates.first().is_some_and(|first| verify_issued_by(leaf_der, first).is_ok()) {
+        candidates.push(intermediates.to_vec());
+    }
+    for anchor in trust.anchors.iter().filter(|a| verify_issued_by(leaf_der, a).is_ok()) {
+        candidates.push(vec![anchor.clone()]);
+    }
+
+    let mut last_err = None;
+    for candidate in &candidates {
+        match validate_issuing_chain(candidate, trust, at) {
+            Ok(path) => return Ok(path),
+            Err(e) => last_err = Some(e),
         }
     }
-    trust
-        .anchors
-        .iter()
-        .find(|a| verify_issued_by(leaf_der, a).is_ok())
-        .map(|a| vec![a.clone()])
-        .ok_or_else(|| anyhow!("no certificate in the chain or trust list issued the signer certificate"))
+    Err(last_err.unwrap_or_else(|| anyhow!("no certificate in the chain or trust list issued the signer certificate")))
 }
 
 /// Verify that `issuer_der` issued `child_der`: names match and the issuer's
@@ -217,15 +234,28 @@ fn parse(der: &[u8]) -> Result<Certificate> {
     Certificate::from_der(der).map_err(|e| anyhow!("failed to parse certificate: {e}"))
 }
 
+/// EKUs that let a CA issue C2PA claim-signing certificates: anyExtendedKeyUsage,
+/// C2PA claim signing, document signing, email protection, and Microsoft's
+/// C2PA signing OID (the purposes real signer certificates use; see
+/// DEPLOYMENT-FINDINGS.md).
+const CLAIM_SIGNING_CA_EKUS: [&str; 5] = [
+    "2.5.29.37.0",
+    "1.3.6.1.4.1.62558.2.1",
+    "1.3.6.1.5.5.7.3.36",
+    "1.3.6.1.5.5.7.3.4",
+    "1.3.6.1.4.1.311.76.59.1.9",
+];
+
 /// The certificate must be a CA that can sign certificates, valid at `at`,
-/// with no unrecognized critical extension, and with a path-length constraint
-/// (if any) allowing `cas_below` CA certificates between it and the signer.
+/// with no unrecognized critical extension, an EKU (if any) that allows C2PA
+/// claim signing, and a path-length constraint (if any) allowing `cas_below`
+/// CA certificates between it and the signer.
 fn check_ca(cert: &Certificate, at: u64, cas_below: usize) -> Result<()> {
     use const_oid::db::rfc5280::{
         ID_CE_AUTHORITY_KEY_IDENTIFIER, ID_CE_BASIC_CONSTRAINTS, ID_CE_EXT_KEY_USAGE, ID_CE_KEY_USAGE,
         ID_CE_SUBJECT_KEY_IDENTIFIER,
     };
-    use x509_cert::ext::pkix::{BasicConstraints, KeyUsage};
+    use x509_cert::ext::pkix::{BasicConstraints, ExtendedKeyUsage, KeyUsage};
 
     let tbs = &cert.tbs_certificate;
     let extensions = tbs.extensions.as_deref().unwrap_or_default();
@@ -251,6 +281,18 @@ fn check_ca(cert: &Certificate, at: u64, cas_below: usize) -> Result<()> {
         let usage = KeyUsage::from_der(ext.extn_value.as_bytes()).map_err(|e| anyhow!("invalid keyUsage: {e}"))?;
         if !usage.key_cert_sign() {
             bail!("{}: keyUsage does not allow certificate signing", tbs.subject);
+        }
+    }
+
+    // An EKU on a CA restricts the purposes it may issue for (CA/Browser
+    // Forum and common practice; RFC 5280 does not define it for CAs). It
+    // must decode, and allow claim signing: anyExtendedKeyUsage, or one of the
+    // EKUs real C2PA signer certificates carry.
+    if let Some(ext) = find(ID_CE_EXT_KEY_USAGE) {
+        let eku = ExtendedKeyUsage::from_der(ext.extn_value.as_bytes())
+            .map_err(|e| anyhow!("{}: invalid extendedKeyUsage: {e}", tbs.subject))?;
+        if !eku.0.iter().any(|oid| CLAIM_SIGNING_CA_EKUS.contains(&oid.to_string().as_str())) {
+            bail!("{}: extendedKeyUsage does not allow C2PA claim signing", tbs.subject);
         }
     }
 
@@ -452,14 +494,105 @@ mod tests {
     }
 
     #[test]
-    fn issuing_chain_for_signer_prefers_provided_intermediates_then_anchors() {
+    fn issuing_path_for_signer_uses_provided_intermediates_then_anchors() {
         let pki = TestPki::generate("Trust Test");
         let trust = TrustList::from_file(&pki.file("trust-list.pem")).unwrap();
         let signer = pki.read("signer.der");
         let ica = pki.read("issuing-ca.der");
-        assert_eq!(issuing_chain_for(&signer, &[ica.clone()], &trust).unwrap(), vec![ica.clone()]);
+        assert_eq!(issuing_path_for(&signer, &[ica.clone()], &trust, now()).unwrap(), vec![ica.clone()]);
         // Not in the signed chain: found in the trust list instead.
-        assert_eq!(issuing_chain_for(&signer, &[], &trust).unwrap(), vec![ica]);
+        assert_eq!(issuing_path_for(&signer, &[], &trust, now()).unwrap(), vec![ica]);
+    }
+
+    /// Re-issue an existing certificate (`name`.pem/.key) for the same subject
+    /// and key, valid for one day only, signed by `issuer` ("self" for a root).
+    fn reissue_short_lived(pki: &TestPki, name: &str, issuer: &str, extensions: &str) -> Vec<u8> {
+        let dir = &pki.path;
+        let run = |args: &[&str]| {
+            let ok = std::process::Command::new("openssl").args(args).current_dir(dir)
+                .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                .status().unwrap().success();
+            assert!(ok, "openssl {args:?} failed");
+        };
+        let (csr, ext, der) = (format!("{name}-short.csr"), format!("{name}-short.ext"), format!("{name}-short.der"));
+        run(&["x509", "-x509toreq", "-in", &format!("{name}.pem"), "-signkey", &format!("{name}.key"), "-out", &csr]);
+        std::fs::write(dir.join(&ext), extensions).unwrap();
+        let mut args = vec!["x509", "-req", "-in", &csr, "-days", "1", "-sha256", "-extfile", &ext, "-outform", "DER", "-out", &der];
+        let (ca, ca_key) = (format!("{issuer}.pem"), format!("{issuer}.key"));
+        let own_key = format!("{name}.key");
+        if issuer == "self" {
+            args.extend(["-signkey", own_key.as_str()]);
+        } else {
+            args.extend(["-CA", ca.as_str(), "-CAkey", ca_key.as_str(), "-CAcreateserial"]);
+        }
+        run(&args);
+        pki.read(&der)
+    }
+
+    fn two_days_from_now() -> u64 {
+        now() + 2 * 24 * 3600
+    }
+
+    /// Regression test (PR #14 re-review): an expired and a valid anchor for
+    /// the same key must give the same result in either order.
+    #[test]
+    fn anchor_order_does_not_matter() {
+        let pki = TestPki::generate("Trust Test");
+        let root = pki.read("root.der");
+        let short_root = reissue_short_lived(&pki, "root", "self",
+            "basicConstraints=critical,CA:TRUE,pathlen:1\nkeyUsage=critical,keyCertSign,cRLSign\n");
+        let ica = pki.read("issuing-ca.der");
+        for anchors in [vec![short_root.clone(), root.clone()], vec![root.clone(), short_root.clone()]] {
+            let trust = TrustList { anchors, skipped: 0 };
+            // Two days from now the short-lived root has expired; the other is valid.
+            validate_issuing_chain(&[ica.clone()], &trust, two_days_from_now()).unwrap();
+        }
+    }
+
+    #[test]
+    fn issuer_discovery_order_does_not_matter() {
+        let pki = TestPki::generate("Trust Test");
+        let ica = pki.read("issuing-ca.der");
+        let short_ica = reissue_short_lived(&pki, "issuing-ca", "root",
+            "basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\n");
+        let signer = pki.read("signer.der");
+        for anchors in [vec![short_ica.clone(), ica.clone()], vec![ica.clone(), short_ica.clone()]] {
+            let trust = TrustList { anchors, skipped: 0 };
+            assert_eq!(issuing_path_for(&signer, &[], &trust, two_days_from_now()).unwrap(), vec![ica.clone()]);
+        }
+    }
+
+    #[test]
+    fn ca_with_eku_not_allowing_claim_signing_is_rejected() {
+        let pki = TestPki::generate("Trust Test");
+        let trust = TrustList::from_file(&pki.file("root.pem")).unwrap();
+        for (name, eku) in [("crit-server", "critical,serverAuth"), ("server", "serverAuth"), ("tsa", "timeStamping")] {
+            let ca = issue_ca(&pki, name, "root",
+                &format!("basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign\nextendedKeyUsage={eku}\n"));
+            let err = validate_issuing_chain(&[ca], &trust, now()).unwrap_err();
+            assert!(format!("{err:#}").contains("does not allow C2PA claim signing"), "{name}: {err:#}");
+        }
+    }
+
+    #[test]
+    fn ca_with_malformed_critical_eku_is_rejected() {
+        let pki = TestPki::generate("Trust Test");
+        let trust = TrustList::from_file(&pki.file("root.pem")).unwrap();
+        // DER NULL where a SEQUENCE of OIDs is required.
+        let ca = issue_ca(&pki, "bad-eku", "root",
+            "basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign\n2.5.29.37=critical,DER:05:00\n");
+        let err = validate_issuing_chain(&[ca], &trust, now()).unwrap_err();
+        assert!(format!("{err:#}").contains("invalid extendedKeyUsage"), "{err:#}");
+    }
+
+    #[test]
+    fn ca_with_claim_signing_eku_is_accepted() {
+        let pki = TestPki::generate("Trust Test");
+        let trust = TrustList::from_file(&pki.file("root.pem")).unwrap();
+        // As on a real C2PA issuing CA: email protection plus C2PA claim signing.
+        let ca = issue_ca(&pki, "c2pa-eku", "root",
+            "basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign\nextendedKeyUsage=emailProtection,1.3.6.1.4.1.62558.2.1\n");
+        validate_issuing_chain(&[ca], &trust, now()).unwrap();
     }
 
     #[test]

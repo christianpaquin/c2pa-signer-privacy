@@ -35,7 +35,7 @@ pub use manifest::{
     rewrite_manifest_with_zk_proof,
 };
 pub use trust::{
-    issuing_chain_for, pem_to_der_certs, spki_key_id, validate_issuing_chain, verify_issued_by, TrustList,
+    issuing_path_for, pem_to_der_certs, spki_key_id, validate_issuing_chain, verify_issued_by, TrustList,
 };
 pub use types::*;
 

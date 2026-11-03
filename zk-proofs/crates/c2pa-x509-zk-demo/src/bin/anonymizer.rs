@@ -15,7 +15,7 @@ use c2pa_x509_zk_demo::{
     circuit_native::{self, NativeCircuitPaths},
     manifest::{extract_manifest_data, rewrite_manifest_with_zk_proof},
     X509ZkSignerProofAssertion,
-    extract_issuer_dn, issuing_chain_for, spki_key_id, validate_issuing_chain, TrustList,
+    extract_issuer_dn, issuing_path_for, spki_key_id, TrustList,
 };
 
 #[derive(Parser, Debug)]
@@ -107,17 +107,17 @@ async fn main() -> Result<()> {
             manifest_data.leaf_cert_der.len(), cert_path);
     }
 
-    // The issuing chain to embed in x5chain: the signed asset's intermediates,
-    // or the trust anchor that issued the signer certificate. Validate it now
-    // rather than after a ~10 minute proof.
-    let issuing_chain = issuing_chain_for(
+    // The issuing path to embed in x5chain: from the signed asset's
+    // intermediates, or the trust anchor that issued the signer certificate,
+    // validated now rather than after a ~10 minute proof. Only the validated
+    // path is embedded: certificates after the trust anchor are not part of
+    // it and could be anything, including the signer's own.
+    let issuing_chain = issuing_path_for(
         &manifest_data.leaf_cert_der,
         &manifest_data.ca_certs_der,
         &trust,
+        manifest_data.photo_timestamp,
     )?;
-    // Embed only the validated path: certificates after the trust anchor are
-    // not part of it and could be anything, including the signer's own.
-    let issuing_chain = validate_issuing_chain(&issuing_chain, &trust, manifest_data.photo_timestamp)?;
     // Both the signed asset's signer certificate and a --cert override.
     let signer_keys = [signer_key_id, spki_key_id(&manifest_data.leaf_cert_der)?];
     for cert in &issuing_chain {

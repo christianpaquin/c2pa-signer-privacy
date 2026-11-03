@@ -306,10 +306,10 @@ The circuit currently requires P-256 keys and ECDSA-SHA256 signatures throughout
 **Trust lists.** `--trust-list` accepts a PEM bundle of anchors, a single DER certificate, or the C2PA trust list JSON ([`C2PA-TRUST-LIST.json`](https://github.com/c2pa-org/conformance-public/tree/main/trust-list)). From the JSON, only services whose status is `http://c2pa.org/conformance/trust-list/trusted` are loaded; the count of skipped certificates is reported. (The official list currently has two certificates with an empty status, which appear in its PEM version but are skipped from the JSON.) Issuing chains are validated off-circuit, until a certificate is an anchor or is issued by one:
 
 - each link's signature (ECDSA P-256/P-384 with SHA-256/384, or RSA PKCS#1 v1.5) and issuer name;
-- each CA certificate: `CA:TRUE`, within its validity period, `keyCertSign` if it has a key-usage extension, and no critical extension the validator does not process (such as name constraints);
+- each CA certificate: `CA:TRUE`, within its validity period, `keyCertSign` if it has a key-usage extension, an extended-key-usage extension (if any, critical or not) that decodes and allows C2PA claim signing (any purpose, C2PA claim signing, document signing, email protection, or Microsoft's C2PA OID), and no critical extension the validator does not process (such as name constraints). On the official C2PA trust list, 12 of the 32 certificates carry an EKU, all non-critical and all including C2PA claim signing;
 - path-length constraints, counting the hidden signer: the certificate at position `k` in the issuing chain has `k` CA certificates below it before the signer, so it needs `pathLen >= k`, and an anchor that issued the last certificate needs `pathLen >= ` the chain length. Self-issued certificates get no special treatment, which is stricter than RFC 5280.
 
-The validated path ends at the trust anchor. The anonymizer embeds only that path, and refuses to embed any certificate for the signer's key; the verifier rejects an `x5chain` with certificates after the anchor.
+Every candidate anchor or issuer is tried until one yields a fully valid path, so the result does not depend on the order of the trust list (for example, when it holds both an expired and a renewed certificate for the same CA key). The validated path ends at the trust anchor. The anonymizer embeds only that path, and refuses to embed any certificate for the signer's key; the verifier rejects an `x5chain` with certificates after the anchor.
 
 ## Placeholder Mode
 

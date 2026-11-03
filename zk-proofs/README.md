@@ -245,6 +245,7 @@ Constraints fell 61% with the switch to `VarShiftLeft` (see [Constraint Count](#
 - Critical header: `crit = ["c2pa-x509-zk"]` (COSE header label 2), so verifiers that don't understand the extension must reject the signature
 - Extension map with circuit metadata
 - Padding: a `pad` byte string in the unprotected header fills the space `c2pa-rs` reserves for the signature, as `c2pa-rs` does for its own signatures
+- The `x509-zk-signer-proof` assertion (version 0.2) carries the issuer name and key ID, the asset digest, the proof, the circuit ID and backend, and the SHA-256 of the circuit and verifying key used (diagnostics; version 0.1 assertions without them are still accepted).
 - `x5chain` (in the protected header) carries the issuing CA chain only: the issuing CA first, then any further intermediates, never the signer's certificate, which would reveal the identity the proof hides (decision [D4](ARCHITECTURE-DECISIONS.md#d4-where-the-issuing-ca-chain-lives-decided)). Thanks to Iman Attia (EBU) for reporting the earlier leak of the signer's certificate ([#6](https://github.com/christianpaquin/c2pa-signer-privacy/issues/6)).
 
 ## Building Circuits
@@ -280,10 +281,16 @@ This generates the proving and verifying keys in `circuits/build/`.
 > external Powers of Tau ceremony file is needed — `ark-groth16::generate_random_parameters_with_reduction`
 > handles the setup in one pass.
 >
-> Setup records a SHA-256 of the `.r1cs` next to the keys (`*_native.r1cs.sha256`).
-> If the circuit has been recompiled since, setup refuses to reuse the keys and the
-> anonymizer refuses to prove with them, instead of producing a proof that cannot
-> verify. Re-run setup with `--force` to regenerate the keys.
+> Setup writes a build manifest next to the keys (`*_native.build.json`: circuit name,
+> SHA-256 of the `.r1cs`, SHA-256 of the verifying key). If the circuit has been
+> recompiled since, setup refuses to reuse the keys and the anonymizer refuses to prove
+> with them, instead of producing a proof that cannot verify. Re-run setup with
+> `--force` to regenerate the keys.
+>
+> Verification needs only the verifying key (`*_native.vk`), not the proving key or the
+> `.r1cs`. The anonymizer records the circuit and verifying-key hashes in the assertion;
+> the verifier compares them with its own keys as a diagnostic only, never selects keys
+> from what the asset says, and Groth16 verification decides validity.
 
 ## Test PKI and Trust Lists
 
@@ -346,6 +353,41 @@ cargo run --release --bin c2pa-x509-zk-verify -- \
 cargo test --release
 ```
 
+## Testing
+
+Tests run at three layers:
+
+| Layer | Command | Needs | What it covers |
+|---|---|---|---|
+| Circuit templates | `python3 circuits/test/test_placement.py` | `circom`, `node` | Accept and reject cases for the certificate-placement and date-conversion templates, at the constraint level (seconds) |
+| Rust unit and integration | `cargo test --release` | — | Trust lists and chain validation, COSE encoding, CLI flows in placeholder mode, the witness check and setup manifest on a one-constraint fixture circuit, privacy scans |
+| Real proofs | `cargo test --release -- --ignored` | Built circuit and keys, ~12 GB of RAM | End-to-end proof and verification; the field-binding forgery, rejected both before proving and at verification |
+
+Conventions:
+
+- **Every statement ships with must-reject tests at two layers:** the constraint level (the forged input is rejected by the circuit's constraints, with the prover's witness check reporting `WitnessRejected`) and the proof level (with the witness check turned off, the forged proof fails verification, which is what a verifier relies on).
+- **Assert the rejection category, not incidental wording:** a typed error or a stable diagnostic of our own, never a compiler- or library-generated message.
+- **Fixes come with their reproduction as a regression test,** confirmed to fail without the fix.
+- **Every anonymized output is privacy-scanned** (`assert_no_signer_identifiers` in the integration tests): no signer certificate, public key, serial number, or subject DN, and no trace of the original manifest. This catches regressions of known identifiers; it does not prove anonymity, since identifiers can be re-encoded or hashed and content can be correlated in other ways (see [E2a](#e2a-third-party-proof-statement-and-privacy-design)).
+
+The prover checks every witness against the circuit's R1CS constraints before proving, because ark-circom's witness generator does not stop on a failing `===` (its exception handler is a no-op, whether or not `sanity_check` is set). Without that check, an input the circuit rejects still yields a proof that only fails verification.
+
+## Current Limitations
+
+What the current prototype does not establish. Every experiment states which of these still apply to its results.
+
+- **Signer-side mode only.** The anonymizer re-signs with the signer's private key; existing content whose key is unavailable cannot be anonymized ([E2a](#e2a-third-party-proof-statement-and-privacy-design), [E2b](#e2b-third-party-anonymization)).
+- **Binding to the asset bytes only.** The proof binds to a digest of the asset with its manifest stripped, not to a claim, so the rest of the anonymized manifest is not authenticated.
+- **No historical validity.** The certificate-validity timestamp (`photoTimestamp`) is chosen by the prover and not checked by the verifier; no result claims the certificate was valid when the content was signed ([D7](ARCHITECTURE-DECISIONS.md#d7-time-policy)).
+- **Partial certificate validation in-circuit.** P-256 keys and ECDSA-SHA256 CA signatures only; the public key and validity are pinned inside the signed TBSCertificate by their encoding, without a full DER walk, and the signer certificate's version, key usage, `CA:FALSE`, and EKU are not checked in-circuit ([Certificate field binding](#certificate-field-binding), [H2](#h2-full-certificate-validation-in-the-circuit)).
+- **Off-circuit chain validation is not full RFC 5280 path validation.** It checks signatures, validity, `CA:TRUE`, `pathLen`, key usage, EKU, and rejects unrecognized critical extensions, but does not process name or policy constraints, and checks no revocation ([Test PKI and Trust Lists](#test-pki-and-trust-lists), [H3](#h3-revocation)).
+- **Issuing CA disclosed.** The anonymity set is everyone that CA has certified ([H4](#h4-hiding-the-issuing-ca)).
+- **Unauthenticated trust lists.** Trust lists are read from files; the C2PA lists are not signed.
+- **Proof system.** Groth16 on BN254 (~100-bit security) with a single-party local setup, whose operator could forge proofs ([H5](#h5-production-proving-setup), [E7](#e7-curve-bn254-vs-bls12-381)).
+- **Metadata not scrubbed.** Asset metadata (for example EXIF) and other manifest fields are not removed; privacy scans cover known signer identifiers only ([H6](#h6-metadata-privacy-beyond-the-signature)).
+- **Cost.** ~10.5 minutes and ~12 GB of RAM per proof ([Performance](#performance)).
+- **Tool display.** `c2patool` presents the issuing CA as the signer ([H8](#h8-c2patool-support)).
+
 ## Roadmap
 
 The prototype is a feasibility study with two goals, set out in [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIONS.md#goals): (1) prove the technology and compare the options, and (2) determine which options could work today given current C2PA deployments ([DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md)). Items have stable IDs; each is planned as its own PR, roughly in the order listed.
@@ -357,6 +399,7 @@ The order follows the method in [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIO
 - **Signer certificate removed from anonymized output** ([#6](https://github.com/christianpaquin/c2pa-signer-privacy/issues/6)).
 - **Certificate field binding:** the circuit pins the signer key and validity period inside the CA-signed TBSCertificate; previously a prover with no certificate could forge a proof (see [Certificate field binding](#certificate-field-binding)).
 - **Certificate dates computed one month late:** the in-circuit UTCTime conversion indexed its days-before-month table off by one, shifting every `notBefore`/`notAfter` 28-31 days later. Certificates less than about a month old could not produce valid proofs, and certificates expired up to about a month earlier were still accepted. Fixed, with tests against Python's calendar for every month, leap days, and both ends of the UTCTime range.
+- **F3. Minimum correctness infrastructure:** the prover checks every witness against the R1CS before proving and reports a typed `WitnessRejected` (ark-circom's witness generator ignores failing constraints even with `sanity_check` set, contrary to what this roadmap previously assumed); forgery tests at both the constraint and proof levels; a build manifest identifying the circuit and keys, recorded in the assertion (now version 0.2) as diagnostics; verification needs only the verifying key; privacy scans on every anonymized test output; and the [Testing](#testing) conventions and [Current Limitations](#current-limitations).
 - **F1. C2PA-like test PKI and trust lists:** a generated 3-cert PKI (root → issuing CA that is itself a trust anchor → signer with the claim-signing EKU and a 90-day lifetime); trust lists in PEM and the C2PA JSON format; the anonymized asset's `x5chain` carries the issuing chain (decision D4), which the verifier validates against the trust list before checking the issuing CA's key against the proof's public inputs; `issuer_key_id` is now the SHA-256 of the issuing CA's public key, so it survives certificate renewal (see [Test PKI and Trust Lists](#test-pki-and-trust-lists)). Privacy note: the issuing CA is disclosed, so the anonymity set is everyone that CA has issued certificates to; a narrowly scoped CA can nearly identify the signer (see [H4](#h4-hiding-the-issuing-ca)).
 
 #### Standards-conformant COSE encoding ✅
@@ -399,16 +442,6 @@ One command that runs a variant on a fixed set of inputs and records, separately
 - the hardware and software configuration, the input sizes (certificate and claim sizes), and the exact statement proved.
 
 F2 also starts the [R1](#r1-feasibility-matrix) matrix with the current baseline, so every later experiment adds a row rather than a separate write-up.
-
-#### F3. Minimum correctness infrastructure
-
-The parts of later hardening that experiments need from the start, so results are not built on unchecked shortcuts:
-
-- **Enable ark-circom's `sanity_check`** in the prover, so inputs the circuit rejects fail during witness generation with the failing assertion, instead of producing a proof that only fails verification ~10 minutes later.
-- **Negative tests per statement:** each new circuit or statement comes with tests that must be rejected (forged keys, wrong chains, expired certificates, tampered assets), as the existing forgery and placement tests do.
-- **Privacy regression scans** of every anonymized output, extending `anonymized_asset_does_not_reveal_signer` to each new mode and to the identifying data listed in [H6](#h6-metadata-privacy-beyond-the-signature).
-- **Artifact identification:** every result names the circuit and keys it used (the `.r1cs` hash already recorded by setup).
-- **Explicit limitations:** each experiment lists the checks it does not perform (for example, the partial certificate validation described under [Certificate field binding](#certificate-field-binding)).
 
 ### Goal 1: prove the technology and compare the options
 
@@ -475,7 +508,7 @@ The interim list trusts specific end-entity certificates directly; trust model B
 
 ### Hardening
 
-Production-level work for whichever options the experiments favour. The minimum needed for experiments is in [F3](#f3-minimum-correctness-infrastructure) and [E2a](#e2a-third-party-proof-statement-and-privacy-design).
+Production-level work for whichever options the experiments favour. The minimum needed for experiments is in [F3](#done) and [E2a](#e2a-third-party-proof-statement-and-privacy-design).
 
 #### H1. Production time-stamping
 

@@ -207,12 +207,17 @@ async fn main() -> Result<()> {
         let proof = circuit_native::generate_proof_native(&circuit_inputs, &native_paths)?;
         let proof_base64 = proof.to_base64()?;
 
+        // keys_match_circuit() above guarantees the build manifest exists.
+        let build = native_paths
+            .read_build_manifest()?
+            .ok_or_else(|| anyhow!("missing build manifest; re-run c2pa-x509-zk-setup --force"))?;
         let assertion = X509ZkSignerProofAssertion::new(
             issuer_dn,
             ca_key_id,
             hex::encode(&manifest_data.claim_hash),
             proof_base64,
-        );
+        )
+        .with_artifacts(&build);
 
         println!("Rewriting manifest with ZK proof...");
         rewrite_manifest_with_zk_proof(&args.input, &args.output, assertion, issuing_chain)?;

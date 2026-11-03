@@ -131,10 +131,37 @@ fn main() -> Result<()> {
         "x509_issue_and_possession",
     );
 
-    if !native_paths.setup_complete() {
+    // Verification needs only the local, trusted verifying key: never keys
+    // chosen from anything the asset says.
+    if !native_paths.can_verify() {
         bail!(
-            "Native setup not complete. Run c2pa-x509-zk-setup first.",
+            "No verifying key at {:?}. Run c2pa-x509-zk-setup first.",
+            native_paths.verifying_key
         );
+    }
+
+    // Artifact identifiers are diagnostics only: they help explain a failure,
+    // but the Groth16 verification below decides validity.
+    match (&assertion.circuit_r1cs_sha256, &assertion.verifying_key_sha256) {
+        (Some(circuit), Some(vk)) => {
+            let local_vk = c2pa_x509_zk_demo::file_sha256(&native_paths.verifying_key)?;
+            let local_circuit = native_paths.read_build_manifest()?.map(|m| m.r1cs_sha256);
+            if *vk != local_vk || local_circuit.as_ref().is_some_and(|c| c != circuit) {
+                println!("⚠️  This proof was made with a different circuit or keys than the local ones:");
+                println!("   asset: circuit {circuit}, verifying key {vk}");
+                println!(
+                    "   local: circuit {}, verifying key {local_vk}",
+                    local_circuit.as_deref().unwrap_or("(no build manifest)")
+                );
+                println!("   Verification below will most likely fail.");
+            } else {
+                println!("✓ Proof was made for the local circuit and verifying key");
+            }
+        }
+        _ => println!(
+            "  (assertion version {} records no circuit or key identifiers)",
+            assertion.version
+        ),
     }
 
     let proof = NativeProof::from_base64(&assertion.proof)?;

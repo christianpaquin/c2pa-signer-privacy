@@ -82,8 +82,22 @@ pub struct NativeCircuitPaths {
     pub proving_key: std::path::PathBuf,
     /// Path to store/load the verifying key
     pub verifying_key: std::path::PathBuf,
-    /// SHA-256 of the .r1cs the keys were generated from (hex), written by setup
-    pub r1cs_hash: std::path::PathBuf,
+    /// Build manifest written by setup: which circuit and keys these are
+    pub build_manifest: std::path::PathBuf,
+    /// Circuit name (the file stem used for the paths above)
+    pub circuit_name: String,
+}
+
+/// Identifies a circuit and the keys generated for it. Written by setup next
+/// to the keys; the anonymizer copies the identifiers into the assertion, and
+/// the verifier compares them with its own keys as a diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildManifest {
+    pub circuit: String,
+    /// Hex SHA-256 of the .r1cs the keys were generated from
+    pub r1cs_sha256: String,
+    /// Hex SHA-256 of the serialized verifying key
+    pub verifying_key_sha256: String,
 }
 
 impl NativeCircuitPaths {
@@ -95,30 +109,48 @@ impl NativeCircuitPaths {
             wasm: build_dir.join(format!("{circuit_name}_js/{circuit_name}.wasm")),
             proving_key: build_dir.join(format!("{circuit_name}_native.pk")),
             verifying_key: build_dir.join(format!("{circuit_name}_native.vk")),
-            r1cs_hash: build_dir.join(format!("{circuit_name}_native.r1cs.sha256")),
+            build_manifest: build_dir.join(format!("{circuit_name}_native.build.json")),
+            circuit_name: circuit_name.to_string(),
         }
     }
     
-    /// Check if setup has been completed
+    /// Check if setup has been completed (proving and verifying keys exist)
     pub fn setup_complete(&self) -> bool {
         self.proving_key.exists() && self.verifying_key.exists()
+    }
+
+    /// Whether a verifying key is available. Verification needs only this,
+    /// not the proving key or the .r1cs.
+    pub fn can_verify(&self) -> bool {
+        self.verifying_key.exists()
+    }
+
+    /// The build manifest written by setup, if any.
+    pub fn read_build_manifest(&self) -> Result<Option<BuildManifest>> {
+        match std::fs::read_to_string(&self.build_manifest) {
+            Ok(json) => Ok(Some(serde_json::from_str(&json)
+                .map_err(|e| anyhow!("invalid build manifest {:?}: {e}", self.build_manifest))?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(anyhow!("failed to read {:?}: {e}", self.build_manifest)),
+        }
     }
 
     /// Check that the keys were generated from the current .r1cs.
     ///
     /// Keys from an older circuit produce proofs that never verify, so callers
-    /// should refuse to use them. Keys without a recorded hash (from before
-    /// this check existed) count as stale.
+    /// should refuse to use them. Keys without a build manifest (from before
+    /// it existed) count as stale.
     pub fn keys_match_circuit(&self) -> Result<bool> {
-        let Ok(recorded) = std::fs::read_to_string(&self.r1cs_hash) else {
+        let Some(manifest) = self.read_build_manifest()? else {
             return Ok(false);
         };
-        Ok(recorded.trim() == r1cs_sha256(&self.r1cs)?)
+        Ok(manifest.r1cs_sha256 == file_sha256(&self.r1cs)?
+            && manifest.verifying_key_sha256 == file_sha256(&self.verifying_key)?)
     }
 }
 
-/// Hex SHA-256 of a (multi-GB) .r1cs file, streamed.
-fn r1cs_sha256(path: &Path) -> Result<String> {
+/// Hex SHA-256 of a (possibly multi-GB) file, streamed.
+pub fn file_sha256(path: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};
     let mut file = std::fs::File::open(path)
         .map_err(|e| anyhow!("failed to open {path:?}: {e}"))?;
@@ -175,8 +207,18 @@ pub fn native_setup(paths: &NativeCircuitPaths) -> Result<()> {
     params.vk.serialize_compressed(&mut vk_writer)
         .map_err(|e| anyhow!("failed to serialize verifying key: {e}"))?;
 
+    // Flush both keys to disk before hashing them for the build manifest.
+    use std::io::Write;
+    pk_writer.flush()?;
+    vk_writer.flush()?;
+
     // Record which circuit these keys belong to
-    std::fs::write(&paths.r1cs_hash, r1cs_sha256(&paths.r1cs)?)?;
+    let manifest = BuildManifest {
+        circuit: paths.circuit_name.clone(),
+        r1cs_sha256: file_sha256(&paths.r1cs)?,
+        verifying_key_sha256: file_sha256(&paths.verifying_key)?,
+    };
+    std::fs::write(&paths.build_manifest, serde_json::to_string_pretty(&manifest)?)?;
     
     println!("✅ Native setup complete!");
     Ok(())
@@ -213,11 +255,76 @@ pub fn generate_proof_native(
     circuit_inputs: &CircuitInputs,
     paths: &NativeCircuitPaths,
 ) -> Result<NativeProof> {
+    generate_proof_native_with(circuit_inputs, paths, ProveOptions::default())
+}
+
+/// Options for `generate_proof_native_with`.
+#[derive(Debug, Clone, Copy)]
+pub struct ProveOptions {
+    /// Check that the witness satisfies every R1CS constraint before
+    /// proving (on by default). ark-circom's witness generator does not stop
+    /// on a failing `===` (its exception handler is a no-op, whatever
+    /// `sanity_check` says), so without this check an input the circuit
+    /// rejects still yields a proof, which only fails verification. Turn it
+    /// off only to test that the proof system itself rejects such inputs.
+    pub check_witness: bool,
+}
+
+impl Default for ProveOptions {
+    fn default() -> Self {
+        Self { check_witness: true }
+    }
+}
+
+/// The circuit rejected the inputs: the witness violates an R1CS constraint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WitnessRejected {
+    /// Index of the first unsatisfied constraint.
+    pub constraint: usize,
+    /// Total number of constraints.
+    pub total: usize,
+}
+
+impl std::fmt::Display for WitnessRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "circuit rejected the inputs: constraint {} of {} is not satisfied", self.constraint, self.total)
+    }
+}
+
+impl std::error::Error for WitnessRejected {}
+
+/// Check that `circuit`'s witness satisfies every R1CS constraint
+/// (`<A,w> * <B,w> = <C,w>`), with the same wire mapping the prover uses.
+pub fn check_witness(circuit: &ark_circom::CircomCircuit<Fr>) -> Result<()> {
+    use ark_std::Zero;
+    let witness = circuit.witness.as_ref().ok_or_else(|| anyhow!("circuit has no witness"))?;
+    let r1cs = &circuit.r1cs;
+    let value = |wire: usize| match &r1cs.wire_mapping {
+        Some(map) => witness[map[wire]],
+        None => witness[wire],
+    };
+    let eval = |lc: &[(usize, Fr)]| lc.iter().fold(Fr::zero(), |acc, (wire, coeff)| acc + *coeff * value(*wire));
+    let total = r1cs.constraints.len();
+    for (i, (a, b, c)) in r1cs.constraints.iter().enumerate() {
+        if eval(a) * eval(b) != eval(c) {
+            return Err(WitnessRejected { constraint: i, total }.into());
+        }
+    }
+    Ok(())
+}
+
+/// Generate a proof. Unless `options.check_witness` is off, an input the
+/// circuit rejects fails with a `WitnessRejected` error before proving.
+pub fn generate_proof_native_with(
+    circuit_inputs: &CircuitInputs,
+    paths: &NativeCircuitPaths,
+    options: ProveOptions,
+) -> Result<NativeProof> {
     if !paths.setup_complete() {
         bail!("Setup not complete. Run native_setup first.");
     }
     
-    println!("Loading circuit and proving key...");
+    println!("Loading circuit and computing witness...");
     let cfg = CircomConfig::<Fr>::new(&paths.wasm, &paths.r1cs)
         .map_err(|e| anyhow!("failed to load circuit: {e}"))?;
     let mut builder = CircomBuilder::new(cfg);
@@ -227,11 +334,17 @@ pub fn generate_proof_native(
 
     let circom = builder.build()
         .map_err(|e| anyhow!("failed to build circuit with witness: {e}"))?;
+
+    if options.check_witness {
+        println!("Checking witness against the circuit's constraints...");
+        check_witness(&circom)?;
+    }
     
     let public_inputs = circom.get_public_inputs()
         .ok_or_else(|| anyhow!("failed to get public inputs"))?;
     
     // Load proving key
+    println!("Loading proving key...");
     let pk = load_proving_key(&paths.proving_key)?;
     
     // Generate proof

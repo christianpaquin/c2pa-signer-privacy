@@ -7,6 +7,12 @@ This prototype is a feasibility study of using zero-knowledge proofs to anonymiz
 1. **Prove the technology and compare the options.** Each decision below is prototyped and measured rather than settled up front. Experiments may use efficient choices (P-256, a test trust setup that mimics C2PA's) as long as the cost of moving to real deployments (P-384 and RSA CAs, the C2PA trust list, a stronger proof-system curve) is measured or prototyped.
 2. **Determine which options could work today** given current C2PA deployments.
 
+### Method
+
+- **Settle what is proved before comparing how fast.** Each variant is described by the statement it proves, what it discloses, and what it assumes (registration, freshness, historical validity). Variants are compared only against others that establish equivalent guarantees; otherwise the fastest one may simply prove less.
+- **Label shortcuts.** Every result records which guarantees are established and which are experimental shortcuts (for example, partial certificate validation). Primitive benchmarks may omit validation; an end-to-end demonstration must say what it does not check.
+- **Measure, then narrow.** The comparison matrix ([R1](README.md#r1-feasibility-matrix)) is kept up to date as experiments land, with explicit success and stop criteria, so the work does not turn into an exhaustive sweep of every combination.
+
 Designs target the official [C2PA trust list](https://github.com/c2pa-org/conformance-public/tree/main/trust-list). The earlier interim trust list is not a design target, but much existing content relies on it, so goal 2 accounts for it. Both lists, and real signed samples, are analysed in [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md).
 
 ## Decisions
@@ -18,7 +24,8 @@ Designs target the official [C2PA trust list](https://github.com/c2pa-org/confor
 | D3 | Curve | Compare BN254 and BLS12-381 | [E7](README.md#e7-curve-bn254-vs-bls12-381) |
 | D4 | Where the issuing CA chain lives | **Decided:** in `x5chain`, without the signer's certificate | [F1](README.md#test-pki-and-trust-lists) |
 | D5 | How key possession is proved | Prototype and compare | [E5](README.md#e5-key-possession) |
-| D6 | Who anonymizes: signer-side or third-party | Prototype and compare | [E2](README.md#e2-anonymization-mode-signer-side-vs-third-party) |
+| D6 | Who anonymizes: signer-side or third-party | Specify the third-party statement, then prototype and compare | [E2a](README.md#e2a-third-party-proof-statement-and-privacy-design), [E2b](README.md#e2b-third-party-anonymization) |
+| D7 | Time policy: when must the certificate have been valid, and on what evidence | Open; specified with E2a | [E2a](README.md#e2a-third-party-proof-statement-and-privacy-design) |
 
 ## D1. Trust model: what the circuit proves about issuance
 
@@ -37,7 +44,9 @@ Trade-offs:
 - A keeps the "no change to existing PKI" property but must verify each CA's actual signature algorithm in-circuit, and still needs a revocation answer.
 - With a registration entity, B and C make the circuit independent of the CA's key type, and the anonymity set can span every CA on the trust list (see [H4](README.md#h4-hiding-the-issuing-ca)). In exchange, the entity becomes a trust anchor (its key compromise allows forgery), learns who registered (but not what they later sign), and the anonymity set is limited to registered signers.
 - B's anonymity set is "keys valid at the time of the root", and verifiers must fetch fresh roots. Short-lived signer certificates (some deployments use ~90-day certificates that appear to be issued per capture or session) mean frequent registrations.
-- The interim trust list's directly trusted end-entity certificates map naturally onto B: membership in a published set of keys, buildable by anyone from the public list ([R3](README.md#r3-interim-list-allowed-signers-via-merkle-membership)).
+- The interim trust list's directly trusted end-entity certificates map naturally onto B: membership in a published set of keys, buildable by anyone from the public list ([R3](README.md#r3-interim-list-allowed-signers-via-merkle-membership)). Building the tree publicly removes registration, but not the need to authenticate the source list and its interpretation: neither the official nor the interim list is signed today.
+- B and C replace the proof of *issuance*, not the proof that the asset was signed. In third-party mode (D6) the original signature must still be verified, so B and C must be compared with A on the same overall statement.
+- B and C need lifecycle semantics before they can be compared: whether a leaf or credential represents a key, a certificate, or an authorization with validity and policy attributes; how verifiers authenticate roots and reject stale ones; whether membership means "authorized now" or "authorized when signed"; and how renewal, revocation, and historical proofs behave. Dropping a leaf revokes only if verifiers stop accepting older roots, and short-lived certificates bound exposure but do not revoke immediately.
 
 ## D2. Proof system
 
@@ -93,4 +102,24 @@ Whichever proof carries possession is the one that must bind to the claim. In th
 - **Signer-side** (current): the anonymizer re-signs the asset with the signer's private key, and the circuit verifies that fresh signature. Only the original signer can anonymize, and only while they hold the key.
 - **Third-party**: the circuit verifies the **original** COSE signature over the **original** claim, under a certificate chaining to the trust list. No private key is needed, so anyone holding the asset (a newsroom receiving it, for example) can anonymize it, and the proof covers the original claim and all its assertions.
 
+What third-party mode must prove (to be specified in [E2a](README.md#e2a-third-party-proof-statement-and-privacy-design) before implementation) is a complete connection: trusted issuer → authorized signer → original COSE signature → original claim → asset binding → anonymized output. Points that make this more than "verify the signature over the claim":
+
+- COSE signs its `Sig_structure`, which includes the protected header. C2PA places `x5chain` in the protected header, so the signed bytes contain the signer's certificate: the circuit must hash them with the certificate as a private input.
+- The claim's hard binding (`c2pa.hash.data`) excludes the manifest's byte range. If the anonymized output carries a different manifest, the original binding no longer matches the output bytes; the statement must say whether the output keeps the original claim or the proof bridges the original binding to the new bytes.
+- Authenticating the original claim does not authenticate a rewritten one. If assertions are removed or changed for privacy (the original claim carries device and software details, instance identifiers, and possibly identity assertions), the statement must say which original assertions remain authenticated and how; C2PA's redaction mechanism references assertions by hash, which leaks low-entropy assertions unless they are salted.
+- Nothing identifying (the original signature, certificate, or references to them) may be disclosed just to make verification easier.
+
+Key possession (D5) does not apply here: there is no private key, only the original signature.
+
 Why it matters: device keys are often not exportable (they are typically generated in secure hardware and may be short-lived), and keys for existing content are generally unavailable. For goal 2, third-party mode is likely the only way to anonymize content that already exists. Its costs: hashing the serialized claim in-circuit, and verifying the original signature with whatever algorithm the signer used (ES256 with P-256 signer keys is common on devices; PS256 for many interim-list signers). It also lets parties other than the signer anonymize content, which may or may not be desirable.
+
+## D7. Time policy
+
+The circuit checks the signer certificate's validity against a timestamp. Which timestamp, and what evidence backs it, is a policy decision with two separate questions:
+
+- **Was the certificate valid when the original signature was made?** Requiring validity at anonymization time would exclude legitimate historical content; accepting an arbitrary historical timestamp would allow backdating.
+- **Is it acceptable to anonymize, or to verify, that content now?** For example, whether a certificate revoked after signing should still count.
+
+Evidence differs in strength. A date inside the claim is self-reported by the signer, even though it is signed. An RFC 3161 time-stamp token from a TSA on the C2PA TSA trust list is independent evidence; real assets carry them (see [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md#time-stamping)).
+
+A catch for anonymization: a TSA token signs a digest of the original signature value, which is itself identifying, since it can be checked against the signer's public key. Verifying the token in the clear would undo the anonymization. The options are to verify the token in-circuit (another signature verification plus hashing, at real cost) or to time-stamp the anonymized output instead, which proves existence at anonymization time, not signing time. Revocation semantics ([H3](README.md#h3-revocation)) follow the same signing-time vs now distinction.

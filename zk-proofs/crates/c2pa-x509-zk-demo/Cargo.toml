@@ -22,6 +22,10 @@ path = "src/bin/sign.rs"
 name = "c2pa-x509-zk-setup"
 path = "src/bin/setup.rs"
 
+[[bin]]
+name = "c2pa-x509-zk-bench"
+path = "src/bin/bench.rs"
+
 [build-dependencies]
 cc = "1.0"
 
@@ -39,6 +43,7 @@ p256.workspace = true
 p384.workspace = true
 rsa.workspace = true
 const-oid.workspace = true
+libc.workspace = true
 x509-cert.workspace = true
 der.workspace = true
 num-bigint.workspace = true

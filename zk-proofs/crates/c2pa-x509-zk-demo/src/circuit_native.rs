@@ -356,46 +356,85 @@ pub fn generate_proof_native_with(
     if !paths.setup_complete() {
         bail!("Setup not complete. Run native_setup first.");
     }
-    
-    println!("Loading circuit and computing witness...");
-    let cfg = CircomConfig::<Fr>::new(&paths.wasm, &paths.r1cs)
-        .map_err(|e| anyhow!("failed to load circuit: {e}"))?;
-    let mut builder = CircomBuilder::new(cfg);
-    
-    // Set circuit inputs
-    set_circuit_inputs(&mut builder, circuit_inputs)?;
+    let circuit = compute_checked_witness(circuit_inputs, paths, options)?;
 
-    let circom = compute_witness(builder)?;
-
-    if options.check_witness {
-        println!("Checking witness against the circuit's constraints...");
-        check_witness(&circom)?;
-    }
-    
-    let public_inputs = circom.get_public_inputs()
-        .ok_or_else(|| anyhow!("failed to get public inputs"))?;
-    
     // Load proving key
     println!("Loading proving key...");
     let pk = load_proving_key(&paths.proving_key)?;
-    
-    // Generate proof
+
     println!("Generating proof...");
-    let mut rng = thread_rng();
-    let proof = GrothBn::prove(&pk, circom, &mut rng)
-        .map_err(|e| anyhow!("failed to generate proof: {e}"))?;
-    
-    // Convert public inputs to strings
-    let public_input_strings: Vec<String> = public_inputs
-        .iter()
-        .map(|f| format!("{}", f))
-        .collect();
-    
+    let proof = prove_circuit(circuit, &pk)?;
     println!("✅ Proof generated!");
+    Ok(proof)
+}
+
+/// Load the circuit, compute the witness for `circuit_inputs`, and (unless
+/// `options.check_witness` is off) check it against every constraint.
+/// The first step of `generate_proof_native_with`, exposed so the
+/// benchmark harness can time and measure it on its own.
+pub fn compute_checked_witness(
+    circuit_inputs: &CircuitInputs,
+    paths: &NativeCircuitPaths,
+    options: ProveOptions,
+) -> Result<ark_circom::CircomCircuit<Fr>> {
+    println!("Loading circuit and computing witness...");
+    let circuit = compute_witness(circuit_builder(circuit_inputs, paths)?)?;
+
+    if options.check_witness {
+        println!("Checking witness against the circuit's constraints...");
+        check_witness(&circuit)?;
+    }
+    Ok(circuit)
+}
+
+/// Load the circuit (its .r1cs and witness-generator WASM) and set its
+/// inputs, ready for `compute_witness`.
+pub fn circuit_builder(circuit_inputs: &CircuitInputs, paths: &NativeCircuitPaths) -> Result<CircomBuilder<Fr>> {
+    let cfg = CircomConfig::<Fr>::new(&paths.wasm, &paths.r1cs)
+        .map_err(|e| anyhow!("failed to load circuit: {e}"))?;
+    let mut builder = CircomBuilder::new(cfg);
+    set_circuit_inputs(&mut builder, circuit_inputs)?;
+    Ok(builder)
+}
+
+/// Prove `circuit` (constraints and witness) with `pk`. The second step of
+/// `generate_proof_native_with`.
+pub fn prove_circuit(circuit: ark_circom::CircomCircuit<Fr>, pk: &ProvingKey<Bn254>) -> Result<NativeProof> {
+    let public_inputs = circuit
+        .get_public_inputs()
+        .ok_or_else(|| anyhow!("failed to get public inputs"))?;
+    let mut rng = thread_rng();
+    let proof = GrothBn::prove(pk, circuit, &mut rng).map_err(|e| anyhow!("failed to generate proof: {e}"))?;
     Ok(NativeProof {
         proof,
-        public_inputs: public_input_strings,
+        public_inputs: public_inputs.iter().map(|f| format!("{}", f)).collect(),
     })
+}
+
+/// Load a circuit's R1CS without its witness generator, with the wire
+/// mapping disabled as `CircomBuilder::setup` does for proving.
+pub fn load_r1cs(path: &Path) -> Result<ark_circom::circom::R1CS<Fr>> {
+    let file = std::fs::File::open(path).map_err(|e| anyhow!("failed to open {path:?}: {e}"))?;
+    let r1cs_file = ark_circom::circom::R1CSFile::<Fr>::new(std::io::BufReader::new(file))
+        .map_err(|e| anyhow!("failed to read {path:?}: {e}"))?;
+    let mut r1cs = ark_circom::circom::R1CS::from(r1cs_file);
+    r1cs.wire_mapping = None;
+    Ok(r1cs)
+}
+
+/// Save a witness (one field element per wire) to `path`.
+pub fn write_witness(path: &Path, witness: &[Fr]) -> Result<()> {
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    witness.to_vec().serialize_uncompressed(&mut out).map_err(|e| anyhow!("failed to write witness: {e}"))?;
+    use std::io::Write;
+    out.flush()?;
+    Ok(())
+}
+
+/// Load a witness saved by `write_witness`.
+pub fn read_witness(path: &Path) -> Result<Vec<Fr>> {
+    let input = std::io::BufReader::new(std::fs::File::open(path)?);
+    Vec::<Fr>::deserialize_uncompressed_unchecked(input).map_err(|e| anyhow!("failed to read witness: {e}"))
 }
 
 /// Verify a ZK proof using native Rust

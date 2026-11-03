@@ -50,6 +50,9 @@ ark-crypto-primitives = { version = "0.5", features = ["snark"] }
 wasmer = { version = "4", default-features = false, features = ["sys", "cranelift"] }
 num-traits = "0.2"
 
+# Benchmark harness (per-process resource usage)
+libc = "0.2"
+
 # Testing
 tempfile = "3.10"
 assert_cmd = "2.0"

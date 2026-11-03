@@ -96,11 +96,53 @@ fn verify(anonymized: &Path, trust_list: &Path) -> Assert {
 }
 
 /// Sign and anonymize (placeholder proof) with the PKI's own trust list.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+/// Privacy regression scan of an anonymized asset: it must not contain the
+/// signer's certificate, public key, serial number, or subject DN, nor the
+/// original signed manifest (by its label). Scans raw bytes rather than
+/// trusting a C2PA parser, which can fail to decode the custom COSE structure.
+///
+/// This catches regressions of these known identifiers in these encodings. It
+/// does not establish anonymity: identifiers can be re-encoded or hashed, and
+/// content can be correlated in other ways (for example through time stamps).
+/// What may be disclosed is a design question for the threat model (roadmap E2a).
+fn assert_no_signer_identifiers(anonymized: &Path, pki: &Pki, signed: &Path) {
+    use der::{Decode, Encode};
+    use x509_cert::Certificate;
+
+    let bytes = std::fs::read(anonymized).unwrap();
+    let signer_cert_der = pki.read("signer.der");
+    let signer = Certificate::from_der(&signer_cert_der).unwrap();
+    let tbs = &signer.tbs_certificate;
+    let signed_label = c2pa::Reader::from_file(signed)
+        .unwrap()
+        .active_label()
+        .expect("signed asset has no active manifest")
+        .to_string();
+
+    let identifiers: [(&str, &[u8]); 5] = [
+        ("signer certificate", &signer_cert_der),
+        ("signer public key", tbs.subject_public_key_info.subject_public_key.raw_bytes()),
+        ("signer certificate serial number", tbs.serial_number.as_bytes()),
+        ("signer subject DN", &tbs.subject.to_der().unwrap()),
+        ("original signed manifest label", signed_label.as_bytes()),
+    ];
+    for (what, needle) in identifiers {
+        assert!(!contains(&bytes, needle), "anonymized asset contains the {what}");
+    }
+}
+
+/// Sign and anonymize (placeholder proof) with the PKI's own trust list, and
+/// run the privacy scan on the output.
 fn signed_and_anonymized(pki: &Pki, dir: &Path) -> (PathBuf, PathBuf) {
     let signed = dir.join("signed.png");
     let anon = dir.join("anon.png");
     sign(pki, &signed);
     anonymize_placeholder(&signed, &anon, &pki.file("trust-list.pem")).success();
+    assert_no_signer_identifiers(&anon, pki, &signed);
     (signed, anon)
 }
 
@@ -282,10 +324,7 @@ fn anonymizer_drops_certificates_after_the_anchor() {
 
     let (_, chain) = read_anonymized_asset(&anon).unwrap();
     assert_eq!(chain, vec![pki.read("issuing-ca.der")]);
-    assert!(
-        !contains(&std::fs::read(&anon).unwrap(), &pki.read("signer.der")),
-        "anonymized asset contains the signer certificate"
-    );
+    assert_no_signer_identifiers(&anon, &pki, &signed);
 }
 
 #[test]
@@ -331,6 +370,29 @@ fn signer_renewal_keeps_trust_anchors_and_key() {
         .stdout(predicate::str::contains("Issuing chain validates against the trust list"));
 }
 
+/// Assertions from before version 0.2 carry no artifact identifiers; the
+/// verifier still accepts them. (It reports their absence only when it checks
+/// a real proof; with this placeholder it stops before that point.)
+#[test]
+fn verify_accepts_v0_1_assertion_without_identifiers() {
+    let pki = Pki::generate("Compat Test");
+    let dir = tempdir().unwrap();
+    let out = dir.path().join("v01.png");
+    let mut assertion = X509ZkSignerProofAssertion::new(
+        extract_subject_dn(&pki.read("issuing-ca.der")).unwrap(),
+        spki_key_id(&pki.read("issuing-ca.der")).unwrap(),
+        hex::encode(compute_manifest_stripped_asset_digest(&cards()).unwrap()),
+        "PLACEHOLDER_PROOF".into(),
+    );
+    assertion.version = "0.1".into();
+    rewrite_manifest_with_zk_proof(&cards(), &out, assertion, vec![pki.read("issuing-ca.der")]).unwrap();
+
+    verify(&out, &pki.file("trust-list.pem"))
+        .code(2)
+        .stdout(predicate::str::contains("Issuing chain validates against the trust list"))
+        .stderr(predicate::str::contains("placeholder"));
+}
+
 /// Verification fails if the anonymized asset bytes are modified.
 #[test]
 fn verify_fails_for_tampered_asset() {
@@ -349,45 +411,147 @@ fn verify_fails_for_tampered_asset() {
         .stderr(predicate::str::contains("Asset binding digest mismatch"));
 }
 
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.windows(needle.len()).any(|window| window == needle)
-}
-
 /// Regression test for issue #6: the anonymized asset must not carry anything
 /// that identifies the signer. Scans the raw file bytes rather than relying on
 /// a C2PA parser, which can fail to decode the custom COSE structure and so
 /// report an empty certificate chain even when one is present.
 #[test]
 fn anonymized_asset_does_not_reveal_signer() {
-    use der::{Decode, Encode};
-    use x509_cert::Certificate;
-
     let pki = Pki::generate("Leak Test");
     let dir = tempdir().unwrap();
     let (signed, anon) = signed_and_anonymized(&pki, dir.path());
+    assert_no_signer_identifiers(&anon, &pki, &signed);
+}
 
-    let signed_label = c2pa::Reader::from_file(&signed)
-        .unwrap()
-        .active_label()
-        .expect("signed asset has no active manifest")
-        .to_string();
-    let anonymized_bytes = std::fs::read(&anon).unwrap();
+fn fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/assert-one")
+}
 
-    let signer_cert_der = pki.read("signer.der");
-    let signer = Certificate::from_der(&signer_cert_der).unwrap();
-    let tbs = &signer.tbs_certificate;
-    let signer_pubkey = tbs.subject_public_key_info.subject_public_key.raw_bytes();
-    let signer_serial = tbs.serial_number.as_bytes();
-    let signer_subject = tbs.subject.to_der().unwrap();
+/// A builder for the one-constraint fixture circuit (a === 1) with input `a`.
+fn fixture_builder(a: u64) -> ark_circom::CircomBuilder<ark_bn254::Fr> {
+    let dir = fixture_dir();
+    let cfg = ark_circom::CircomConfig::new(dir.join("assert_one.wasm"), dir.join("assert_one.r1cs")).unwrap();
+    let mut builder = ark_circom::CircomBuilder::new(cfg);
+    builder.push_input("a", a);
+    builder
+}
 
-    assert!(!contains(&anonymized_bytes, &signer_cert_der), "anonymized asset contains the signer certificate");
-    assert!(!contains(&anonymized_bytes, signer_pubkey), "anonymized asset contains the signer public key");
-    assert!(!contains(&anonymized_bytes, signer_serial), "anonymized asset contains the signer certificate serial number");
-    assert!(!contains(&anonymized_bytes, &signer_subject), "anonymized asset contains the signer subject DN");
+/// Arkworks' own verdict on a witness: synthesize the circuit's constraints
+/// as the prover does, and check them.
+fn arkworks_satisfied(circuit: &ark_circom::CircomCircuit<ark_bn254::Fr>) -> bool {
+    use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
+    let cs = ConstraintSystem::new_ref();
+    circuit.clone().generate_constraints(cs.clone()).unwrap();
+    cs.is_satisfied().unwrap()
+}
+
+/// ark-circom computes a witness even when a `===` constraint fails (its
+/// exception handler is a no-op), so the prover checks the witness against
+/// the R1CS before proving. compute_witness avoids ark-circom's debug-build
+/// assertion, so this behaves the same in debug and release builds.
+#[tokio::test(flavor = "multi_thread")]
+async fn witness_check_rejects_unsatisfied_constraint() {
+    use c2pa_x509_zk_demo::{check_witness, compute_witness, WitnessRejected};
+
+    check_witness(&compute_witness(fixture_builder(1)).unwrap()).unwrap();
+
+    let err = check_witness(&compute_witness(fixture_builder(2)).unwrap()).unwrap_err();
     assert!(
-        !contains(&anonymized_bytes, signed_label.as_bytes()),
-        "anonymized asset still contains the original signed manifest"
+        matches!(err.downcast_ref::<WitnessRejected>(), Some(WitnessRejected::UnsatisfiedConstraint { .. })),
+        "unexpected error: {err:#}"
     );
+}
+
+/// The precheck must evaluate the same relation as the prover (PR #16
+/// review): on adversarial witnesses it must agree with Arkworks whenever the
+/// witness is well formed, and never accept a witness Arkworks rejects.
+#[tokio::test(flavor = "multi_thread")]
+async fn witness_check_agrees_with_arkworks_on_adversarial_witnesses() {
+    use ark_std::{One, Zero};
+    use c2pa_x509_zk_demo::{check_witness, compute_witness, WitnessRejected};
+
+    let valid = compute_witness(fixture_builder(1)).unwrap();
+    let wires = valid.witness.as_ref().unwrap().len();
+    let mut cases = vec![("valid", valid.clone())];
+    for wire in 0..wires {
+        let mut perturbed = valid.clone();
+        perturbed.witness.as_mut().unwrap()[wire] += ark_bn254::Fr::one();
+        cases.push(("one wire perturbed", perturbed));
+    }
+    let mut zero = valid.clone();
+    zero.witness = Some(vec![ark_bn254::Fr::zero(); wires]);
+    cases.push(("all zero", zero));
+
+    for (label, circuit) in &cases {
+        let ours = check_witness(circuit);
+        let theirs = arkworks_satisfied(circuit);
+        assert!(!(ours.is_ok() && !theirs), "{label}: precheck accepted a witness Arkworks rejects");
+        let constant_ok = circuit.witness.as_ref().unwrap()[0] == ark_bn254::Fr::one();
+        if constant_ok {
+            assert_eq!(ours.is_ok(), theirs, "{label}: precheck and Arkworks disagree");
+        } else {
+            let err = ours.expect_err("a malformed constant wire must be rejected");
+            assert_eq!(err.downcast_ref::<WitnessRejected>(), Some(&WitnessRejected::ConstantWireNotOne), "{label}");
+        }
+    }
+}
+
+/// The reviewer's reproduction: a hand-built circuit `a * 1 = 1` and an
+/// all-zero witness. Treating wire 0 as a witness value, an earlier precheck
+/// evaluated 0 * 0 = 0 and accepted it; Arkworks evaluates 0 * 1 = 1 and rejects.
+#[test]
+fn witness_check_treats_wire_zero_as_the_constant_one() {
+    use ark_bn254::Fr;
+    use ark_circom::{circom::R1CS, CircomCircuit};
+    use ark_std::{One, Zero};
+    use c2pa_x509_zk_demo::check_witness;
+
+    let circuit = |witness: Vec<Fr>| CircomCircuit {
+        r1cs: R1CS {
+            num_inputs: 1, // wire 0, the constant
+            num_aux: 1,    // wire 1, a
+            num_variables: 2,
+            constraints: vec![(vec![(1, Fr::one())], vec![(0, Fr::one())], vec![(0, Fr::one())])],
+            wire_mapping: None,
+        },
+        witness: Some(witness),
+    };
+
+    let satisfied = circuit(vec![Fr::one(), Fr::one()]);
+    assert!(check_witness(&satisfied).is_ok() && arkworks_satisfied(&satisfied));
+
+    let all_zero = circuit(vec![Fr::zero(), Fr::zero()]);
+    assert!(!arkworks_satisfied(&all_zero));
+    assert!(check_witness(&all_zero).is_err(), "precheck accepted the all-zero witness");
+
+    // Arkworks ignores entry 0 (a = 1 satisfies a * 1 = 1), but the witness is malformed.
+    let bad_constant = circuit(vec![Fr::zero(), Fr::one()]);
+    assert!(check_witness(&bad_constant).is_err());
+}
+
+/// Setup's build manifest must describe the keys it actually wrote (an earlier
+/// version hashed the verifying key before flushing it). Uses the
+/// one-constraint fixture circuit, laid out as setup expects.
+#[tokio::test(flavor = "multi_thread")]
+async fn setup_build_manifest_matches_the_written_keys() {
+    use c2pa_x509_zk_demo::{file_sha256, native_setup, NativeCircuitPaths};
+
+    let fixture = fixture_dir();
+    let circuits = tempdir().unwrap();
+    let build = circuits.path().join("build");
+    std::fs::create_dir_all(build.join("assert_one_js")).unwrap();
+    std::fs::copy(fixture.join("assert_one.r1cs"), build.join("assert_one.r1cs")).unwrap();
+    std::fs::copy(fixture.join("assert_one.wasm"), build.join("assert_one_js/assert_one.wasm")).unwrap();
+
+    let paths = NativeCircuitPaths::default_for_circuit(circuits.path(), "assert_one");
+    assert!(!paths.keys_match_circuit().unwrap(), "no keys yet");
+    native_setup(&paths).unwrap();
+
+    let manifest = paths.read_build_manifest().unwrap().expect("setup writes a build manifest");
+    assert_eq!(manifest.circuit, "assert_one");
+    assert_eq!(manifest.r1cs_sha256, file_sha256(&paths.r1cs).unwrap());
+    assert_eq!(manifest.verifying_key_sha256, file_sha256(&paths.verifying_key).unwrap());
+    assert!(paths.keys_match_circuit().unwrap());
 }
 
 /// Full end-to-end test with real ZK proof generation and verification.
@@ -419,31 +583,21 @@ fn full_e2e_with_real_zk_proof() {
         .stdout(predicate::str::contains("Proof generated"))
         .stdout(predicate::str::contains("Anonymized asset written"));
 
+    assert_no_signer_identifiers(&anon, &pki, &signed);
     verify(&anon, &pki.file("trust-list.pem"))
         .success()
+        .stdout(predicate::str::contains("Proof was made for the local circuit and verifying key"))
         .stdout(predicate::str::contains("ZK proof verified successfully"));
 }
 
-/// Regression test for the certificate field-binding forgery: a prover with no
+/// Inputs for the certificate field-binding forgery: a prover with no
 /// certificate takes a genuine certificate issued by the trusted CA, appends
 /// their own public key and forged validity dates after it (outside the
 /// TBSCertificate the CA signed), and points the circuit's offsets there.
-/// The result must not be a proof that verifies.
-///
-/// Witness generation runs with ark-circom's default `sanity_check: false`, so
-/// unsatisfied constraints do not stop proof generation; the resulting proof
-/// must instead fail verification.
-///
-/// Slow (~7-10 minutes, ~12 GB of RAM) and needs the built circuit and keys, so
-/// it is ignored by default:
-///   cargo test --release -- --ignored forged_key_outside_signed_tbs_is_rejected
-#[tokio::test(flavor = "multi_thread")]
-#[ignore]
-async fn forged_key_outside_signed_tbs_is_rejected() {
-    use c2pa_x509_zk_demo::{circuit, ManifestData, NativeCircuitPaths};
+fn forged_inputs(pki: &Pki) -> c2pa_x509_zk_demo::CircuitInputs {
+    use c2pa_x509_zk_demo::{circuit, ManifestData};
     use p256::ecdsa::SigningKey;
 
-    let pki = Pki::generate("Forgery Test");
     let victim_cert_der = pki.read("signer.der");
     let ca_cert_der = pki.read("issuing-ca.der");
 
@@ -476,17 +630,54 @@ async fn forged_key_outside_signed_tbs_is_rejected() {
     inputs.spki_x_offset = (victim_cert_der.len() + 1).to_string();
     inputs.not_before_offset = not_before_offset.to_string();
     inputs.not_after_offset = not_after_offset.to_string();
+    inputs
+}
 
-    let paths = NativeCircuitPaths::default_for_circuit(&zk_root().join("circuits"), "x509_issue_and_possession");
+fn circuit_paths() -> c2pa_x509_zk_demo::NativeCircuitPaths {
+    let paths = c2pa_x509_zk_demo::NativeCircuitPaths::default_for_circuit(
+        &zk_root().join("circuits"),
+        "x509_issue_and_possession",
+    );
     assert!(paths.setup_complete(), "circuit setup required: see README Building Circuits");
+    paths
+}
 
-    // Either proof generation fails, or the proof it produces does not verify.
-    let accepted = match c2pa_x509_zk_demo::generate_proof_native(&inputs, &paths) {
-        Err(_) => false,
-        Ok(proof) => c2pa_x509_zk_demo::verify_proof_native(&proof, &paths).unwrap_or(false),
-    };
+/// Regression test for the certificate field-binding forgery, at the proof
+/// level: with the prover's witness check turned off, the forged inputs still
+/// yield a proof, which must fail verification. This is the property that
+/// matters to a verifier, who never sees the witness.
+///
+/// Slow (~7-10 minutes, ~12 GB of RAM) and needs the built circuit and keys, so
+/// it is ignored by default:
+///   cargo test --release -- --ignored forged_key_outside_signed_tbs_is_rejected
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn forged_key_outside_signed_tbs_is_rejected() {
+    use c2pa_x509_zk_demo::{generate_proof_native_with, verify_proof_native, ProveOptions};
+
+    let pki = Pki::generate("Forgery Test");
+    let paths = circuit_paths();
+    let proof = generate_proof_native_with(&forged_inputs(&pki), &paths, ProveOptions { check_witness: false })
+        .expect("with the witness check off, the prover emits a proof");
     assert!(
-        !accepted,
+        !verify_proof_native(&proof, &paths).unwrap_or(false),
         "circuit accepted a public key from outside the CA-signed TBSCertificate"
     );
+}
+
+/// The same forgery with the default prover: its witness check must reject the
+/// inputs before proving, with a typed WitnessRejected error.
+///
+/// Needs the built circuit (witness generation only, no proving), so it is
+/// ignored by default:
+///   cargo test --release -- --ignored forged_key_is_rejected_before_proving
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn forged_key_is_rejected_before_proving() {
+    use c2pa_x509_zk_demo::{generate_proof_native, WitnessRejected};
+
+    let pki = Pki::generate("Forgery Test");
+    let err = generate_proof_native(&forged_inputs(&pki), &circuit_paths())
+        .expect_err("the prover must refuse inputs the circuit rejects");
+    assert!(err.downcast_ref::<WitnessRejected>().is_some(), "unexpected error: {err:#}");
 }

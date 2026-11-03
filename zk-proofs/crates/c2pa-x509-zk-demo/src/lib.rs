@@ -26,8 +26,8 @@ pub use circuit::{
     proof_inputs_to_circuit,
 };
 pub use circuit_native::{
-    NativeCircuitPaths, NativeProof, native_setup, 
-    generate_proof_native, verify_proof_native,
+    BuildManifest, NativeCircuitPaths, NativeProof, ProveOptions, WitnessRejected, native_setup, file_sha256,
+    check_witness, compute_witness, generate_proof_native, generate_proof_native_with, verify_proof_native,
 };
 pub use manifest::{
     compute_manifest_stripped_asset_digest,
@@ -41,7 +41,9 @@ pub use types::*;
 
 /// Assertion type marker for X.509 ZK proofs
 pub const ASSERTION_TYPE: &str = "x509-zk-signer-proof";
-pub const ASSERTION_VERSION: &str = "0.1";
+/// 0.2 adds the optional artifact identifiers (`circuit_r1cs_sha256`,
+/// `verifying_key_sha256`); 0.1 assertions are still accepted without them.
+pub const ASSERTION_VERSION: &str = "0.2";
 pub const CIRCUIT_ID: &str = "x509-issue-possession-v0";
 pub const BACKEND: &str = "circom-groth16";
 pub const CLAIM_GENERATOR: &str = "c2pa-x509-zk-demo/0.1";
@@ -64,6 +66,15 @@ pub struct X509ZkSignerProofAssertion {
     pub circuit_id: String,
     /// Proving backend (e.g., "circom-groth16")
     pub backend: String,
+    /// Hex SHA-256 of the circuit's .r1cs the proof was made for (v0.2+).
+    /// A diagnostic: verifiers use their own trusted keys, never keys chosen
+    /// from this value, and Groth16 verification decides validity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub circuit_r1cs_sha256: Option<String>,
+    /// Hex SHA-256 of the verifying key matching the proving key used (v0.2+).
+    /// A diagnostic, as above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifying_key_sha256: Option<String>,
 }
 
 impl X509ZkSignerProofAssertion {
@@ -82,7 +93,16 @@ impl X509ZkSignerProofAssertion {
             proof,
             circuit_id: CIRCUIT_ID.to_string(),
             backend: BACKEND.to_string(),
+            circuit_r1cs_sha256: None,
+            verifying_key_sha256: None,
         }
+    }
+
+    /// Record which circuit and keys produced the proof.
+    pub fn with_artifacts(mut self, manifest: &circuit_native::BuildManifest) -> Self {
+        self.circuit_r1cs_sha256 = Some(manifest.r1cs_sha256.clone());
+        self.verifying_key_sha256 = Some(manifest.verifying_key_sha256.clone());
+        self
     }
 }
 
@@ -111,6 +131,16 @@ pub fn extract_issuer_dn(cert_der: &[u8]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v0_1_assertion_without_artifacts_still_parses() {
+        let json = r#"{"type":"x509-zk-signer-proof","version":"0.1","issuer":"CN=CA","issuer_key_id":"ab",
+            "claim_hash":"cd","proof":"ef","circuit_id":"x509-issue-possession-v0","backend":"circom-groth16"}"#;
+        let parsed: X509ZkSignerProofAssertion = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.version, "0.1");
+        assert_eq!(parsed.circuit_r1cs_sha256, None);
+        assert_eq!(parsed.verifying_key_sha256, None);
+    }
 
     #[test]
     fn assertion_serialization_roundtrip() {

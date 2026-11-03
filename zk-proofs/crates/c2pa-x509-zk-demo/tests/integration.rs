@@ -423,28 +423,110 @@ fn anonymized_asset_does_not_reveal_signer() {
     assert_no_signer_identifiers(&anon, &pki, &signed);
 }
 
+fn fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/assert-one")
+}
+
+/// A builder for the one-constraint fixture circuit (a === 1) with input `a`.
+fn fixture_builder(a: u64) -> ark_circom::CircomBuilder<ark_bn254::Fr> {
+    let dir = fixture_dir();
+    let cfg = ark_circom::CircomConfig::new(dir.join("assert_one.wasm"), dir.join("assert_one.r1cs")).unwrap();
+    let mut builder = ark_circom::CircomBuilder::new(cfg);
+    builder.push_input("a", a);
+    builder
+}
+
+/// Arkworks' own verdict on a witness: synthesize the circuit's constraints
+/// as the prover does, and check them.
+fn arkworks_satisfied(circuit: &ark_circom::CircomCircuit<ark_bn254::Fr>) -> bool {
+    use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
+    let cs = ConstraintSystem::new_ref();
+    circuit.clone().generate_constraints(cs.clone()).unwrap();
+    cs.is_satisfied().unwrap()
+}
+
 /// ark-circom computes a witness even when a `===` constraint fails (its
 /// exception handler is a no-op), so the prover checks the witness against
-/// the R1CS before proving. Uses a one-constraint fixture circuit (a === 1).
+/// the R1CS before proving. compute_witness avoids ark-circom's debug-build
+/// assertion, so this behaves the same in debug and release builds.
 #[tokio::test(flavor = "multi_thread")]
 async fn witness_check_rejects_unsatisfied_constraint() {
-    use ark_bn254::Fr;
-    use ark_circom::{CircomBuilder, CircomConfig};
-    use c2pa_x509_zk_demo::{check_witness, WitnessRejected};
+    use c2pa_x509_zk_demo::{check_witness, compute_witness, WitnessRejected};
 
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/assert-one");
-    let witness_for = |a: u64| {
-        let cfg = CircomConfig::<Fr>::new(dir.join("assert_one.wasm"), dir.join("assert_one.r1cs")).unwrap();
-        let mut builder = CircomBuilder::new(cfg);
-        builder.push_input("a", a);
-        builder.build().expect("ark-circom computes a witness even for a failing constraint")
+    check_witness(&compute_witness(fixture_builder(1)).unwrap()).unwrap();
+
+    let err = check_witness(&compute_witness(fixture_builder(2)).unwrap()).unwrap_err();
+    assert!(
+        matches!(err.downcast_ref::<WitnessRejected>(), Some(WitnessRejected::UnsatisfiedConstraint { .. })),
+        "unexpected error: {err:#}"
+    );
+}
+
+/// The precheck must evaluate the same relation as the prover (PR #16
+/// review): on adversarial witnesses it must agree with Arkworks whenever the
+/// witness is well formed, and never accept a witness Arkworks rejects.
+#[tokio::test(flavor = "multi_thread")]
+async fn witness_check_agrees_with_arkworks_on_adversarial_witnesses() {
+    use ark_std::{One, Zero};
+    use c2pa_x509_zk_demo::{check_witness, compute_witness, WitnessRejected};
+
+    let valid = compute_witness(fixture_builder(1)).unwrap();
+    let wires = valid.witness.as_ref().unwrap().len();
+    let mut cases = vec![("valid", valid.clone())];
+    for wire in 0..wires {
+        let mut perturbed = valid.clone();
+        perturbed.witness.as_mut().unwrap()[wire] += ark_bn254::Fr::one();
+        cases.push(("one wire perturbed", perturbed));
+    }
+    let mut zero = valid.clone();
+    zero.witness = Some(vec![ark_bn254::Fr::zero(); wires]);
+    cases.push(("all zero", zero));
+
+    for (label, circuit) in &cases {
+        let ours = check_witness(circuit);
+        let theirs = arkworks_satisfied(circuit);
+        assert!(!(ours.is_ok() && !theirs), "{label}: precheck accepted a witness Arkworks rejects");
+        let constant_ok = circuit.witness.as_ref().unwrap()[0] == ark_bn254::Fr::one();
+        if constant_ok {
+            assert_eq!(ours.is_ok(), theirs, "{label}: precheck and Arkworks disagree");
+        } else {
+            let err = ours.expect_err("a malformed constant wire must be rejected");
+            assert_eq!(err.downcast_ref::<WitnessRejected>(), Some(&WitnessRejected::ConstantWireNotOne), "{label}");
+        }
+    }
+}
+
+/// The reviewer's reproduction: a hand-built circuit `a * 1 = 1` and an
+/// all-zero witness. Treating wire 0 as a witness value, an earlier precheck
+/// evaluated 0 * 0 = 0 and accepted it; Arkworks evaluates 0 * 1 = 1 and rejects.
+#[test]
+fn witness_check_treats_wire_zero_as_the_constant_one() {
+    use ark_bn254::Fr;
+    use ark_circom::{circom::R1CS, CircomCircuit};
+    use ark_std::{One, Zero};
+    use c2pa_x509_zk_demo::check_witness;
+
+    let circuit = |witness: Vec<Fr>| CircomCircuit {
+        r1cs: R1CS {
+            num_inputs: 1, // wire 0, the constant
+            num_aux: 1,    // wire 1, a
+            num_variables: 2,
+            constraints: vec![(vec![(1, Fr::one())], vec![(0, Fr::one())], vec![(0, Fr::one())])],
+            wire_mapping: None,
+        },
+        witness: Some(witness),
     };
 
-    check_witness(&witness_for(1)).unwrap();
+    let satisfied = circuit(vec![Fr::one(), Fr::one()]);
+    assert!(check_witness(&satisfied).is_ok() && arkworks_satisfied(&satisfied));
 
-    let err = check_witness(&witness_for(2)).unwrap_err();
-    let rejected = err.downcast_ref::<WitnessRejected>().expect("rejection must be a WitnessRejected");
-    assert!(rejected.constraint < rejected.total, "{rejected}");
+    let all_zero = circuit(vec![Fr::zero(), Fr::zero()]);
+    assert!(!arkworks_satisfied(&all_zero));
+    assert!(check_witness(&all_zero).is_err(), "precheck accepted the all-zero witness");
+
+    // Arkworks ignores entry 0 (a = 1 satisfies a * 1 = 1), but the witness is malformed.
+    let bad_constant = circuit(vec![Fr::zero(), Fr::one()]);
+    assert!(check_witness(&bad_constant).is_err());
 }
 
 /// Setup's build manifest must describe the keys it actually wrote (an earlier
@@ -454,7 +536,7 @@ async fn witness_check_rejects_unsatisfied_constraint() {
 async fn setup_build_manifest_matches_the_written_keys() {
     use c2pa_x509_zk_demo::{file_sha256, native_setup, NativeCircuitPaths};
 
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/assert-one");
+    let fixture = fixture_dir();
     let circuits = tempdir().unwrap();
     let build = circuits.path().join("build");
     std::fs::create_dir_all(build.join("assert_one_js")).unwrap();

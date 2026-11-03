@@ -27,7 +27,7 @@ pub use circuit::{
 };
 pub use circuit_native::{
     BuildManifest, NativeCircuitPaths, NativeProof, ProveOptions, WitnessRejected, native_setup, file_sha256,
-    check_witness, generate_proof_native, generate_proof_native_with, verify_proof_native,
+    check_witness, compute_witness, generate_proof_native, generate_proof_native_with, verify_proof_native,
 };
 pub use manifest::{
     compute_manifest_stripped_asset_digest,

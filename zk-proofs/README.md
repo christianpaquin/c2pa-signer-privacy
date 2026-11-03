@@ -370,7 +370,7 @@ Conventions:
 - **Fixes come with their reproduction as a regression test,** confirmed to fail without the fix.
 - **Every anonymized output is privacy-scanned** (`assert_no_signer_identifiers` in the integration tests): no signer certificate, public key, serial number, or subject DN, and no trace of the original manifest. This catches regressions of known identifiers; it does not prove anonymity, since identifiers can be re-encoded or hashed and content can be correlated in other ways (see [E2a](#e2a-third-party-proof-statement-and-privacy-design)).
 
-The prover checks every witness against the circuit's R1CS constraints before proving, because ark-circom's witness generator does not stop on a failing `===` (its exception handler is a no-op, whether or not `sanity_check` is set). Without that check, an input the circuit rejects still yields a proof that only fails verification.
+The prover checks every witness against the circuit's R1CS constraints before proving, because ark-circom's witness generator does not stop on a failing `===` (its exception handler is a no-op, whether or not `sanity_check` is set). Without that check, an input the circuit rejects still yields a proof that only fails verification. The prover computes the witness without ark-circom's `CircomBuilder::build`, whose debug-build assertion would panic on a rejected input before the check can report it, so the behavior is the same in debug and release builds. The check evaluates constraints exactly as Arkworks does when proving (wire 0 is the constant one), and rejects a witness whose constant entry is not 1; tests compare its verdicts with Arkworks' own constraint system on adversarial witnesses.
 
 ## Current Limitations
 

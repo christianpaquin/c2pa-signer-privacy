@@ -276,38 +276,71 @@ impl Default for ProveOptions {
     }
 }
 
-/// The circuit rejected the inputs: the witness violates an R1CS constraint.
+/// Why the prover refused a witness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WitnessRejected {
-    /// Index of the first unsatisfied constraint.
-    pub constraint: usize,
-    /// Total number of constraints.
-    pub total: usize,
+pub enum WitnessRejected {
+    /// The witness's constant wire (wire 0) is not 1. Arkworks always treats
+    /// wire 0 as the constant one, so such a witness is malformed.
+    ConstantWireNotOne,
+    /// The circuit rejected the inputs: the witness violates a constraint.
+    UnsatisfiedConstraint {
+        /// Index of the first unsatisfied constraint
+        constraint: usize,
+        /// Total number of constraints
+        total: usize,
+    },
 }
 
 impl std::fmt::Display for WitnessRejected {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "circuit rejected the inputs: constraint {} of {} is not satisfied", self.constraint, self.total)
+        match self {
+            Self::ConstantWireNotOne => write!(f, "malformed witness: the constant wire is not 1"),
+            Self::UnsatisfiedConstraint { constraint, total } => {
+                write!(f, "circuit rejected the inputs: constraint {constraint} of {total} is not satisfied")
+            }
+        }
     }
 }
 
 impl std::error::Error for WitnessRejected {}
 
+/// Compute the witness for `builder`'s inputs, like `CircomBuilder::build`
+/// but without its debug-build `debug_assert!` on constraint satisfaction,
+/// which panics on a rejected input before `check_witness` can report it.
+/// Using this keeps the prover's behavior the same in debug and release.
+pub fn compute_witness(mut builder: CircomBuilder<Fr>) -> Result<ark_circom::CircomCircuit<Fr>> {
+    let mut circuit = builder.setup();
+    let witness = builder
+        .cfg
+        .wtns
+        .calculate_witness_element::<Fr, _>(&mut builder.cfg.store, builder.inputs, builder.cfg.sanity_check)
+        .map_err(|e| anyhow!("failed to compute witness: {e}"))?;
+    circuit.witness = Some(witness);
+    Ok(circuit)
+}
+
 /// Check that `circuit`'s witness satisfies every R1CS constraint
-/// (`<A,w> * <B,w> = <C,w>`), with the same wire mapping the prover uses.
+/// (`<A,w> * <B,w> = <C,w>`), evaluating it exactly as Arkworks does when
+/// proving: wire 0 is the constant one, and other wires go through the
+/// circuit's wire mapping, if any. A witness whose own constant entry is not
+/// 1 is rejected as malformed.
 pub fn check_witness(circuit: &ark_circom::CircomCircuit<Fr>) -> Result<()> {
-    use ark_std::Zero;
+    use ark_std::{One, Zero};
     let witness = circuit.witness.as_ref().ok_or_else(|| anyhow!("circuit has no witness"))?;
     let r1cs = &circuit.r1cs;
-    let value = |wire: usize| match &r1cs.wire_mapping {
+    let mapped = |wire: usize| match &r1cs.wire_mapping {
         Some(map) => witness[map[wire]],
         None => witness[wire],
     };
+    if mapped(0) != Fr::one() {
+        return Err(WitnessRejected::ConstantWireNotOne.into());
+    }
+    let value = |wire: usize| if wire == 0 { Fr::one() } else { mapped(wire) };
     let eval = |lc: &[(usize, Fr)]| lc.iter().fold(Fr::zero(), |acc, (wire, coeff)| acc + *coeff * value(*wire));
     let total = r1cs.constraints.len();
     for (i, (a, b, c)) in r1cs.constraints.iter().enumerate() {
         if eval(a) * eval(b) != eval(c) {
-            return Err(WitnessRejected { constraint: i, total }.into());
+            return Err(WitnessRejected::UnsatisfiedConstraint { constraint: i, total }.into());
         }
     }
     Ok(())
@@ -332,8 +365,7 @@ pub fn generate_proof_native_with(
     // Set circuit inputs
     set_circuit_inputs(&mut builder, circuit_inputs)?;
 
-    let circom = builder.build()
-        .map_err(|e| anyhow!("failed to build circuit with witness: {e}"))?;
+    let circom = compute_witness(builder)?;
 
     if options.check_witness {
         println!("Checking witness against the circuit's constraints...");

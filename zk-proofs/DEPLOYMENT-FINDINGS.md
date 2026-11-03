@@ -9,6 +9,20 @@ Source: [`c2pa-org/conformance-public/trust-list/C2PA-TRUST-LIST.pem`](https://g
 - **32 certificates: 20 self-signed roots and 12 intermediates.** Every intermediate has `pathlen:0`, so it can only issue end-entity certificates. Eleven chain to a root on the list; Adobe's issuing CA does not, so it is a trust anchor in its own right. In practice, a signer's certificate is often issued directly by a listed certificate.
 - **CA keys: 27 × P-384, 4 × RSA-4096, 1 × P-521. None use P-256.** The current circuit verifies the CA's signature only for P-256 with SHA-256, so as built, trust model A cannot prove issuance by any CA on this list.
 
+**The lists are not signed.** Neither the JSON files (official list and TSA list) nor the PEM files carry a signature element; they are files in a GitHub repository. Anything built from them (for example a Merkle tree of signer keys) needs to authenticate its source another way, at minimum by pinning the list's content hash.
+
+## Time-stamping
+
+The same repository publishes a **C2PA TSA trust list** (`C2PA-TSA-TRUST-LIST.pem` / `.json`, 23 certificates) for RFC 3161 time-stamp authorities. Real assets carry TSA tokens: both Pixel photos below include a token from "Google Pixel Time Stamping Authority", whose issuing CA ("Google C2PA Pixel Time-Stamping ICA G3") is on the TSA trust list. Validated time evidence therefore exists for real content, independent of any date the signer writes into the claim.
+
+The samples use different time-stamp versions (from the header labels in their manifests; see [D7](ARCHITECTURE-DECISIONS.md#d7-time-policy) for what each covers):
+
+| Sample | Time stamp |
+|---|---|
+| Both Pixel photos (official list) | v2, `sigTst2` |
+| Microsoft image, Black Forest Labs image (interim list) | v1, `sigTst` (deprecated) |
+| ChatGPT image via Truepic | none |
+
 ## Interim trust list (pre-conformance)
 
 Source: [`contentauth/verify-site/static/trust`](https://github.com/contentauth/verify-site/tree/main/static/trust). The file header states it is frozen, that Content Credentials signed with these certificates remain valid, and that validators should distinguish them from those tracing to the official list. It is still used by verify.contentauthenticity.org.

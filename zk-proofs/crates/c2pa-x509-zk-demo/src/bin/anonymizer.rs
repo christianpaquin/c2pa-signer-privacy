@@ -81,6 +81,9 @@ async fn main() -> Result<()> {
     // which changes the TBS bytes and invalidates the CA signature check
     // inside the ZK circuit.  Using the on-disk bytes guarantees exactness.
     let mut manifest_data = manifest_data;
+    // The signer's key, as it appears in the signed asset. Used below to make
+    // sure no certificate for that key is embedded in the output.
+    let signer_key_id = spki_key_id(&manifest_data.leaf_cert_der)?;
     if let Some(cert_path) = &args.cert {
         let cert_bytes = if cert_path.extension().map(|e| e == "pem").unwrap_or(false) {
             // PEM: decode to DER
@@ -112,7 +115,16 @@ async fn main() -> Result<()> {
         &manifest_data.ca_certs_der,
         &trust,
     )?;
-    validate_issuing_chain(&issuing_chain, &trust, manifest_data.photo_timestamp)?;
+    // Embed only the validated path: certificates after the trust anchor are
+    // not part of it and could be anything, including the signer's own.
+    let issuing_chain = validate_issuing_chain(&issuing_chain, &trust, manifest_data.photo_timestamp)?;
+    // Both the signed asset's signer certificate and a --cert override.
+    let signer_keys = [signer_key_id, spki_key_id(&manifest_data.leaf_cert_der)?];
+    for cert in &issuing_chain {
+        if signer_keys.contains(&spki_key_id(cert)?) {
+            anyhow::bail!("refusing to embed a certificate for the signer's key in x5chain");
+        }
+    }
     let issuing_ca_der = issuing_chain[0].clone();
     println!("  Issuing chain: {} certificate(s), validated against the trust list", issuing_chain.len());
 

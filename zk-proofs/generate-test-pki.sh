@@ -17,9 +17,22 @@
 #
 # Usage:
 #   ./generate-test-pki.sh [OUT_DIR] [NAME]
+#   ./generate-test-pki.sh --renew-signer [OUT_DIR]
 # NAME (default "ZK Demo") distinguishes independent PKIs in subject names.
+#
+# Generating replaces every key and certificate in OUT_DIR, so earlier
+# anonymized assets no longer validate against the new trust list.
+# --renew-signer instead reissues only the signer certificate, for the same
+# signer key and subject, under the existing issuing CA: the trust anchors
+# and the signer key are unchanged.
 
 set -euo pipefail
+
+RENEW_SIGNER=false
+if [[ "${1:-}" == "--renew-signer" ]]; then
+    RENEW_SIGNER=true
+    shift
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT_DIR="${1:-${SCRIPT_DIR}/fixtures/pki}"
@@ -28,6 +41,33 @@ C2PA_CLAIM_SIGNING_EKU="1.3.6.1.4.1.62558.2.1"
 
 mkdir -p "$OUT_DIR"
 cd "$OUT_DIR"
+
+# Issue signer.pem/.der from signer.csr with the issuing CA (90 days, C2PA
+# claim-signing EKU).
+issue_signer() {
+    cat > signer.ext <<EOF
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature
+extendedKeyUsage=${C2PA_CLAIM_SIGNING_EKU}
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid:always
+EOF
+    openssl x509 -req -in signer.csr -CA issuing-ca.pem -CAkey issuing-ca.key -CAcreateserial \
+        -sha256 -days 90 -extfile signer.ext -out signer.pem
+    openssl x509 -in signer.pem -outform DER -out signer.der
+}
+
+if $RENEW_SIGNER; then
+    for f in issuing-ca.pem issuing-ca.key signer.pem signer.key; do
+        [[ -f "$f" ]] || { echo "--renew-signer: missing $OUT_DIR/$f" >&2; exit 1; }
+    done
+    # A request for the same subject and key as the current certificate.
+    openssl x509 -x509toreq -in signer.pem -signkey signer.key -out signer.csr
+    issue_signer
+    rm -f ./*.csr ./*.srl ./*.ext
+    echo "Signer certificate renewed in ${OUT_DIR}"
+    exit 0
+fi
 
 # Root CA (10 years)
 openssl ecparam -genkey -name prime256v1 -noout -out root.key
@@ -53,21 +93,13 @@ EOF
 openssl x509 -req -in issuing-ca.csr -CA root.pem -CAkey root.key -CAcreateserial \
     -sha256 -days 1825 -extfile issuing-ca.ext -out issuing-ca.pem
 
-# Signer (90 days), C2PA claim-signing EKU
+# Signer
 openssl ecparam -genkey -name prime256v1 -noout -out signer.key
 openssl req -new -key signer.key -out signer.csr \
     -subj "/C=US/O=${NAME} Signer Org/CN=${NAME} Signer"
-cat > signer.ext <<EOF
-basicConstraints=critical,CA:FALSE
-keyUsage=critical,digitalSignature
-extendedKeyUsage=${C2PA_CLAIM_SIGNING_EKU}
-subjectKeyIdentifier=hash
-authorityKeyIdentifier=keyid:always
-EOF
-openssl x509 -req -in signer.csr -CA issuing-ca.pem -CAkey issuing-ca.key -CAcreateserial \
-    -sha256 -days 90 -extfile signer.ext -out signer.pem
+issue_signer
 
-for c in root issuing-ca signer; do
+for c in root issuing-ca; do
     openssl x509 -in "$c.pem" -outform DER -out "$c.der"
 done
 

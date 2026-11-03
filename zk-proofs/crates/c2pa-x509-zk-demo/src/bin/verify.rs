@@ -67,8 +67,19 @@ fn main() -> Result<()> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
-    if let Err(e) = validate_issuing_chain(&issuing_chain, &trust, now) {
-        eprintln!("\n❌ Issuing chain is not trusted: {e:#}");
+    let path = match validate_issuing_chain(&issuing_chain, &trust, now) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("\n❌ Issuing chain is not trusted: {e:#}");
+            std::process::exit(1);
+        }
+    };
+    // x5chain must be exactly the validated path: nothing after the anchor.
+    if path.len() != issuing_chain.len() {
+        eprintln!(
+            "\n❌ x5chain has {} certificate(s) after the trust anchor; it must hold only the issuing chain",
+            issuing_chain.len() - path.len()
+        );
         std::process::exit(1);
     }
     let issuing_ca_der = &issuing_chain[0];

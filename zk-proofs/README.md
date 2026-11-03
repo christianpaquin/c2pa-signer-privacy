@@ -297,11 +297,19 @@ This generates the proving and verifying keys in `circuits/build/`.
 | `trust-list.pem` | Trust anchors: the root and the issuing CA |
 | `trust-list.json` | The same anchors in the C2PA trust list JSON format |
 
-Both the root and the issuing CA are trust anchors, as on the C2PA trust list, where issuing CAs are often listed directly. The tests generate a fresh PKI for each run, so no certificates are committed. Re-run the script when the signer certificate expires; the web UI does this automatically.
+Both the root and the issuing CA are trust anchors, as on the C2PA trust list, where issuing CAs are often listed directly. The tests generate a fresh PKI for each run, so no certificates are committed.
+
+Re-running the script replaces every key and certificate, so assets anonymized earlier no longer validate against the new trust list. When the signer certificate nears expiry, renew it instead with `./generate-test-pki.sh --renew-signer [OUT_DIR]`: it reissues the signer certificate for the same key and subject under the existing issuing CA, leaving the trust anchors untouched. The web UI creates a PKI when none exists and renews the signer this way before signing or anonymizing; verifying never changes the PKI.
 
 The circuit currently requires P-256 keys and ECDSA-SHA256 signatures throughout. Real C2PA CAs sign with P-384 or RSA (see [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md)); [E1](#e1-cost-of-reality-p-384-sha-384-and-rsa-in-circuit) measures what supporting them in-circuit would cost.
 
-**Trust lists.** `--trust-list` accepts a PEM bundle of anchors, a single DER certificate, or the C2PA trust list JSON ([`C2PA-TRUST-LIST.json`](https://github.com/c2pa-org/conformance-public/tree/main/trust-list)). From the JSON, only services whose status is `http://c2pa.org/conformance/trust-list/trusted` are loaded; the count of skipped certificates is reported. (The official list currently has two certificates with an empty status, which appear in its PEM version but are skipped from the JSON.) Issuing chains are validated off-circuit: each link's signature (ECDSA P-256/P-384 with SHA-256/384, or RSA PKCS#1 v1.5), `CA:TRUE`, and validity, until a certificate is an anchor or is issued by one.
+**Trust lists.** `--trust-list` accepts a PEM bundle of anchors, a single DER certificate, or the C2PA trust list JSON ([`C2PA-TRUST-LIST.json`](https://github.com/c2pa-org/conformance-public/tree/main/trust-list)). From the JSON, only services whose status is `http://c2pa.org/conformance/trust-list/trusted` are loaded; the count of skipped certificates is reported. (The official list currently has two certificates with an empty status, which appear in its PEM version but are skipped from the JSON.) Issuing chains are validated off-circuit, until a certificate is an anchor or is issued by one:
+
+- each link's signature (ECDSA P-256/P-384 with SHA-256/384, or RSA PKCS#1 v1.5) and issuer name;
+- each CA certificate: `CA:TRUE`, within its validity period, `keyCertSign` if it has a key-usage extension, and no critical extension the validator does not process (such as name constraints);
+- path-length constraints, counting the hidden signer: the certificate at position `k` in the issuing chain has `k` CA certificates below it before the signer, so it needs `pathLen >= k`, and an anchor that issued the last certificate needs `pathLen >= ` the chain length. Self-issued certificates get no special treatment, which is stricter than RFC 5280.
+
+The validated path ends at the trust anchor. The anonymizer embeds only that path, and refuses to embed any certificate for the signer's key; the verifier rejects an `x5chain` with certificates after the anchor.
 
 ## Placeholder Mode
 

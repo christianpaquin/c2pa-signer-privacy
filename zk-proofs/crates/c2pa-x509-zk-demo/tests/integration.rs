@@ -223,6 +223,114 @@ fn verify_rejects_signer_certificate_in_x5chain() {
         .stderr(predicate::str::contains("not a CA certificate"));
 }
 
+/// A C2PA signer with an arbitrary x5chain, to produce signed assets the
+/// signing CLI refuses to create (for example, a malformed chain order).
+struct ChainSigner {
+    key: p256::ecdsa::SigningKey,
+    chain: Vec<Vec<u8>>,
+}
+
+impl c2pa::Signer for ChainSigner {
+    fn sign(&self, data: &[u8]) -> c2pa::Result<Vec<u8>> {
+        use p256::ecdsa::{signature::Signer, Signature};
+        let sig: Signature = self.key.sign(data);
+        Ok(sig.to_bytes().to_vec())
+    }
+    fn alg(&self) -> c2pa::SigningAlg {
+        c2pa::SigningAlg::Es256
+    }
+    fn certs(&self) -> c2pa::Result<Vec<Vec<u8>>> {
+        Ok(self.chain.clone())
+    }
+    fn reserve_size(&self) -> usize {
+        20_000
+    }
+}
+
+fn signer_key(pki: &Pki) -> p256::ecdsa::SigningKey {
+    let der = pki.file("signer-key.der");
+    let ok = std::process::Command::new("openssl")
+        .args(["ec", "-in", path_str(&pki.file("signer.key")), "-outform", "DER", "-out", path_str(&der)])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "openssl ec failed");
+    p256::SecretKey::from_sec1_der(&std::fs::read(der).unwrap()).unwrap().into()
+}
+
+/// Regression test (PR #14 review): a signed x5chain with certificates after
+/// the trusted issuing CA, here a duplicate of the signer certificate. The
+/// anonymizer must embed only the validated path, never the signer.
+#[test]
+fn anonymizer_drops_certificates_after_the_anchor() {
+    let pki = Pki::generate("Surplus Test");
+    let dir = tempdir().unwrap();
+    let signed = dir.path().join("signed.png");
+    let anon = dir.path().join("anon.png");
+
+    let signer = ChainSigner {
+        key: signer_key(&pki),
+        chain: vec![pki.read("signer.der"), pki.read("issuing-ca.der"), pki.read("signer.der")],
+    };
+    let mut builder = c2pa::Builder::from_json(r#"{"claim_generator_info": [{"name": "surplus-test"}]}"#).unwrap();
+    builder.sign_file(&signer, &cards(), &signed).unwrap();
+    assert_eq!(signed_chain(&signed).len(), 3);
+
+    anonymize_placeholder(&signed, &anon, &pki.file("trust-list.pem")).success();
+
+    let (_, chain) = read_anonymized_asset(&anon).unwrap();
+    assert_eq!(chain, vec![pki.read("issuing-ca.der")]);
+    assert!(
+        !contains(&std::fs::read(&anon).unwrap(), &pki.read("signer.der")),
+        "anonymized asset contains the signer certificate"
+    );
+}
+
+#[test]
+fn verify_rejects_x5chain_with_certificates_after_the_anchor() {
+    let pki = Pki::generate("Verify Test");
+    let dir = tempdir().unwrap();
+    // The issuing CA is an anchor; the root after it is surplus.
+    let anon = crafted_asset(
+        dir.path(),
+        vec![pki.read("issuing-ca.der"), pki.read("root.der")],
+        extract_subject_dn(&pki.read("issuing-ca.der")).unwrap(),
+        spki_key_id(&pki.read("issuing-ca.der")).unwrap(),
+    );
+    verify(&anon, &pki.file("trust-list.pem"))
+        .failure()
+        .stderr(predicate::str::contains("after the trust anchor"));
+}
+
+/// Regression test (PR #14 review): renewing the signer certificate must not
+/// replace the trust anchors, so assets anonymized before the renewal still
+/// validate, and must keep the signer key.
+#[test]
+fn signer_renewal_keeps_trust_anchors_and_key() {
+    let pki = Pki::generate("Renewal Test");
+    let dir = tempdir().unwrap();
+    let (_, anon) = signed_and_anonymized(&pki, dir.path());
+    let (anchors, key, cert) = (pki.read("trust-list.pem"), pki.read("signer.key"), pki.read("signer.der"));
+
+    let ok = std::process::Command::new("bash")
+        .arg(zk_root().join("generate-test-pki.sh"))
+        .args(["--renew-signer", path_str(&pki.path)])
+        .stdout(Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "generate-test-pki.sh --renew-signer failed");
+
+    assert_eq!(pki.read("trust-list.pem"), anchors, "renewal replaced the trust anchors");
+    assert_eq!(pki.read("signer.key"), key, "renewal replaced the signer key");
+    assert_ne!(pki.read("signer.der"), cert, "renewal did not issue a new signer certificate");
+    verify(&anon, &pki.file("trust-list.pem"))
+        .code(2)
+        .stdout(predicate::str::contains("Issuing chain validates against the trust list"));
+}
+
 /// Verification fails if the anonymized asset bytes are modified.
 #[test]
 fn verify_fails_for_tampered_asset() {

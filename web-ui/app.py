@@ -86,20 +86,23 @@ def resolve_input_image(fixtures_dir: Path) -> Path | None:
 
 
 def ensure_zk_pki() -> None:
-    """Generate the ZK test PKI if it is missing or its signer certificate
-    expires within a day (signer certificates last ~90 days)."""
-    signer = ZK_PKI / "signer.pem"
-    if signer.exists():
-        still_valid = subprocess.run(
-            ["openssl", "x509", "-checkend", "86400", "-noout", "-in", str(signer)],
-            capture_output=True,
-        ).returncode == 0
-        if still_valid:
-            return
-    subprocess.run(
-        ["bash", str(ROOT / "zk-proofs" / "generate-test-pki.sh"), str(ZK_PKI)],
-        check=True, capture_output=True,
-    )
+    """Create the ZK test PKI if there is none, and renew the signer
+    certificate (same key, same trust anchors) when it expires within a day.
+
+    Never replaces the trust anchors, which would make every previously
+    anonymized asset untrusted: a full reset is a manual run of
+    zk-proofs/generate-test-pki.sh.
+    """
+    script = ROOT / "zk-proofs" / "generate-test-pki.sh"
+    if not (ZK_PKI / "trust-list.pem").exists():
+        subprocess.run(["bash", str(script), str(ZK_PKI)], check=True, capture_output=True)
+        return
+    expiring = subprocess.run(
+        ["openssl", "x509", "-checkend", "86400", "-noout", "-in", str(ZK_PKI / "signer.pem")],
+        capture_output=True,
+    ).returncode != 0
+    if expiring:
+        subprocess.run(["bash", str(script), "--renew-signer", str(ZK_PKI)], check=True, capture_output=True)
 
 
 def run_cli(args: list[str], cwd: str | None = None) -> subprocess.CompletedProcess:
@@ -408,7 +411,10 @@ def job_status_api(job_id: str):
 @app.route("/zk/verify", methods=["GET", "POST"])
 def zk_verify():
     if request.method == "POST":
-        ensure_zk_pki()
+        # Verification only reads the trust list; it never creates or renews keys.
+        if not (ZK_PKI / "trust-list.pem").exists():
+            flash("No test PKI yet: sign an image first.", "error")
+            return render_template("zk/verify.html")
         image = request.files.get("image")
         if not image or not allowed_file(image.filename):
             flash("Please upload an anonymized PNG or JPEG image.", "error")

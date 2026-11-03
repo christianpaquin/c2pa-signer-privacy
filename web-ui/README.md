@@ -27,7 +27,7 @@ Open [http://localhost:5000](http://localhost:5000).
 ## Features
 
 - **BBS flow**: Obtain credentials (wallet), sign images, verify signatures
-- **ZK flow**: Sign images with X.509/ECDSA, anonymize (replace signature with ZK proof), verify
+- **ZK flow**: Sign images with X.509/ECDSA, anonymize (replace signature with ZK proof), verify. Uses the test PKI in `zk-proofs/fixtures/pki`, created on first use; the signer certificate is renewed (same key, same trust anchors) when it nears expiry. To start over with new keys, run `zk-proofs/generate-test-pki.sh`, which makes previously anonymized assets untrusted.
 - Image preview on upload and after processing
 - Sample image auto-load for quick demos
 - Background processing for ZK proof generation (~10 min; requires ~12 GB of RAM, see [zk-proofs Performance](../zk-proofs/README.md#performance))

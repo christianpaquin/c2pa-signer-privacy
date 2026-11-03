@@ -15,6 +15,14 @@ Source: [`c2pa-org/conformance-public/trust-list/C2PA-TRUST-LIST.pem`](https://g
 
 The same repository publishes a **C2PA TSA trust list** (`C2PA-TSA-TRUST-LIST.pem` / `.json`, 23 certificates) for RFC 3161 time-stamp authorities. Real assets carry TSA tokens: both Pixel photos below include a token from "Google Pixel Time Stamping Authority", whose issuing CA ("Google C2PA Pixel Time-Stamping ICA G3") is on the TSA trust list. Validated time evidence therefore exists for real content, independent of any date the signer writes into the claim.
 
+The samples use different time-stamp versions (from the header labels in their manifests; see [D7](ARCHITECTURE-DECISIONS.md#d7-time-policy) for what each covers):
+
+| Sample | Time stamp |
+|---|---|
+| Both Pixel photos (official list) | v2, `sigTst2` |
+| Microsoft image, Black Forest Labs image (interim list) | v1, `sigTst` (deprecated) |
+| ChatGPT image via Truepic | none |
+
 ## Interim trust list (pre-conformance)
 
 Source: [`contentauth/verify-site/static/trust`](https://github.com/contentauth/verify-site/tree/main/static/trust). The file header states it is frozen, that Content Credentials signed with these certificates remain valid, and that validators should distinguish them from those tracing to the official list. It is still used by verify.contentauthenticity.org.

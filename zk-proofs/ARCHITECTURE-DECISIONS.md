@@ -122,4 +122,16 @@ The circuit checks the signer certificate's validity against a timestamp. Which 
 
 Evidence differs in strength. A date inside the claim is self-reported by the signer, even though it is signed. An RFC 3161 time-stamp token from a TSA on the C2PA TSA trust list is independent evidence; real assets carry them (see [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md#time-stamping)).
 
-A catch for anonymization: a TSA token signs a digest of the original signature value, which is itself identifying, since it can be checked against the signer's public key. Verifying the token in the clear would undo the anonymization. The options are to verify the token in-circuit (another signature verification plus hashing, at real cost) or to time-stamp the anonymized output instead, which proves existence at anonymization time, not signing time. Revocation semantics ([H3](README.md#h3-revocation)) follow the same signing-time vs now distinction.
+**What a C2PA time stamp covers** ([C2PA 2.5 §10.3.2.5.2–10.3.2.5.4](https://spec.c2pa.org/specifications/specifications/2.5/specs/C2PA_Specification.html#_choosing_the_payload)). The TSA receives a message imprint: a hash of a COSE `Sig_structure` with context `CounterSignature`, whose other elements follow the claim signature's own (so it includes the claim signature's protected header, which carries the signer's certificate). Its payload depends on the version:
+
+- **v1, `sigTst` (deprecated):** the claim signature's payload, i.e. the claim. Validators must still process it.
+- **v2, `sigTst2`:** the serialized `signature` byte string of the claim's `COSE_Sign1`, including the CBOR major-type and length bytes. Claim generators must use v2; the spec describes it as a countersignature on the entire signature structure, including the certificate.
+
+Both are stored in the unprotected header; a manifest holds at most one time stamp. The versions in real assets differ (see [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md#time-stamping)), so supporting both means two imprint constructions with different witnesses and hashing costs.
+
+**Using the time stamp without breaking anonymity.** The token carries the imprint, not its preimage, so publishing it does not reveal the original signature or certificate. It does expose a stable fingerprint: anyone holding the original asset, or records of it, can recompute the imprint and match it. In particular the TSA operator saw the imprint when the signer's device requested the time stamp, and for device-signed content the TSA is often run by the same organization as the CA. Two designs, to be chosen against an explicit threat model:
+
+1. **Public token plus ZK binding:** verify the TSA's signature on the token off-circuit, and prove in ZK that the authenticated imprint corresponds to the original signed material. Cheaper, but leaves the fingerprint.
+2. **Hidden token:** verify the TSA evidence inside the proof as well, so no fingerprint is exposed, at the cost of another in-circuit signature verification and the imprint's hashing.
+
+A third option, time-stamping the anonymized output, proves existence at anonymization time only, not signing time. Revocation semantics ([H3](README.md#h3-revocation)) follow the same signing-time vs now distinction.

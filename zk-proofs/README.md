@@ -419,7 +419,7 @@ Decisions D6 and D7, specified before any circuit work, as a design document wit
 - the signed bytes: COSE's `Sig_structure`, whose protected header contains `x5chain` and thus the signer's certificate (a private input to the hash);
 - the asset binding: whether the output keeps the original claim, whose hard binding excludes the original manifest's byte range, or the proof bridges that binding to the output's bytes;
 - disclosure: which original assertions remain authenticated and visible (the original claim carries device and software details, identifiers, and possibly identity assertions), and how hidden ones are handled (C2PA redaction, salting);
-- time policy (D7): validity at signing time vs acceptability now, self-reported dates vs TSA evidence, and the cost of verifying a TSA token in-circuit, since verifying it in the clear would reveal the original signature; revocation semantics follow the same distinction.
+- time policy (D7): validity at signing time vs acceptability now, and self-reported dates vs TSA evidence; the exact time-stamp inputs real assets use (`sigTst` over the claim, or `sigTst2` over the serialized signature, each hashed as a `CounterSignature` structure); and the privacy threat model that decides between a public token bound to the proof (cheaper, but a fingerprint the TSA operator can match) and a token verified inside the proof (no fingerprint, more cost). Revocation semantics follow the same distinction.
 
 The signer-side mode gets the same treatment: it should bind to a claim rather than only the manifest-stripped asset digest, so the rest of the manifest is authenticated. Both prototypes' manifests also need a `c2pa.created` action.
 
@@ -467,7 +467,7 @@ Each entry is labelled with the guarantees it establishes and its experimental s
 
 #### R2. Anonymizing real signed content
 
-One complete vertical slice of third-party anonymization (E2b) with explicit guarantees and limitations: first on a test PKI that mirrors a real chain (P-384 issuing CA, TSA time-stamp token), then on a real asset signed under the official trust list. The real asset adds unknowns (exact encodings, timestamp tokens) that are easier to isolate once the pipeline works on the mirror. Requires E1's P-384/SHA-384 results and E2a's time policy.
+One complete vertical slice of third-party anonymization (E2b) with explicit guarantees and limitations: first on a test PKI that mirrors a real chain (P-384 issuing CA, TSA time-stamp token), then on a real asset signed under the official trust list. The real asset adds unknowns (exact encodings, timestamp tokens) that are easier to isolate once the pipeline works on the mirror. Requires E1's P-384/SHA-384 results and E2a's time policy. A result that claims historical validity (the certificate was valid when the content was signed) must already enforce the minimum time policy, validate the time evidence against the C2PA TSA trust list, and check its binding to the original signature; a result that does not perform these checks must explicitly decline to claim historical validity.
 
 #### R3. Interim-list allowed signers via Merkle membership
 
@@ -479,7 +479,7 @@ Production-level work for whichever options the experiments favour. The minimum 
 
 #### H1. Production time-stamping
 
-The policy is set in E2a (D7). What remains is operating it: verifiers enforcing the policy, and checking time-stamp tokens against the C2PA TSA trust list. Until then, the `photoTimestamp` public input is chosen by the prover and ignored by the verifier.
+The policy is set in E2a (D7), and the checks needed to claim historical validity are part of R2. What remains here is production operation: tracking TSA trust-list updates, TSA certificate expiry and revocation, and long-term validation of old time stamps. Until R2, the `photoTimestamp` public input is chosen by the prover and ignored by the verifier, so no current result claims historical validity.
 
 #### H2. Full certificate validation in the circuit
 

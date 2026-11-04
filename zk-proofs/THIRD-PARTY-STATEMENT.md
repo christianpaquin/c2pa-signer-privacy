@@ -4,9 +4,9 @@
 
 Section references are to the [C2PA 2.5 specification](https://spec.c2pa.org/specifications/specifications/2.5/specs/C2PA_Specification.html). Sizes come from a real device-signed photo on the official trust list (a P-256 signer certificate issued by a P-384 CA, an ES256 claim signature, and a `sigTst2` time stamp); its anatomy is in [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md#anatomy-of-a-real-manifest).
 
-## Summary of proposed defaults
+## Summary of adopted defaults
 
-| # | Decision | Proposed default |
+| # | Decision | Adopted default |
 |---|---|---|
 | [Q1](#q1-output-form) | Output form | Replace the original claim signature in place with a ZK signature in a defined compact encoding; keep the original claim and assertions unchanged, and keep the manifest store's size; fail before proving if it does not fit |
 | [Q2](#q2-one-statement-for-both-modes) | Signer-side mode | Same statement: the signer signs normally, then runs the third-party prover. Retire the asset-digest circuit after E2b; deprioritize E5 |
@@ -75,9 +75,9 @@ The verifier never sees `P`, so it cannot recompute any hash over the signed byt
 
 How the anonymized asset carries the original claim and the proof.
 
-- **O1. Replace the signature in place (proposed).** Keep the original manifest, claim, and assertion boxes byte for byte; replace only the claim signature box's `COSE_Sign1` with the ZK signature, and pad it so the manifest store keeps its exact size. The claim's hard binding then still matches the output: with `c2pa.hash.data` the store's byte range is fixed in the claim (§16.3.1.2), and with BMFF hashes root boxes cannot move (§16.3.2.2). The original assertions remain authenticated by the claim, and the proof authenticates the claim. If the ZK signature does not fit in the original signature's space, anonymization fails rather than changing the binding; the anonymizer checks this before proving. The encoding and the real sample's sizes are below.
+- **O1. Replace the signature in place (adopted).** Keep the original manifest, claim, and assertion boxes byte for byte; replace only the claim signature box's `COSE_Sign1` with the ZK signature, and pad it so the manifest store keeps its exact size. The claim's hard binding then still matches the output: with `c2pa.hash.data` the store's byte range is fixed in the claim (§16.3.1.2), and with BMFF hashes root boxes cannot move (§16.3.2.2). The original assertions remain authenticated by the claim, and the proof authenticates the claim. If the ZK signature does not fit in the original signature's space, anonymization fails rather than changing the binding; the anonymizer checks this before proving. The encoding and the real sample's sizes are below.
 - **O2. Add an update manifest.** Do O1, then add an update manifest (§11.3.3) that takes the original as its `parentOf` ingredient. Only an update manifest can redact the original's assertions (§8.8), and update manifests may change the store's length. It must be signed with a normal C2PA credential, so the anonymizer (for example a newsroom) is identified. C2PA forbids redacting `c2pa.actions`, so the action descriptions stay visible regardless. Needed only if real claims carry identifying assertions ([Q9](#q9-assertions-and-metadata)).
-- **O3. A new manifest signed by the anonymizer**, with the proof about the original claim as one of its assertions and the original manifest removed. Standard validators would accept the anonymizer's signature, but the original claim's authenticity and its hard binding would then exist only inside the proof, so this is a different statement. Not proposed.
+- **O3. A new manifest signed by the anonymizer**, with the proof about the original claim as one of its assertions and the original manifest removed. Standard validators would accept the anonymizer's signature, but the original claim's authenticity and its hard binding would then exist only inside the proof, so this is a different statement. Not adopted.
 
 Under every option, standard C2PA validators reject the ZK signature (unknown critical algorithm); display in standard tools is [H8](README.md#h8-c2patool-support).
 
@@ -106,7 +106,7 @@ Sizes for the real sample, computed by encoding this structure with its issuing 
 
 ### Q2. One statement for both modes
 
-Signer-side mode today proves a fresh signature over a manifest-stripped asset digest, which leaves the rest of the manifest unauthenticated. **Proposed:** signer-side mode uses the same statement as third-party mode. The signer signs a standard C2PA claim with its certificate, as any claim generator does, and runs the third-party prover on its own output before publishing. Then:
+Signer-side mode today proves a fresh signature over a manifest-stripped asset digest, which leaves the rest of the manifest unauthenticated. **Adopted:** signer-side mode uses the same statement as third-party mode. The signer signs a standard C2PA claim with its certificate, as any claim generator does, and runs the third-party prover on its own output before publishing. Then:
 
 - the two modes prove the same thing and differ only in who runs the prover, so the comparison in R1 is about deployment, not guarantees;
 - the claim, its assertions, and the hard binding are authenticated in both modes;
@@ -117,14 +117,14 @@ Signer-side mode today proves a fresh signature over a manifest-stripped asset d
 
 The verifier has the claim; the circuit must hash exactly those bytes inside the `Sig_structure`.
 
-- **Packed public input (proposed).** The claim bytes, up to the maximum length, packed 31 bytes per field element, plus the length. The verifier packs the claim box's bytes itself, so the packed values are never stored in the output and do not affect its size ([encoding](#the-zk-signatures-encoding)). A 1 KB maximum is 34 public inputs; Groth16 verification grows by one scalar multiplication per public input, well under a millisecond each.
+- **Packed public input (adopted).** The claim bytes, up to the maximum length, packed 31 bytes per field element, plus the length. The verifier packs the claim box's bytes itself, so the packed values are never stored in the output and do not affect its size ([encoding](#the-zk-signatures-encoding)). A 1 KB maximum is 34 public inputs; Groth16 verification grows by one scalar multiplication per public input, well under a millisecond each.
 - **A public hash of the claim.** One public input, but the circuit hashes the claim twice (once alone, once in the `Sig_structure`), adding roughly 30k constraints per 64-byte block.
 
 ### Q4. Circuit size limits
 
 Circom circuits hash up to a fixed maximum length, and the cost follows the maximum, not the actual length. Approximate SHA-256 cost: 30k constraints per 64-byte block.
 
-| Input | Real sample | Proposed maximum | Hashing cost at the maximum |
+| Input | Real sample | Maximum | Hashing cost at the maximum |
 |---|---|---|---|
 | Protected header `P` | 1,528 B | 2 KB | — |
 | Claim | 377 B | 1 KB | — |
@@ -138,7 +138,7 @@ Inputs over a limit are refused with a clear error. The limits are revisited whe
 
 Today the circuit reads the signer key and validity period at prover-supplied positions, checking only that the expected DER encoding appears there, inside the signed TBS. That shows the bytes were signed, not that they are the field they claim to be: the same bytes inside another field (an extension, for example) would also be accepted ([Certificate field binding](README.md#certificate-field-binding)). For the key and validity, exploiting this needs a CA to have signed such content. For a certificate's purpose it would be easy: the encoding of `CA:FALSE` (`30 00`) can occur almost anywhere, and CA certificates often carry EKU lists. Checking the claim-signing EKU and `CA:FALSE` as byte patterns would not establish that a certificate is authorized for claim signing.
 
-**Proposed: a structural walk of the TBS.** The circuit decodes the DER header (tag and length, including long-form lengths) of each top-level TBS field in order, version, serial number, signature algorithm, issuer, validity, subject, subject public key, then the extensions, and reads every field it uses at the position the walk reaches:
+**Adopted: a structural walk of the TBS.** The circuit decodes the DER header (tag and length, including long-form lengths) of each top-level TBS field in order, version, serial number, signature algorithm, issuer, validity, subject, subject public key, then the extensions, and reads every field it uses at the position the walk reaches:
 
 - the subject public key and the validity period, at their parsed positions (this removes today's limitation for them too);
 - each extension in turn, as a sequence of its identifier, optional criticality flag, and value;
@@ -153,8 +153,8 @@ Requiring exactly one EKU extension matters: a certificate with two would let th
 
 C2PA's rule (§14.8.2): with a valid trusted time stamp, the signer certificate must have been valid at the attested time; without one, it must be valid at the time of validation.
 
-- **With a time stamp (proposed: C2PA semantics).** The verifier validates the token off-circuit against the C2PA TSA trust list and takes `t` from it. The circuit proves that the token's message imprint is the hash of the countersignature structure over the original signature (v2, `sigTst2`) or over the claim (v1, `sigTst`), which both include `P` (D7). The issuing chain is validated at `t`. Result: "the certificate was valid when a trusted TSA attested the signature", which is what C2PA itself establishes. The exact constructions, confirmed on the real sample, are in [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md#anatomy-of-a-real-manifest): for v2, the imprint hashes the four-element array `["CounterSignature", P, h'', bstr(serialized signature)]`.
-- **Without a time stamp (proposed: refuse).** The anonymizer refuses assets without a trusted time stamp, consistent with starting from `sigTst2` ([Q10](#q10-first-algorithms)). Otherwise the prover would choose `t`, and the proof would show only that the certificate was valid at some time of the prover's choosing, accepting long-expired certificates and making a successful verification much weaker than C2PA validation. That behavior remains available only as an **explicitly selected research mode**, whose results the verifier labels as making no validity claim. Other options for later: the circuit discloses `notAfter` rounded to the day, so the verifier can apply C2PA's validity-now rule at the cost of a coarse fingerprint.
+- **With a time stamp (adopted: C2PA semantics).** The verifier validates the token off-circuit against the C2PA TSA trust list and takes `t` from it. The circuit proves that the token's message imprint is the hash of the countersignature structure over the original signature (v2, `sigTst2`) or over the claim (v1, `sigTst`), which both include `P` (D7). The issuing chain is validated at `t`. Result: "the certificate was valid when a trusted TSA attested the signature", which is what C2PA itself establishes. The exact constructions, confirmed on the real sample, are in [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md#anatomy-of-a-real-manifest): for v2, the imprint hashes the four-element array `["CounterSignature", P, h'', bstr(serialized signature)]`.
+- **Without a time stamp (adopted: refuse).** The anonymizer refuses assets without a trusted time stamp, consistent with starting from `sigTst2` ([Q10](#q10-first-algorithms)). Otherwise the prover would choose `t`, and the proof would show only that the certificate was valid at some time of the prover's choosing, accepting long-expired certificates and making a successful verification much weaker than C2PA validation. That behavior remains available only as an **explicitly selected research mode**, whose results the verifier labels as making no validity claim. Other options for later: the circuit discloses `notAfter` rounded to the day, so the verifier can apply C2PA's validity-now rule at the cost of a coarse fingerprint.
 
 A self-reported date in the claim or metadata is never used as `t`.
 
@@ -162,7 +162,7 @@ A self-reported date in the claim or metadata is never used as `t`.
 
 The public token's imprint is a hash over private data, so it reveals nothing by itself. But the TSA operator saw the same imprint when the signer's device requested the time stamp, and can match it to that request. For device-signed content, the CA and the TSA are often run by the same organization.
 
-- **Public token (proposed for E2b).** The threat model excludes the TSA operator: it may link an anonymized asset to the original time-stamp request. Cheap: one extra hash of `P` in the circuit (~1.0M constraints at the proposed limit).
+- **Public token (adopted for E2b).** The threat model excludes the TSA operator: it may link an anonymized asset to the original time-stamp request. Cheap: one extra hash of `P` in the circuit (~1.0M constraints at the proposed limit).
 - **Hidden token (measured later).** The circuit verifies the TSA's signature over the token, so neither the token nor its imprint is disclosed. It adds a signature verification with the TSA's algorithm (often P-384 or RSA; E1 measures the cost) plus parsing the token. Needed if the CA or TSA operator is in the threat model.
 
 ### Q8. Revocation
@@ -185,7 +185,7 @@ E2b starts with what the official-list sample uses for the claim signature: **ES
 
 ## Implementation (E2b)
 
-The statement is implemented in gnark ([`gnark/`](gnark/)), following E1. Under the defaults above, it needs 4.7 million R1CS constraints at the proposed size limits, against the ~7 million estimated below for circom. The implementation makes four choices this document leaves open:
+The statement is implemented in gnark ([`gnark/`](gnark/)), following E1. Under the defaults above, it needs 4.7 million R1CS constraints at these size limits, against the ~7 million estimated below for circom. The implementation makes four choices this document leaves open:
 
 - **Accepted encodings.** `P` must be `{1: ES256, 33: [signer certificate, ...]}`, with the certificate and its TBS in two-byte DER lengths, as in both real assets and c2pa-rs; the signer certificate's validity times must be UTCTime (2000–2049). Other encodings are refused before proving.
 - **The CA's signature** is any valid ECDSA P-384 signature by the issuing CA over the TBS, supplied by the prover, rather than the certificate's own signature field; the statement ("the CA signed this TBS") is the same.
@@ -194,7 +194,7 @@ The statement is implemented in gnark ([`gnark/`](gnark/)), following E1. Under 
 
 ## Estimated cost
 
-A rough estimate for planning, to be replaced by E2b's measurements. On the test PKI (P-256 CA), the statement keeps the current circuit's two ECDSA P-256 verifications (one for issuance, one for the claim signature instead of the fresh signature) and adds the `Sig_structure` hash (~1.5M constraints at the proposed limits) and, with a time stamp, the imprint hash (~1.0M). The TBS walk ([Q5](#q5-in-circuit-certificate-checks)) adds a few hundred thousand. That is roughly 7M constraints, against 4.8M today. Whether proving time grows in proportion (about 1.5 times) is an unverified hypothesis: today's time is dominated by loading the proving key and computing the witness, not by the proof. With a P-384 issuing CA, the issuance part changes as measured in E1. All of these figures are for the current circom stack; E1 measured ECDSA in gnark at about a thirteenth of circom's constraints, so the stack chosen in E6 may change them substantially.
+A rough estimate for planning, to be replaced by E2b's measurements. On the test PKI (P-256 CA), the statement keeps the current circuit's two ECDSA P-256 verifications (one for issuance, one for the claim signature instead of the fresh signature) and adds the `Sig_structure` hash (~1.5M constraints at these limits) and, with a time stamp, the imprint hash (~1.0M). The TBS walk ([Q5](#q5-in-circuit-certificate-checks)) adds a few hundred thousand. That is roughly 7M constraints, against 4.8M today. Whether proving time grows in proportion (about 1.5 times) is an unverified hypothesis: today's time is dominated by loading the proving key and computing the witness, not by the proof. With a P-384 issuing CA, the issuance part changes as measured in E1. All of these figures are for the current circom stack; E1 measured ECDSA in gnark at about a thirteenth of circom's constraints, so the stack chosen in E6 may change them substantially.
 
 ## Guarantees and shortcuts
 

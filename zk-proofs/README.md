@@ -477,7 +477,7 @@ The signer-side mode gets the same treatment: it should bind to a claim rather t
 
 Standalone benchmarks of the primitives real deployments use, next to today's P-256 + SHA-256, prioritising **P-384 ECDSA with SHA-384**, which the official list's CAs and the documented real sample use; then RSA-2048 and RSA-4096 with PKCS#1 v1.5 and PSS (RSA CAs and PS256 signers), and optionally P-521. Independent of E2a, so it can run in parallel and show early whether real CAs are affordable in-circuit. Feeds the choice of proof system (E6).
 
-Status: the P-384/SHA-384 spike is measured in gnark ([FEASIBILITY.md](FEASIBILITY.md#e1-p-384-and-sha-384-primitives), [`experiments/e1-p384`](experiments/e1-p384/)). A CA signature over a 1,500-byte TBS costs 1.52M constraints with P-384 and SHA-384, 1.3× P-256 with SHA-256 in the same stack and 0.56× the current circom P-256 component, and proves in ~5 s; the hash dominates at real certificate sizes. RSA remains.
+Status: the P-384/SHA-384 spike is measured in gnark ([FEASIBILITY.md](FEASIBILITY.md#e1-p-384-and-sha-384-primitives), [`experiments/e1-p384`](experiments/e1-p384/)). A CA signature over a 1,500-byte TBS costs 1.52M constraints with P-384 and SHA-384, 1.3× P-256 with SHA-256 in the same stack and 0.56× the current circom P-256 component, and proves in ~5 s with the proving key resident (a primitive, not comparable with the per-asset baseline); the hash dominates at real certificate sizes. RSA remains.
 
 #### E2b. Third-party anonymization
 
@@ -497,7 +497,7 @@ Decision D5: in-circuit ECDSA (today) against a P-256 commitment with a Schnorr-
 
 #### E6. Proof systems
 
-Decision D2, guided by the measurements from F2, E1, and E2b, cheapest first: native (C++) witness generation for the current circuit; a PLONK-family prover on the same R1CS; then a rewrite in a second stack (gnark is the leading candidate, since it could also cover P-384 CAs; Halo2 and Longfellow ZK are alternatives).
+Decision D2, guided by the measurements from F2, E1, and E2b, cheapest first: native (C++) witness generation for the current circuit; a PLONK-family prover on the same R1CS; then a rewrite in a second stack (gnark is the leading candidate, since it could also cover P-384 CAs; Halo2 and Longfellow ZK are alternatives). Stacks are compared on equivalent full statements under the same accounting as the [benchmark harness](#benchmarks), reporting loading of keys and other artifacts from disk separately from operation with resident keys; primitive timings such as E1's are not comparable with per-asset figures.
 
 #### E7. Curve: BN254 vs BLS12-381
 

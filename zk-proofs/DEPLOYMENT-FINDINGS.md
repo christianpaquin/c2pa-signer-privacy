@@ -57,7 +57,22 @@ Sources: the first Pixel photo is the original linked from [Hacker Factor's Pixe
 
 Pixel signer certificate details: `CA:FALSE`; EKU C2PA claim signing plus email protection; issued hours before the photo's timestamp, with a different serial for each photo. This fits per-capture or per-session issuance; two samples cannot distinguish between them. Google states the keys are generated in StrongBox on the Titan M2 chip.
 
-## What this means for the prototype
+## Anatomy of a real manifest
+
+What a third-party proof would have to hash, measured on the first Pixel photo by parsing its JUMBF manifest store (collected 2026-11-04 for [E2a](THIRD-PARTY-STATEMENT.md)).
+
+| Part | Size | Contents |
+|---|---|---|
+| Manifest store | 4,912 B | One manifest |
+| Claim (`c2pa.claim.v2`) | 377 B | `alg`, `claim_generator_info` ("Google C2PA SDK for Android" and a version), `instanceID`, `signature`, two created assertions; no gathered assertions or ingredients |
+| Assertions | 243 B + 164 B | `c2pa.hash.data`; `c2pa.actions.v2` with one action: `c2pa.created`, "Created by Pixel Camera.", digital source type `computationalCapture`. Neither is salted |
+| Claim signature (`COSE_Sign1`) | 3,754 B | Protected header 1,528 B: `alg` ES256 and `x5chain` with the signer certificate (783 B) and the issuing CA (733 B). Unprotected header: `sigTst2` (2,037 B), `pad` (97 B), `pad2`. Signature 64 B. No stapled OCSP (`rVals`) |
+| Signer certificate TBS | 661 B | P-256 key; validity Aug 29 01:09:56 to Nov 26 01:09:55 2025 (the time stamp is 02:10:21 the same day); key usage digital signature and non-repudiation; EKU email protection and C2PA claim signing; `CA:FALSE`; an OCSP responder URL |
+| Time stamp | — | SHA-256 message imprint |
+
+**The hard binding excludes more than the manifest store.** `c2pa.hash.data` lists five exclusions: the EXIF segment (APP1, 11,574 B), the manifest store (APP11), and three XMP segments (APP1, about 74 KB in total). The EXIF holds make and model ("Google", "Pixel 10 Pro"), software, lens, capture time, and a GPS block. None of it is authenticated by the claim.
+
+
 
 - **P-256 is realistic for signer keys**, especially on devices (both Pixel photos and the ChatGPT image), so the current key-possession check fits them. RSA signer keys (PS256) are common among interim-list signers.
 - **CA signatures are where real deployments differ from the prototype.** The official list's CAs sign with P-384 (and RSA-4096, P-521); the interim list adds P-256 roots for four camera makers (whose issuing intermediates were not examined; no camera samples were available), plus P-384, P-521, RSA-4096, and Ed25519. Trust model A on real CAs needs P-384 + SHA-384 and RSA verification in-circuit ([E1](README.md#e1-cost-of-reality-p-384-sha-384-and-rsa-in-circuit)).

@@ -464,6 +464,8 @@ Setup now also records a hash of the `.r1cs` alongside the keys, and setup and t
 
 #### E2a. Third-party proof statement and privacy design
 
+**Status: proposed** in [THIRD-PARTY-STATEMENT.md](THIRD-PARTY-STATEMENT.md), with defaults and decisions for review.
+
 Decisions D6 and D7, specified before any circuit work, as a design document with a table of guarantees. It defines the complete connection the proof must establish, trusted issuer → authorized signer → original COSE signature → original claim → asset binding → anonymized output, including:
 
 - the signed bytes: COSE's `Sig_structure`, whose protected header contains `x5chain` and thus the signer's certificate (a private input to the hash);

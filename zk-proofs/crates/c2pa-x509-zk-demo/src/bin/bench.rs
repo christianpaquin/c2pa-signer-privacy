@@ -121,7 +121,8 @@ fn main() -> Result<()> {
 /// Create the run's work directory exclusively. A requested directory must
 /// not exist (its parent is created if needed); otherwise a new uniquely named
 /// directory is created under `default_parent`. The run owns, and may later
-/// delete, only the directory returned here.
+/// delete, only the directory returned here, as a resolved path (no symlinks
+/// or `..`), so it can be compared with other resolved paths.
 fn create_workspace(requested: Option<&Path>, default_parent: &Path) -> Result<PathBuf> {
     if let Some(dir) = requested {
         let dir = std::path::absolute(dir)?;
@@ -135,7 +136,7 @@ fn create_workspace(requested: Option<&Path>, default_parent: &Path) -> Result<P
                 anyhow!("failed to create {}: {e}", dir.display())
             }
         })?;
-        return Ok(dir);
+        return Ok(std::fs::canonicalize(&dir)?);
     }
     let parent = std::path::absolute(default_parent)?;
     std::fs::create_dir_all(&parent)?;
@@ -143,7 +144,7 @@ fn create_workspace(requested: Option<&Path>, default_parent: &Path) -> Result<P
     for attempt in 0..1000 {
         let dir = parent.join(format!("run-{stamp}-{}-{attempt}", std::process::id()));
         match std::fs::create_dir(&dir) {
-            Ok(()) => return Ok(dir),
+            Ok(()) => return Ok(std::fs::canonicalize(&dir)?),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => bail!("failed to create {}: {e}", dir.display()),
         }
@@ -151,11 +152,39 @@ fn create_workspace(requested: Option<&Path>, default_parent: &Path) -> Result<P
     bail!("could not create a unique work directory under {}", parent.display())
 }
 
-/// The output file must not be inside the work directory, which may be deleted.
+/// Where writing to `out` would actually put the file: its directory resolved
+/// (symlinks and `..`), and, if `out` already exists as a symlink, the file it
+/// points to. Fails if that cannot be established: a missing directory, a
+/// dangling symlink, a directory, or a path that does not name a file.
+fn resolve_output(out: &Path) -> Result<PathBuf> {
+    let out = std::path::absolute(out)?;
+    let (Some(parent), Some(name)) = (out.parent(), out.file_name()) else {
+        bail!("--out {} does not name a file", out.display());
+    };
+    let parent = std::fs::canonicalize(parent).with_context(|| format!("--out directory {} must exist", parent.display()))?;
+    let dest = parent.join(name);
+    match std::fs::symlink_metadata(&dest) {
+        Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(&dest)
+            .with_context(|| format!("--out {} is a symlink whose target cannot be resolved", dest.display())),
+        Ok(m) if m.is_dir() => bail!("--out {} is a directory", dest.display()),
+        Ok(_) => Ok(dest),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(dest),
+        Err(e) => Err(e).with_context(|| format!("cannot inspect --out {}", dest.display())),
+    }
+}
+
+/// The output file must not resolve to a location inside the work directory
+/// (a resolved path from `create_workspace`), which may be deleted.
 fn check_output_location(out: Option<&Path>, work_dir: &Path) -> Result<()> {
     if let Some(out) = out {
-        if std::path::absolute(out)?.starts_with(work_dir) {
-            bail!("--out {} is inside the work directory {}, which is removed after the run", out.display(), work_dir.display());
+        let dest = resolve_output(out)?;
+        if dest.starts_with(work_dir) {
+            bail!(
+                "--out {} resolves to {}, inside the work directory {}, which is removed after the run",
+                out.display(),
+                dest.display(),
+                work_dir.display()
+            );
         }
     }
     Ok(())
@@ -453,6 +482,12 @@ fn run(work_dir: Option<PathBuf>, circuits_dir: &Path, reuse_build: bool, keep: 
     let record = measure(&exe, &zk_root, &work_dir, &circuits_dir, reuse_build, environment)?;
 
     let text = serde_json::to_string_pretty(&record)?;
+    // Check again: the output path may have changed during the run. On
+    // failure, print the record and keep the work directory.
+    if let Err(e) = check_output_location(out.as_deref(), &work_dir) {
+        println!("{text}");
+        return Err(e.context(format!("record printed instead; work directory kept at {}", work_dir.display())));
+    }
     match &out {
         Some(path) => std::fs::write(path, text + "\n")?,
         None => println!("{text}"),
@@ -589,7 +624,7 @@ mod tests {
     fn requested_work_dir_collision_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("run");
-        assert_eq!(create_workspace(Some(&dir), tmp.path()).unwrap(), std::path::absolute(&dir).unwrap());
+        assert_eq!(create_workspace(Some(&dir), tmp.path()).unwrap(), std::fs::canonicalize(&dir).unwrap());
         assert!(create_workspace(Some(&dir), tmp.path()).is_err());
     }
 
@@ -611,6 +646,55 @@ mod tests {
         assert!(check_output_location(Some(&work.join("sub/results.json")), &work).is_err());
         assert!(check_output_location(Some(&tmp.path().join("results.json")), &work).is_ok());
         assert!(check_output_location(None, &work).is_ok());
+    }
+
+    /// Paths that look outside the work directory but write inside it.
+    #[test]
+    fn output_aliases_of_the_work_dir_are_refused() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let work = create_workspace(Some(&tmp.path().join("run")), tmp.path()).unwrap();
+        std::fs::create_dir(tmp.path().join("outside")).unwrap();
+        symlink(&work, tmp.path().join("alias")).unwrap();
+        // An existing file symlink, and a dangling one, pointing into the work directory.
+        std::fs::write(work.join("existing.json"), "").unwrap();
+        symlink(work.join("existing.json"), tmp.path().join("link.json")).unwrap();
+        symlink(work.join("new.json"), tmp.path().join("dangling.json")).unwrap();
+
+        for out in ["alias/results.json", "outside/../run/results.json", "run/./results.json", "link.json", "dangling.json"] {
+            assert!(check_output_location(Some(&tmp.path().join(out)), &work).is_err(), "{out} accepted");
+        }
+        // Paths whose destination cannot be established.
+        for out in ["missing/results.json", "outside", "outside/.."] {
+            assert!(check_output_location(Some(&tmp.path().join(out)), &work).is_err(), "{out} accepted");
+        }
+        assert!(check_output_location(Some(&tmp.path().join("outside/results.json")), &work).is_ok());
+        assert!(check_output_location(Some(&tmp.path().join("outside/../results.json")), &work).is_ok());
+    }
+
+    /// A work directory requested through a symlinked parent is compared by its real location.
+    #[test]
+    fn work_dir_requested_through_a_symlink_is_resolved() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("real"), tmp.path().join("via")).unwrap();
+        let work = create_workspace(Some(&tmp.path().join("via/run")), tmp.path()).unwrap();
+        assert_eq!(work, std::fs::canonicalize(tmp.path().join("real/run")).unwrap());
+        assert!(check_output_location(Some(&tmp.path().join("real/run/results.json")), &work).is_err());
+        assert!(check_output_location(Some(&tmp.path().join("via/run/results.json")), &work).is_err());
+    }
+
+    /// An accepted output survives cleanup of the work directory.
+    #[test]
+    fn accepted_output_survives_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = create_workspace(None, tmp.path()).unwrap();
+        std::fs::create_dir(tmp.path().join("outside")).unwrap();
+        let out = tmp.path().join("outside/../results.json");
+        check_output_location(Some(&out), &work).unwrap();
+        std::fs::write(&out, "record").unwrap();
+        finish_workspace(&work, false).unwrap();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "record");
     }
 
     #[test]

@@ -382,7 +382,7 @@ cargo build --release
 ./target/release/c2pa-x509-zk-bench run --out bench/results/<date>-<variant>.json
 # --reuse-build links circuits/build's compiled circuit instead of compiling (compile is then not measured)
 # --keep keeps the work directory (circuit, keys, witness); by default it is removed
-# --work-dir DIR uses a new directory DIR (refused if it exists); --out may not point inside it
+# --work-dir DIR uses a new directory DIR (refused if it exists); --out must resolve (through symlinks and ..) outside it
 ```
 
 Every phase runs as a separate process, so its wall time and peak memory (`wait4`'s peak RSS for that process) are its own; steps within a phase, such as loading the proving key or serializing the witness, are timed separately so no cost falls between phases. Phases are grouped into categories, and the record carries their totals:

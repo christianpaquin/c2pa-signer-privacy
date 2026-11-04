@@ -551,6 +551,8 @@ async fn setup_build_manifest_matches_the_written_keys() {
     assert_eq!(manifest.circuit, "assert_one");
     assert_eq!(manifest.r1cs_sha256, file_sha256(&paths.r1cs).unwrap());
     assert_eq!(manifest.verifying_key_sha256, file_sha256(&paths.verifying_key).unwrap());
+    assert_eq!(manifest.proving_key_sha256, Some(file_sha256(&paths.proving_key).unwrap()));
+    assert_eq!(manifest.proving_key_encoding, Some(c2pa_x509_zk_demo::proving_key::Encoding::Compressed));
     assert!(paths.keys_match_circuit().unwrap());
 }
 

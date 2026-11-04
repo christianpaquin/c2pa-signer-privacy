@@ -41,6 +41,8 @@ ciborium = "0.2"
 ark-circom = "0.5"
 ark-std = "0.5"
 ark-bn254 = "0.5"
+ark-ec = "0.5"
+ark-ff = "0.5"
 ark-groth16 = "0.5"
 ark-relations = "0.5"
 ark-serialize = "0.5"
@@ -50,8 +52,9 @@ ark-crypto-primitives = { version = "0.5", features = ["snark"] }
 wasmer = { version = "4", default-features = false, features = ["sys", "cranelift"] }
 num-traits = "0.2"
 
-# Benchmark harness (per-process resource usage)
+# Benchmark harness (per-process resource usage) and parallel key loading
 libc = "0.2"
+rayon = "1"
 
 # Testing
 tempfile = "3.10"

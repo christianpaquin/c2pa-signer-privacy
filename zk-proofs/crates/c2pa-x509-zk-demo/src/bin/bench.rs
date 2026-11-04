@@ -27,8 +27,14 @@
 //! `--reuse-build`, links) the circuit there and generates its own keys,
 //! leaving circuits/build untouched.
 //!
+//! `--proving-key CONFIG` selects how setup writes the proving key and the
+//! prove phase loads it (default: compressed, fully checked by arkworks, as
+//! the prover does). `c2pa-x509-zk-bench pk-load` compares those
+//! configurations on their own (see bench/pk_load.rs).
+//!
 //! Usage:
-//!   c2pa-x509-zk-bench run [--reuse-build] [--keep] [--work-dir NEW_DIR] [--out results.json]
+//!   c2pa-x509-zk-bench run [--reuse-build] [--keep] [--work-dir NEW_DIR] [--out results.json] [--proving-key CONFIG]
+//!   c2pa-x509-zk-bench pk-load [--key KEY] [--reps N] [--only CONFIG]... [--keep] [--work-dir NEW_DIR] [--out results.json]
 //!
 //! Peak memory comes from the child's ru_maxrss, in KiB on Linux.
 
@@ -41,11 +47,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
+#[path = "bench/pk_load.rs"]
+mod pk_load;
+
 use c2pa_x509_zk_demo::{
     check_witness, circuit, circuit_builder, compute_manifest_stripped_asset_digest, compute_witness,
-    extract_issuer_dn, issuing_path_for, load_proving_key, load_r1cs, load_verifying_key,
+    extract_issuer_dn, issuing_path_for, load_r1cs, load_verifying_key,
     manifest::{extract_manifest_data, rewrite_manifest_with_zk_proof},
-    native_setup, prepare_verifying_key, prove_circuit, read_witness, spki_key_id, verify_proof_prepared,
+    native_setup_with, prepare_verifying_key, prove_circuit, read_witness, spki_key_id, verify_proof_prepared,
     write_witness, CircuitInputs, NativeCircuitPaths, NativeProof, TrustList, X509ZkSignerProofAssertion,
 };
 
@@ -94,6 +103,30 @@ enum Cmd {
         /// Write the JSON record here (default: stdout); must be outside the work directory
         #[arg(long)]
         out: Option<PathBuf>,
+        /// How setup writes the proving key and the prove phase loads it (see `pk-load`)
+        #[arg(long, default_value = pk_load::CURRENT)]
+        proving_key: String,
+    },
+    /// Measure loading the proving key in each encoding, loader, and level of checking
+    PkLoad {
+        /// A compressed proving key written by setup
+        #[arg(long, default_value = "circuits/build/x509_issue_and_possession_native.pk")]
+        key: PathBuf,
+        /// Work directory to create; must not exist (default: a new directory under target/bench)
+        #[arg(long)]
+        work_dir: Option<PathBuf>,
+        /// Loads per configuration; the first is cold (key evicted from the page cache)
+        #[arg(long, default_value_t = 2)]
+        reps: usize,
+        /// Only these configurations (default: all)
+        #[arg(long)]
+        only: Vec<String>,
+        /// Keep the work directory (converted keys) after the run
+        #[arg(long)]
+        keep: bool,
+        /// Write the JSON record here (default: stdout); must be outside the work directory
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Internal: run one phase in this process (used by `run`)
     #[command(hide = true)]
@@ -103,16 +136,36 @@ enum Cmd {
         work_dir: PathBuf,
         #[arg(long)]
         zk_root: PathBuf,
+        #[arg(long, default_value = pk_load::CURRENT)]
+        proving_key: String,
+    },
+    /// Internal: run one step of `pk-load` in this process
+    #[command(hide = true)]
+    PkPhase {
+        name: String,
+        #[arg(long)]
+        work_dir: PathBuf,
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long, default_value = pk_load::CURRENT)]
+        config: String,
+        #[arg(long)]
+        cold: bool,
     },
 }
 
 fn main() -> Result<()> {
     match Args::parse().command {
-        Cmd::Run { work_dir, circuits_dir, reuse_build, keep, out } => run(work_dir, &circuits_dir, reuse_build, keep, out),
-        Cmd::Phase { name, work_dir, zk_root } => {
-            // wasmer (witness generation) needs a Tokio runtime.
-            tokio::runtime::Runtime::new()?.block_on(async { phase(&name, &work_dir, &zk_root) })
+        Cmd::Run { work_dir, circuits_dir, reuse_build, keep, out, proving_key } => {
+            run(work_dir, &circuits_dir, reuse_build, keep, out, pk_load::config(&proving_key)?)
         }
+        Cmd::PkLoad { key, work_dir, reps, only, keep, out } => pk_load::pk_load(&key, work_dir, reps, &only, keep, out),
+        Cmd::Phase { name, work_dir, zk_root, proving_key } => {
+            let proving_key = pk_load::config(&proving_key)?;
+            // wasmer (witness generation) needs a Tokio runtime.
+            tokio::runtime::Runtime::new()?.block_on(async { phase(&name, &work_dir, &zk_root, proving_key) })
+        }
+        Cmd::PkPhase { name, work_dir, key, config, cold } => pk_load::pk_phase(&name, &work_dir, &key, &config, cold),
     }
 }
 
@@ -223,7 +276,7 @@ fn b64(bytes: &[u8]) -> String {
 }
 
 /// One phase, run inside a subprocess. Prints a `BENCH-RESULT` JSON line.
-fn phase(name: &str, work_dir: &Path, zk_root: &Path) -> Result<()> {
+fn phase(name: &str, work_dir: &Path, zk_root: &Path, proving_key: pk_load::PkConfig) -> Result<()> {
     let paths = paths(work_dir);
     let pki = work_dir.join("pki");
     let signed = work_dir.join("signed.png");
@@ -249,7 +302,7 @@ fn phase(name: &str, work_dir: &Path, zk_root: &Path) -> Result<()> {
             })?;
         }
         "setup" => {
-            timed(&mut steps, "setup", || native_setup(&paths))?;
+            timed(&mut steps, "setup", || native_setup_with(&paths, proving_key.encoding))?;
             data.insert("proving_key_bytes".into(), json!(std::fs::metadata(&paths.proving_key)?.len()));
             data.insert("verifying_key_bytes".into(), json!(std::fs::metadata(&paths.verifying_key)?.len()));
         }
@@ -292,7 +345,8 @@ fn phase(name: &str, work_dir: &Path, zk_root: &Path) -> Result<()> {
         "prove" => {
             let r1cs = timed(&mut steps, "load_r1cs", || load_r1cs(&paths.r1cs))?;
             let witness = timed(&mut steps, "read_witness", || read_witness(&work_dir.join("witness.bin")))?;
-            let pk = timed(&mut steps, "load_proving_key", || load_proving_key(&paths.proving_key))?;
+            let build = paths.read_build_manifest()?.ok_or_else(|| anyhow!("setup wrote no build manifest"))?;
+            let pk = pk_load::load_timed(proving_key, &paths.proving_key, build.proving_key_sha256.as_deref(), &mut steps)?;
             let circuit = ark_circom::CircomCircuit { r1cs, witness: Some(witness) };
             let proof = timed(&mut steps, "prove", || prove_circuit(circuit, &pk))?;
             timed(&mut steps, "write_proof", || Ok(std::fs::write(work_dir.join("proof.b64"), proof.to_base64()?)?))?;
@@ -465,7 +519,7 @@ fn environment(zk_root: &Path) -> Value {
 
 // ---- The run ----------------------------------------------------------------
 
-fn run(work_dir: Option<PathBuf>, circuits_dir: &Path, reuse_build: bool, keep: bool, out: Option<PathBuf>) -> Result<()> {
+fn run(work_dir: Option<PathBuf>, circuits_dir: &Path, reuse_build: bool, keep: bool, out: Option<PathBuf>, proving_key: pk_load::PkConfig) -> Result<()> {
     let zk_root = std::env::current_dir()?;
     let exe = std::env::current_exe()?;
     let circuits_dir = std::fs::canonicalize(circuits_dir)?;
@@ -479,7 +533,7 @@ fn run(work_dir: Option<PathBuf>, circuits_dir: &Path, reuse_build: bool, keep: 
     eprintln!("Work directory: {}", work_dir.display());
     // Captured before any phase runs, so later edits to the tree are not attributed to this run.
     let environment = environment(&zk_root);
-    let record = measure(&exe, &zk_root, &work_dir, &circuits_dir, reuse_build, environment)?;
+    let record = measure(&exe, &zk_root, &work_dir, &circuits_dir, reuse_build, environment, proving_key)?;
 
     let text = serde_json::to_string_pretty(&record)?;
     // Check again: the output path may have changed during the run. On
@@ -504,12 +558,20 @@ fn run(work_dir: Option<PathBuf>, circuits_dir: &Path, reuse_build: bool, keep: 
     finish_workspace(&work_dir, keep)
 }
 
-fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, circuits_dir: &Path, reuse_build: bool, environment: Value) -> Result<Value> {
+fn measure(
+    exe: &Path,
+    zk_root: &Path,
+    work_dir: &Path,
+    circuits_dir: &Path,
+    reuse_build: bool,
+    environment: Value,
+    proving_key: pk_load::PkConfig,
+) -> Result<Value> {
     let build = work_dir.join("build");
     std::fs::create_dir(&build)?;
     let phase_cmd = |name: &str| {
         let mut cmd = Command::new(exe);
-        cmd.args(["phase", name, "--work-dir"]).arg(work_dir).arg("--zk-root").arg(zk_root);
+        cmd.args(["phase", name, "--work-dir"]).arg(work_dir).arg("--zk-root").arg(zk_root).args(["--proving-key", proving_key.name]);
         cmd
     };
     let mut phases = Vec::new();
@@ -562,6 +624,7 @@ fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, circuits_dir: &Path, reu
             "proof_system": "Groth16 (ark-groth16, ark-circom witness generation in WASM)",
             "curve": "BN254",
             "circuit": CIRCUIT,
+            "proving_key": proving_key.name,
         },
         "statement": STATEMENT,
         "accounting": ACCOUNTING,

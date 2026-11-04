@@ -1,0 +1,500 @@
+{
+  "schema": "c2pa-x509-zk-pk-load/1",
+  "circuit": "x509_issue_and_possession",
+  "curve": "BN254",
+  "input_key": "/home/cpaquin/dev/c2pa/c2pa-signer-privacy/zk-proofs/circuits/build/x509_issue_and_possession_native.pk",
+  "method": "Each load runs in its own process (wall time and peak RSS from wait4). The first repetition of each configuration follows posix_fadvise(DONTNEED) on the key file (residency before the load is recorded via mincore); later repetitions are warm. Under WSL2 the Windows host may still cache the virtual disk, so 'cold' means not in the Linux page cache. point_check: full = on the curve and in the prime-order subgroup (arkworks Validate::Yes), on-curve skips G2's subgroup check, none skips both (compressed points are on the curve by construction). sha256_checked: the file's SHA-256 is compared with the value recorded when it was written, before parsing.",
+  "environment": {
+    "cpu": "13th Gen Intel(R) Core(TM) i7-13800H",
+    "logical_cpus": 20,
+    "memory": "32774804 kB",
+    "os": "Ubuntu 24.04.2 LTS",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "wsl": true,
+    "rustc": "rustc 1.93.0 (254b59607 2026-01-19)",
+    "circom": "circom compiler 2.1.6",
+    "git_commit": "31a88aaf2661ebbb71d2888b5006e434c4185ece",
+    "git_changed_files": [],
+    "build_profile": "release"
+  },
+  "convert": {
+    "wall_s": 120.946434637,
+    "peak_rss_mib": 2883.140625,
+    "steps": {
+      "load_input_parallel_full_s": 108.171128242,
+      "write_compressed_s": 3.013831094,
+      "sha256_compressed_s": 0.945416166,
+      "write_uncompressed_s": 5.827438992,
+      "sha256_uncompressed_s": 1.793103093
+    },
+    "data": {
+      "compressed_bytes": 1026490480,
+      "compressed_sha256": "4cea814b5500e082df42e7792b8385c75de622cf225e3413a33f17a931e589e0",
+      "uncompressed_bytes": 2052980912,
+      "uncompressed_sha256": "99916ec1c60591839a5eab1b09922057da08485bdf1da7d830413a55b3f322ca",
+      "compressed_copy_matches_input": true,
+      "points": {
+        "g1": 22602136,
+        "g2": 4737845,
+        "a_query": 4737842,
+        "b_g1_query": 4737842,
+        "b_g2_query": 4737842,
+        "h_query": 8388607,
+        "l_query": 4737822,
+        "b_g2_query_nonzero": 4137466
+      }
+    }
+  },
+  "loads": [
+    {
+      "config": "compressed-arkworks-full",
+      "encoding": "compressed",
+      "loader": "arkworks",
+      "point_check": "full",
+      "sha256_checked": false,
+      "cache": "cold",
+      "wall_s": 369.464463239,
+      "peak_rss_mib": 2175.2734375,
+      "steps": {
+        "load_proving_key_s": 369.290612861
+      },
+      "data": {
+        "resident_before_load": 0.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "compressed-arkworks-full",
+      "encoding": "compressed",
+      "loader": "arkworks",
+      "point_check": "full",
+      "sha256_checked": false,
+      "cache": "warm",
+      "wall_s": 364.910407951,
+      "peak_rss_mib": 2175.4921875,
+      "steps": {
+        "load_proving_key_s": 364.788690682
+      },
+      "data": {
+        "resident_before_load": 1.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "compressed-arkworks-none",
+      "encoding": "compressed",
+      "loader": "arkworks",
+      "point_check": "none",
+      "sha256_checked": false,
+      "cache": "cold",
+      "wall_s": 289.372412986,
+      "peak_rss_mib": 2174.87109375,
+      "steps": {
+        "load_proving_key_s": 289.204946022
+      },
+      "data": {
+        "resident_before_load": 0.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "compressed-arkworks-none",
+      "encoding": "compressed",
+      "loader": "arkworks",
+      "point_check": "none",
+      "sha256_checked": false,
+      "cache": "warm",
+      "wall_s": 310.40440168,
+      "peak_rss_mib": 2174.51171875,
+      "steps": {
+        "load_proving_key_s": 310.20856453
+      },
+      "data": {
+        "resident_before_load": 1.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "compressed-parallel-full",
+      "encoding": "compressed",
+      "loader": "parallel",
+      "point_check": "full",
+      "sha256_checked": false,
+      "cache": "cold",
+      "wall_s": 124.021482006,
+      "peak_rss_mib": 2838.26171875,
+      "steps": {
+        "load_proving_key_s": 123.822293122
+      },
+      "data": {
+        "resident_before_load": 0.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "compressed-parallel-full",
+      "encoding": "compressed",
+      "loader": "parallel",
+      "point_check": "full",
+      "sha256_checked": false,
+      "cache": "warm",
+      "wall_s": 126.726798619,
+      "peak_rss_mib": 2885.1484375,
+      "steps": {
+        "load_proving_key_s": 126.570663438
+      },
+      "data": {
+        "resident_before_load": 1.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "compressed-parallel-none",
+      "encoding": "compressed",
+      "loader": "parallel",
+      "point_check": "none",
+      "sha256_checked": false,
+      "cache": "cold",
+      "wall_s": 59.772403454,
+      "peak_rss_mib": 2948.88671875,
+      "steps": {
+        "load_proving_key_s": 59.569460363
+      },
+      "data": {
+        "resident_before_load": 0.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "compressed-parallel-none",
+      "encoding": "compressed",
+      "loader": "parallel",
+      "point_check": "none",
+      "sha256_checked": false,
+      "cache": "warm",
+      "wall_s": 57.82571547,
+      "peak_rss_mib": 2930.1171875,
+      "steps": {
+        "load_proving_key_s": 57.686680655
+      },
+      "data": {
+        "resident_before_load": 1.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "uncompressed-arkworks-full",
+      "encoding": "uncompressed",
+      "loader": "arkworks",
+      "point_check": "full",
+      "sha256_checked": false,
+      "cache": "cold",
+      "wall_s": 95.223993004,
+      "peak_rss_mib": 2175.6328125,
+      "steps": {
+        "load_proving_key_s": 94.967308703
+      },
+      "data": {
+        "resident_before_load": 0.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "uncompressed-arkworks-full",
+      "encoding": "uncompressed",
+      "loader": "arkworks",
+      "point_check": "full",
+      "sha256_checked": false,
+      "cache": "warm",
+      "wall_s": 109.003914502,
+      "peak_rss_mib": 2175.375,
+      "steps": {
+        "load_proving_key_s": 108.810951459
+      },
+      "data": {
+        "resident_before_load": 1.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "uncompressed-arkworks-none",
+      "encoding": "uncompressed",
+      "loader": "arkworks",
+      "point_check": "none",
+      "sha256_checked": false,
+      "cache": "cold",
+      "wall_s": 8.784809616,
+      "peak_rss_mib": 2174.46875,
+      "steps": {
+        "load_proving_key_s": 8.611115004
+      },
+      "data": {
+        "resident_before_load": 0.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "uncompressed-arkworks-none",
+      "encoding": "uncompressed",
+      "loader": "arkworks",
+      "point_check": "none",
+      "sha256_checked": false,
+      "cache": "warm",
+      "wall_s": 6.720613805,
+      "peak_rss_mib": 2174.21484375,
+      "steps": {
+        "load_proving_key_s": 6.498203039
+      },
+      "data": {
+        "resident_before_load": 1.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "uncompressed-arkworks-none-sha256",
+      "encoding": "uncompressed",
+      "loader": "arkworks",
+      "point_check": "none",
+      "sha256_checked": true,
+      "cache": "cold",
+      "wall_s": 9.867750614,
+      "peak_rss_mib": 2174.83203125,
+      "steps": {
+        "check_proving_key_sha256_s": 2.859169583,
+        "load_proving_key_s": 6.732651052
+      },
+      "data": {
+        "resident_before_load": 0.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "uncompressed-arkworks-none-sha256",
+      "encoding": "uncompressed",
+      "loader": "arkworks",
+      "point_check": "none",
+      "sha256_checked": true,
+      "cache": "warm",
+      "wall_s": 8.688369618,
+      "peak_rss_mib": 2174.578125,
+      "steps": {
+        "check_proving_key_sha256_s": 2.073893934,
+        "load_proving_key_s": 6.402961264
+      },
+      "data": {
+        "resident_before_load": 1.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "uncompressed-parallel-full",
+      "encoding": "uncompressed",
+      "loader": "parallel",
+      "point_check": "full",
+      "sha256_checked": false,
+      "cache": "cold",
+      "wall_s": 130.965000261,
+      "peak_rss_mib": 3079.8515625,
+      "steps": {
+        "load_proving_key_s": 130.692758183
+      },
+      "data": {
+        "resident_before_load": 0.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "uncompressed-parallel-full",
+      "encoding": "uncompressed",
+      "loader": "parallel",
+      "point_check": "full",
+      "sha256_checked": false,
+      "cache": "warm",
+      "wall_s": 139.163430959,
+      "peak_rss_mib": 3136.6328125,
+      "steps": {
+        "load_proving_key_s": 138.864108829
+      },
+      "data": {
+        "resident_before_load": 1.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "uncompressed-parallel-full-sha256",
+      "encoding": "uncompressed",
+      "loader": "parallel",
+      "point_check": "full",
+      "sha256_checked": true,
+      "cache": "cold",
+      "wall_s": 109.096556378,
+      "peak_rss_mib": 3143.5703125,
+      "steps": {
+        "check_proving_key_sha256_s": 3.305688936,
+        "load_proving_key_s": 105.612534062
+      },
+      "data": {
+        "resident_before_load": 0.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "uncompressed-parallel-full-sha256",
+      "encoding": "uncompressed",
+      "loader": "parallel",
+      "point_check": "full",
+      "sha256_checked": true,
+      "cache": "warm",
+      "wall_s": 86.175611389,
+      "peak_rss_mib": 3047.65625,
+      "steps": {
+        "check_proving_key_sha256_s": 2.089999203,
+        "load_proving_key_s": 83.930220809
+      },
+      "data": {
+        "resident_before_load": 1.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "uncompressed-parallel-on-curve",
+      "encoding": "uncompressed",
+      "loader": "parallel",
+      "point_check": "oncurve",
+      "sha256_checked": false,
+      "cache": "cold",
+      "wall_s": 6.3798328269999995,
+      "peak_rss_mib": 3249.9140625,
+      "steps": {
+        "load_proving_key_s": 6.209432798
+      },
+      "data": {
+        "resident_before_load": 0.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "uncompressed-parallel-on-curve",
+      "encoding": "uncompressed",
+      "loader": "parallel",
+      "point_check": "oncurve",
+      "sha256_checked": false,
+      "cache": "warm",
+      "wall_s": 3.6849221,
+      "peak_rss_mib": 3107.13671875,
+      "steps": {
+        "load_proving_key_s": 3.541789927
+      },
+      "data": {
+        "resident_before_load": 1.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "uncompressed-parallel-on-curve-sha256",
+      "encoding": "uncompressed",
+      "loader": "parallel",
+      "point_check": "oncurve",
+      "sha256_checked": true,
+      "cache": "cold",
+      "wall_s": 7.293891897,
+      "peak_rss_mib": 3257.30078125,
+      "steps": {
+        "check_proving_key_sha256_s": 2.375884577,
+        "load_proving_key_s": 4.770037435
+      },
+      "data": {
+        "resident_before_load": 0.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "uncompressed-parallel-on-curve-sha256",
+      "encoding": "uncompressed",
+      "loader": "parallel",
+      "point_check": "oncurve",
+      "sha256_checked": true,
+      "cache": "warm",
+      "wall_s": 6.708537271,
+      "peak_rss_mib": 3126.9375,
+      "steps": {
+        "check_proving_key_sha256_s": 1.827315631,
+        "load_proving_key_s": 4.607204434
+      },
+      "data": {
+        "resident_before_load": 1.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "uncompressed-parallel-none",
+      "encoding": "uncompressed",
+      "loader": "parallel",
+      "point_check": "none",
+      "sha256_checked": false,
+      "cache": "cold",
+      "wall_s": 4.987871389,
+      "peak_rss_mib": 3112.5859375,
+      "steps": {
+        "load_proving_key_s": 4.832951844
+      },
+      "data": {
+        "resident_before_load": 0.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "uncompressed-parallel-none",
+      "encoding": "uncompressed",
+      "loader": "parallel",
+      "point_check": "none",
+      "sha256_checked": false,
+      "cache": "warm",
+      "wall_s": 5.833818404,
+      "peak_rss_mib": 3297.72265625,
+      "steps": {
+        "load_proving_key_s": 5.590289801
+      },
+      "data": {
+        "resident_before_load": 1.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "uncompressed-parallel-none-sha256",
+      "encoding": "uncompressed",
+      "loader": "parallel",
+      "point_check": "none",
+      "sha256_checked": true,
+      "cache": "cold",
+      "wall_s": 6.914167992,
+      "peak_rss_mib": 3099.19140625,
+      "steps": {
+        "check_proving_key_sha256_s": 2.781254809,
+        "load_proving_key_s": 3.876400758
+      },
+      "data": {
+        "resident_before_load": 0.0,
+        "a_query": 4737842
+      }
+    },
+    {
+      "config": "uncompressed-parallel-none-sha256",
+      "encoding": "uncompressed",
+      "loader": "parallel",
+      "point_check": "none",
+      "sha256_checked": true,
+      "cache": "warm",
+      "wall_s": 5.227760272,
+      "peak_rss_mib": 3142.484375,
+      "steps": {
+        "check_proving_key_sha256_s": 1.644512425,
+        "load_proving_key_s": 3.42558751
+      },
+      "data": {
+        "resident_before_load": 1.0,
+        "a_query": 4737842
+      }
+    }
+  ]
+}

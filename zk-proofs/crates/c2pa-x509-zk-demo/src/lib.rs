@@ -16,6 +16,7 @@ pub mod jumbf;
 pub mod local_tsa;
 pub mod manifest;
 pub mod original_signature;
+pub mod proving_key;
 pub mod trust;
 pub mod types;
 
@@ -29,7 +30,7 @@ pub use circuit::{
     proof_inputs_to_circuit,
 };
 pub use circuit_native::{
-    BuildManifest, NativeCircuitPaths, NativeProof, ProveOptions, WitnessRejected, native_setup, file_sha256,
+    BuildManifest, NativeCircuitPaths, NativeProof, ProveOptions, WitnessRejected, native_setup, native_setup_with, file_sha256,
     check_witness, circuit_builder, compute_checked_witness, compute_witness, generate_proof_native, generate_proof_native_with,
     load_r1cs, load_proving_key, load_verifying_key, prepare_verifying_key, prove_circuit, read_witness,
     verify_proof_native, verify_proof_prepared, write_witness,

@@ -98,6 +98,11 @@ pub struct BuildManifest {
     pub r1cs_sha256: String,
     /// Hex SHA-256 of the serialized verifying key
     pub verifying_key_sha256: String,
+    /// Hex SHA-256 of the serialized proving key (absent in manifests from
+    /// before it was recorded). Lets a prover check the key file before
+    /// parsing it; see `proving_key::check_file_sha256`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proving_key_sha256: Option<String>,
 }
 
 impl NativeCircuitPaths {
@@ -162,8 +167,15 @@ pub fn file_sha256(path: &Path) -> Result<String> {
 
 /// Run the Groth16 trusted setup using native Rust (much faster than snarkjs)
 ///
-/// This generates proving and verifying keys and saves them to disk.
+/// This generates proving and verifying keys and saves them to disk, the
+/// proving key compressed.
 pub fn native_setup(paths: &NativeCircuitPaths) -> Result<()> {
+    native_setup_with(paths, crate::proving_key::Encoding::Compressed)
+}
+
+/// `native_setup`, writing the proving key in the given encoding (the
+/// benchmark compares encodings; the prover loads compressed keys).
+pub fn native_setup_with(paths: &NativeCircuitPaths, pk_encoding: crate::proving_key::Encoding) -> Result<()> {
     use std::fs::File;
     use std::io::BufWriter;
     
@@ -193,13 +205,10 @@ pub fn native_setup(paths: &NativeCircuitPaths) -> Result<()> {
     let params = GrothBn::generate_random_parameters_with_reduction(circom, &mut rng)
         .map_err(|e| anyhow!("failed to generate parameters: {e}"))?;
     
-    // Save proving key
+    // Save proving key (flushed and synced)
     println!("Saving proving key to {:?}", paths.proving_key);
-    let pk_file = File::create(&paths.proving_key)?;
-    let mut pk_writer = BufWriter::new(pk_file);
-    params.serialize_compressed(&mut pk_writer)
-        .map_err(|e| anyhow!("failed to serialize proving key: {e}"))?;
-    
+    crate::proving_key::write_proving_key(&params, &paths.proving_key, pk_encoding)?;
+
     // Save verifying key
     println!("Saving verifying key to {:?}", paths.verifying_key);
     let vk_file = File::create(&paths.verifying_key)?;
@@ -207,9 +216,8 @@ pub fn native_setup(paths: &NativeCircuitPaths) -> Result<()> {
     params.vk.serialize_compressed(&mut vk_writer)
         .map_err(|e| anyhow!("failed to serialize verifying key: {e}"))?;
 
-    // Flush both keys to disk before hashing them for the build manifest.
+    // Flush the verifying key to disk before hashing both keys for the build manifest.
     use std::io::Write;
-    pk_writer.flush()?;
     vk_writer.flush()?;
 
     // Record which circuit these keys belong to
@@ -217,6 +225,7 @@ pub fn native_setup(paths: &NativeCircuitPaths) -> Result<()> {
         circuit: paths.circuit_name.clone(),
         r1cs_sha256: file_sha256(&paths.r1cs)?,
         verifying_key_sha256: file_sha256(&paths.verifying_key)?,
+        proving_key_sha256: Some(file_sha256(&paths.proving_key)?),
     };
     std::fs::write(&paths.build_manifest, serde_json::to_string_pretty(&manifest)?)?;
     

@@ -162,7 +162,7 @@ A self-reported date in the claim or metadata is never used as `t`.
 
 The public token's imprint is a hash over private data, so it reveals nothing by itself. But the TSA operator saw the same imprint when the signer's device requested the time stamp, and can match it to that request. For device-signed content, the CA and the TSA are often run by the same organization.
 
-- **Public token (adopted for E2b).** The threat model excludes the TSA operator: it may link an anonymized asset to the original time-stamp request. Cheap: one extra hash of `P` in the circuit (~1.0M constraints at the proposed limit).
+- **Public token (adopted for E2b).** The threat model excludes the TSA operator: it may link an anonymized asset to the original time-stamp request. Cheap: one extra hash of `P` in the circuit (~1.0M constraints at the size limit).
 - **Hidden token (measured later).** The circuit verifies the TSA's signature over the token, so neither the token nor its imprint is disclosed. It adds a signature verification with the TSA's algorithm (often P-384 or RSA; E1 measures the cost) plus parsing the token. Needed if the CA or TSA operator is in the threat model.
 
 ### Q8. Revocation

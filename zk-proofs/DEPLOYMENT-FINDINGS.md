@@ -70,6 +70,11 @@ What a third-party proof would have to hash, measured on the first Pixel photo b
 | Signer certificate TBS | 661 B | P-256 key; validity Aug 29 01:09:56 to Nov 26 01:09:55 2025 (the time stamp is 02:10:21 the same day); key usage digital signature and non-repudiation; EKU email protection and C2PA claim signing; `CA:FALSE`; an OCSP responder URL |
 | Time stamp | — | SHA-256 message imprint |
 
+**The exact signed structures** (checked by rebuilding them from the photo and verifying against its signature and time-stamp token; E2b's fixtures reproduce them):
+
+- The claim signature verifies, with the signer key, over `["Signature1", P, h'', claim]` (1,924 bytes), where `P` is the protected header's serialized bytes and `claim` the claim box's content.
+- The `sigTst2` token's message imprint is the SHA-256 of `["CounterSignature", P, h'', payload]` (1,618 bytes), where the payload is the signature byte string's CBOR serialization (header bytes included). This is a four-element array, as c2pa-rs builds it; neither the five-element form of RFC 9338 nor the raw signature as payload matches.
+
 **The hard binding excludes more than the manifest store.** `c2pa.hash.data` lists five exclusions: the EXIF segment (APP1, 11,574 B), the manifest store (APP11), and three XMP segments (APP1, about 74 KB in total). The EXIF holds make and model ("Google", "Pixel 10 Pro"), software, lens, capture time, and a GPS block. None of it is authenticated by the claim.
 
 

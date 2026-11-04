@@ -307,6 +307,8 @@ This generates the proving and verifying keys in `circuits/build/`.
 
 Both the root and the issuing CA are trust anchors, as on the C2PA trust list, where issuing CAs are often listed directly. The tests generate a fresh PKI for each run, so no certificates are committed.
 
+**Mirror profile** (for [E2b](#e2b-third-party-anonymization)). `./generate-test-pki.sh --mirror [OUT_DIR] [NAME]` mirrors a real device deployment on the official trust list instead: P-384 root and issuing CA signing with ECDSA-SHA384; a P-256 signer certificate with the extensions real ones carry (key usage `digitalSignature` and `nonRepudiation`, EKU email protection and C2PA claim signing, an OCSP and CA-issuers AIA); and a test time-stamp authority (`tsa-root`, `tsa` with the critical `timeStamping` EKU, and `tsa-trust-list.pem`). `c2pa-x509-zk-sign --tsa-cert tsa.pem --tsa-key tsa.key` then time-stamps the signature with a local TSA (`openssl ts`), which c2pa stores as `sigTst2`, as on real devices; `--claim-version 1` produces a legacy claim v1 asset instead, whose `sigTst` holds the TSA's whole response, as in older real assets. The result validates as Trusted in c2pa against the two trust lists (`tests/third_party_fixtures.rs`).
+
 Re-running the script replaces every key and certificate, so assets anonymized earlier no longer validate against the new trust list. When the signer certificate nears expiry, renew it instead with `./generate-test-pki.sh --renew-signer [OUT_DIR]`: it reissues the signer certificate for the same key and subject under the existing issuing CA, leaving the trust anchors untouched. The web UI creates a PKI when none exists and renews the signer this way before signing or anonymizing; verifying never changes the PKI.
 
 The circuit currently requires P-256 keys and ECDSA-SHA256 signatures throughout. Real C2PA CAs sign with P-384 or RSA (see [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md)); [E1](#e1-cost-of-reality-p-384-sha-384-and-rsa-in-circuit) measures what supporting them in-circuit would cost.
@@ -443,7 +445,7 @@ Done for both prototypes. The COSE structures previously could not be parsed by 
 
 Result: `c2patool` now displays BBS-signed assets and reports `algorithm.unsupported`, the correct outcome for a custom algorithm. ZK-anonymized assets at first still failed in `c2patool`'s default (validating) mode with "could not find signing certificate chain", because `c2pa-rs` treats a missing signing certificate as fatal; since F1 added the issuing chain to `x5chain`, they display too. See [H8](#h8-c2patool-support).
 
-Both prototypes' manifests also lack a `c2pa.created` action, which `c2patool` reports as `assertion.action.malformed`; to be fixed with [E2](#e2a-third-party-proof-statement-and-privacy-design).
+The ZK prototype's signer now adds a `c2pa.created` action (E2b fixtures), so its signed assets no longer report `assertion.action.malformed` in `c2patool`; the BBS prototype's manifests still lack one.
 
 #### Cheaper byte reads ✅
 
@@ -481,9 +483,13 @@ The signer-side mode gets the same treatment: it should bind to a claim rather t
 
 Standalone benchmarks of the primitives real deployments use, next to today's P-256 + SHA-256, prioritising **P-384 ECDSA with SHA-384**, which the official list's CAs and the documented real sample use; then RSA-2048 and RSA-4096 with PKCS#1 v1.5 and PSS (RSA CAs and PS256 signers), and optionally P-521. Independent of E2a, so it can run in parallel and show early whether real CAs are affordable in-circuit. Feeds the choice of proof system (E6).
 
+Status: the P-384/SHA-384 spike is measured in gnark ([FEASIBILITY.md](FEASIBILITY.md#e1-p-384-and-sha-384-primitives), [`experiments/e1-p384`](experiments/e1-p384/)). A CA signature over a 1,500-byte TBS costs 1.52M constraints with P-384 and SHA-384, 1.3× P-256 with SHA-256 in the same stack and 0.56× the current circom P-256 component, and proves in ~5 s with the proving key resident (a primitive, not comparable with the per-asset baseline); the hash dominates at real certificate sizes. RSA remains.
+
 #### E2b. Third-party anonymization
 
 Implement the statement specified in E2a: the circuit verifies the original COSE signature over the original `Sig_structure`, so no private key is needed. Compared with the signer-side mode on the axes of [R1](#r1-feasibility-matrix).
+
+Status: **fixtures done**. The [mirror PKI profile](#test-pki-and-trust-lists) and a local test TSA produce standard, trusted, time-stamped assets with the structure of real device assets. `jumbf.rs` locates the active manifest's claim and claim signature (with its position, for the in-place replacement), and `original_signature.rs` rebuilds the exact bytes the circuit must hash: the claim signature's `Sig_structure` and the time stamp's countersignature structure, both confirmed on a real device-signed asset. Next: the circuit and prover (pending the choice of stack), then the anonymizer and verifier.
 
 #### E3. Trust model B: Merkle membership
 
@@ -499,7 +505,7 @@ Decision D5: in-circuit ECDSA (today) against a P-256 commitment with a Schnorr-
 
 #### E6. Proof systems
 
-Decision D2, guided by the measurements from F2, E1, and E2b, cheapest first: native (C++) witness generation for the current circuit; a PLONK-family prover on the same R1CS; then a rewrite in a second stack (gnark is the leading candidate, since it could also cover P-384 CAs; Halo2 and Longfellow ZK are alternatives).
+Decision D2, guided by the measurements from F2, E1, and E2b, cheapest first: native (C++) witness generation for the current circuit; a PLONK-family prover on the same R1CS; then a rewrite in a second stack (gnark is the leading candidate, since it could also cover P-384 CAs; Halo2 and Longfellow ZK are alternatives). Stacks are compared on equivalent full statements under the same accounting as the [benchmark harness](#benchmarks), reporting loading of keys and other artifacts from disk separately from operation with resident keys; primitive timings such as E1's are not comparable with per-asset figures.
 
 #### E7. Curve: BN254 vs BLS12-381
 

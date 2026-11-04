@@ -24,8 +24,8 @@ Designs target the official [C2PA trust list](https://github.com/c2pa-org/confor
 | D3 | Curve | Compare BN254 and BLS12-381 | [E7](README.md#e7-curve-bn254-vs-bls12-381) |
 | D4 | Where the issuing CA chain lives | **Decided:** in `x5chain`, without the signer's certificate | [F1](README.md#test-pki-and-trust-lists) |
 | D5 | How key possession is proved | Prototype and compare | [E5](README.md#e5-key-possession) |
-| D6 | Who anonymizes: signer-side or third-party | Statement **proposed** in [THIRD-PARTY-STATEMENT.md](THIRD-PARTY-STATEMENT.md), pending review; then prototype | [E2a](README.md#e2a-third-party-proof-statement-and-privacy-design), [E2b](README.md#e2b-third-party-anonymization) |
-| D7 | Time policy: when must the certificate have been valid, and on what evidence | **Proposed** in [THIRD-PARTY-STATEMENT.md](THIRD-PARTY-STATEMENT.md#q6-time-policy), pending review | [E2a](README.md#e2a-third-party-proof-statement-and-privacy-design) |
+| D6 | Who anonymizes: signer-side or third-party | Statement **adopted** in [THIRD-PARTY-STATEMENT.md](THIRD-PARTY-STATEMENT.md); being prototyped in E2b | [E2a](README.md#e2a-third-party-proof-statement-and-privacy-design), [E2b](README.md#e2b-third-party-anonymization) |
+| D7 | Time policy: when must the certificate have been valid, and on what evidence | **Adopted** in [THIRD-PARTY-STATEMENT.md](THIRD-PARTY-STATEMENT.md#q6-time-policy): a trusted time stamp is required | [E2a](README.md#e2a-third-party-proof-statement-and-privacy-design) |
 
 ## D1. Trust model: what the circuit proves about issuance
 
@@ -102,7 +102,7 @@ Whichever proof carries possession is the one that must bind to the claim. In th
 - **Signer-side** (current): the anonymizer re-signs the asset with the signer's private key, and the circuit verifies that fresh signature. Only the original signer can anonymize, and only while they hold the key.
 - **Third-party**: the circuit verifies the **original** COSE signature over the **original** claim, under a certificate chaining to the trust list. No private key is needed, so anyone holding the asset (a newsroom receiving it, for example) can anonymize it, and the proof covers the original claim and all its assertions.
 
-The statement is proposed in [THIRD-PARTY-STATEMENT.md](THIRD-PARTY-STATEMENT.md), including making signer-side mode use the same statement ([Q2](THIRD-PARTY-STATEMENT.md#q2-one-statement-for-both-modes)). What third-party mode must prove is a complete connection: trusted issuer → authorized signer → original COSE signature → original claim → asset binding → anonymized output. Points that make this more than "verify the signature over the claim":
+The statement is adopted in [THIRD-PARTY-STATEMENT.md](THIRD-PARTY-STATEMENT.md), including making signer-side mode use the same statement ([Q2](THIRD-PARTY-STATEMENT.md#q2-one-statement-for-both-modes)). What third-party mode must prove is a complete connection: trusted issuer → authorized signer → original COSE signature → original claim → asset binding → anonymized output. Points that make this more than "verify the signature over the claim":
 
 - COSE signs its `Sig_structure`, which includes the protected header. C2PA places `x5chain` in the protected header, so the signed bytes contain the signer's certificate: the circuit must hash them with the certificate as a private input.
 - The claim's hard binding (`c2pa.hash.data`) excludes the manifest's byte range. If the anonymized output carries a different manifest, the original binding no longer matches the output bytes; the statement must say whether the output keeps the original claim or the proof bridges the original binding to the new bytes.
@@ -134,4 +134,4 @@ Both are stored in the unprotected header; a manifest holds at most one time sta
 1. **Public token plus ZK binding:** verify the TSA's signature on the token off-circuit, and prove in ZK that the authenticated imprint corresponds to the original signed material. Cheaper, but leaves the fingerprint.
 2. **Hidden token:** verify the TSA evidence inside the proof as well, so no fingerprint is exposed, at the cost of another in-circuit signature verification and the imprint's hashing.
 
-A third option, time-stamping the anonymized output, proves existence at anonymization time only, not signing time. The proposed policy and threat model are in [THIRD-PARTY-STATEMENT.md](THIRD-PARTY-STATEMENT.md#q6-time-policy) (Q6, Q7). Revocation semantics ([H3](README.md#h3-revocation)) follow the same signing-time vs now distinction.
+A third option, time-stamping the anonymized output, proves existence at anonymization time only, not signing time. The adopted policy and threat model are in [THIRD-PARTY-STATEMENT.md](THIRD-PARTY-STATEMENT.md#q6-time-policy) (Q6, Q7). Revocation semantics ([H3](README.md#h3-revocation)) follow the same signing-time vs now distinction.

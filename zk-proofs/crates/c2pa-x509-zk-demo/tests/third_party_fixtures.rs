@@ -209,3 +209,81 @@ fn legacy_claim_v1_time_stamp_is_normalized_and_covers_the_claim() {
     assert!(imprint_matches_sha256(&info, &original.countersignature_structure(TimeStampVersion::V1)));
     assert!(!imprint_matches_sha256(&info, &original.countersignature_structure(TimeStampVersion::V2)));
 }
+
+/// The Go CLI (`gnark/cmd/c2pa-zk-gnark`), run with `go run` from `$C2PA_ZK_GO`
+/// or `go` on the path.
+fn gnark_cli(args: &[&std::ffi::OsStr]) -> std::process::Output {
+    let go = std::env::var_os("C2PA_ZK_GO").unwrap_or_else(|| "go".into());
+    std::process::Command::new(go)
+        .arg("run")
+        .arg("./cmd/c2pa-zk-gnark")
+        .args(args)
+        .current_dir(zk_root().join("gnark"))
+        .output()
+        .expect("failed to run go (set C2PA_ZK_GO to the go binary)")
+}
+
+/// The exported inputs of a real c2pa-signed asset satisfy the gnark
+/// statement at its default sizes, and tampered ones do not. Needs Go:
+/// `C2PA_ZK_GO=~/.local/go/bin/go cargo test --release --test third_party_fixtures -- --ignored`.
+#[test]
+#[ignore = "needs Go; compiles the 4.7M-constraint statement (~20 s per check)"]
+fn exported_inputs_satisfy_the_gnark_statement() {
+    let fixture = Fixture::new(true, true);
+    let inputs = fixture.dir.path().join("inputs.json");
+    Command::cargo_bin("c2pa-x509-zk-statement-inputs")
+        .unwrap()
+        .arg("--input")
+        .arg(fixture.signed())
+        .arg("--trust-list")
+        .arg(fixture.pki("trust-list.pem"))
+        .arg("--out")
+        .arg(&inputs)
+        .assert()
+        .success();
+    let check = |path: &Path| gnark_cli(&["check".as_ref(), "--input".as_ref(), path.as_os_str()]);
+    let out = check(&inputs);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let mut json: serde_json::Value = serde_json::from_slice(&std::fs::read(&inputs).unwrap()).unwrap();
+    json["time"] = (json["time"].as_u64().unwrap() - 366 * 86400).into();
+    let tampered = fixture.dir.path().join("tampered.json");
+    std::fs::write(&tampered, serde_json::to_vec(&json).unwrap()).unwrap();
+    assert!(!check(&tampered).status.success(), "a time before the certificate's validity was accepted");
+}
+
+/// Assets without a time stamp, or with a legacy sigTst one, are refused
+/// before any proving (THIRD-PARTY-STATEMENT.md, Q6 and Q10).
+#[test]
+fn statement_inputs_require_a_sigtst2_time_stamp() {
+    for (time_stamp, claim_version, expected) in [(false, 2, "no time stamp"), (true, 1, "sigTst (v1)")] {
+        let fixture = Fixture::with_claim_version(true, time_stamp, claim_version);
+        Command::cargo_bin("c2pa-x509-zk-statement-inputs")
+            .unwrap()
+            .arg("--input")
+            .arg(fixture.signed())
+            .arg("--trust-list")
+            .arg(fixture.pki("trust-list.pem"))
+            .arg("--out")
+            .arg(fixture.dir.path().join("inputs.json"))
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(expected));
+    }
+}
+
+#[test]
+fn statement_inputs_hold_the_signed_parts_and_the_attested_time() {
+    let fixture = Fixture::new(true, true);
+    let trust = c2pa_x509_zk_demo::TrustList::from_file(&fixture.pki("trust-list.pem")).unwrap();
+    let inputs = c2pa_x509_zk_demo::third_party::statement_inputs(&fixture.signed(), &trust).unwrap();
+    let original = fixture.original();
+    let b64 = |b: &[u8]| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b);
+    assert_eq!(inputs.protected, b64(&original.protected));
+    assert_eq!(inputs.signature, b64(&original.signature));
+    assert_eq!(inputs.public.claim, b64(&original.manifest.claim));
+    assert_eq!(inputs.public.issuer_certificate, b64(&std::fs::read(fixture.pki("issuing-ca.der")).unwrap()));
+    let info = tst_info(&original.time_stamp.unwrap().token).unwrap();
+    assert_eq!(inputs.public.imprint, b64(&info.hashed_message));
+    assert_eq!(inputs.public.time, c2pa_x509_zk_demo::third_party::generalized_time_unix(&info.gen_time).unwrap());
+}

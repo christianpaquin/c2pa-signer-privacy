@@ -77,7 +77,7 @@ An earlier run on the same machine measured 657 s per asset (witness 261 s, prov
 
 ## Proving-key loading
 
-Measured with `c2pa-x509-zk-bench pk-load` ([record](bench/results/2026-11-04-proving-key-load.json)) on the V0 proving key: 22.6 million G1 points and 4.74 million G2 points (4.14 million of them non-zero), 1.03 GB compressed, 2.05 GB uncompressed. Each load ran in its own process, once after evicting the key file from the Linux page cache and once warm. The loads in the table produce the same key; tests check that every loader reads back the key that was written.
+Measured with `c2pa-x509-zk-bench pk-load` ([record](bench/results/2026-11-04-proving-key-load.json)) on the V0 proving key: 22.6 million G1 points and 4.74 million G2 points (4.14 million of them non-zero), 1.03 GB compressed, 2.05 GB uncompressed. Each load ran in its own process, once after requesting the key file's eviction from the Linux page cache and once warm. Eviction is advisory, so the residency measured just before each load is recorded, and the cold labels rest on it: none of the key file was resident before any of the 13 cold loads, and all of it before every warm one. (The harness now derives the label from that measurement, and reports a load whose pages stayed resident as `eviction-failed` rather than cold.) The loads in the table produce the same key; tests check that every loader reads back the key that was written.
 
 What the checks cover: BN254's G1 has cofactor 1, so a G1 point on the curve is in the prime-order subgroup; G2 points also need a subgroup check, a scalar multiplication each. Decoding a compressed point solves the curve equation, so it is always on the curve, but not necessarily in G2's subgroup. An uncompressed point is taken as written unless checked. "Full" is what arkworks' `Validate::Yes` does today. The arkworks loader already runs its checks in parallel; it decompresses points one at a time. The parallel loader also decompresses in parallel.
 
@@ -139,4 +139,11 @@ Today, keys come only from local setup, and the prover loads them from the same 
   - Uncompressed with the hash and no point checks: about 1 s faster than the recommendation.
 - **Not recommended:** skipping both the hash and the checks. It saves a further 1–2 s, and nothing would detect a wrong or corrupted key until proofs fail to verify.
 - **Separately:** the anonymizer could verify its own proof (13 ms) before embedding it, which would catch any key problem the checks miss.
+
+**Guardrails for adopting the fast path** in the prover (not done here; production loading stays compressed and fully checked):
+
+- The build manifest records the key's encoding next to its hash (`proving_key_encoding`, added here, so a hash is never ambiguous about the format it covers); a format version and an explicit migration of existing compressed keys come with adoption.
+- Full validation whenever trusted provenance is unavailable: no hash recorded at setup, or a key from elsewhere. A hash recorded next to the key detects corruption and mix-ups; it does not authenticate the key against anyone who can write to its directory.
+- Point validation does not establish that a key came from the intended setup; only a check of the key's structure against the verifying key would (see above).
+- Verifying-key loading and validation are unchanged.
 

@@ -103,6 +103,11 @@ pub struct BuildManifest {
     /// parsing it; see `proving_key::check_file_sha256`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proving_key_sha256: Option<String>,
+    /// How the proving key's points are encoded, so `proving_key_sha256` is
+    /// never ambiguous about the format it covers (absent in older manifests,
+    /// whose keys are compressed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proving_key_encoding: Option<crate::proving_key::Encoding>,
 }
 
 impl NativeCircuitPaths {
@@ -226,6 +231,7 @@ pub fn native_setup_with(paths: &NativeCircuitPaths, pk_encoding: crate::proving
         r1cs_sha256: file_sha256(&paths.r1cs)?,
         verifying_key_sha256: file_sha256(&paths.verifying_key)?,
         proving_key_sha256: Some(file_sha256(&paths.proving_key)?),
+        proving_key_encoding: Some(pk_encoding),
     };
     std::fs::write(&paths.build_manifest, serde_json::to_string_pretty(&manifest)?)?;
     

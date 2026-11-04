@@ -29,7 +29,8 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 /// How the key's curve points are written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Encoding {
     /// x coordinate and a sign bit (32 bytes per G1 point, 64 per G2 point)
     Compressed,
@@ -317,7 +318,16 @@ mod tests {
         let old = r#"{"circuit":"c","r1cs_sha256":"aa","verifying_key_sha256":"bb"}"#;
         let manifest: crate::circuit_native::BuildManifest = serde_json::from_str(old).unwrap();
         assert_eq!(manifest.proving_key_sha256, None);
+        assert_eq!(manifest.proving_key_encoding, None);
         assert_eq!(serde_json::to_string(&manifest).unwrap(), old);
+    }
+
+    #[test]
+    fn build_manifest_records_the_encoding_the_hash_covers() {
+        let json = r#"{"circuit":"c","r1cs_sha256":"aa","verifying_key_sha256":"bb","proving_key_sha256":"cc","proving_key_encoding":"uncompressed"}"#;
+        let manifest: crate::circuit_native::BuildManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.proving_key_encoding, Some(Encoding::Uncompressed));
+        assert_eq!(serde_json::to_string(&manifest).unwrap(), json);
     }
 
     #[test]

@@ -448,7 +448,9 @@ fn run(work_dir: Option<PathBuf>, circuits_dir: &Path, reuse_build: bool, keep: 
         return Err(e);
     }
     eprintln!("Work directory: {}", work_dir.display());
-    let record = measure(&exe, &zk_root, &work_dir, &circuits_dir, reuse_build)?;
+    // Captured before any phase runs, so later edits to the tree are not attributed to this run.
+    let environment = environment(&zk_root);
+    let record = measure(&exe, &zk_root, &work_dir, &circuits_dir, reuse_build, environment)?;
 
     let text = serde_json::to_string_pretty(&record)?;
     match &out {
@@ -467,7 +469,7 @@ fn run(work_dir: Option<PathBuf>, circuits_dir: &Path, reuse_build: bool, keep: 
     finish_workspace(&work_dir, keep)
 }
 
-fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, circuits_dir: &Path, reuse_build: bool) -> Result<Value> {
+fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, circuits_dir: &Path, reuse_build: bool, environment: Value) -> Result<Value> {
     let build = work_dir.join("build");
     std::fs::create_dir(&build)?;
     let phase_cmd = |name: &str| {
@@ -528,7 +530,7 @@ fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, circuits_dir: &Path, reu
         },
         "statement": STATEMENT,
         "accounting": ACCOUNTING,
-        "environment": environment(zk_root),
+        "environment": environment,
         "artifacts": {
             "r1cs_sha256": build_manifest.r1cs_sha256,
             "verifying_key_sha256": build_manifest.verifying_key_sha256,

@@ -5,10 +5,16 @@
 //!
 //! Usage:
 //!   c2pa-x509-zk-sign --input unsigned.png --output signed.png \
-//!       --cert signer.pem --key signer.key --ca issuing-ca.pem
+//!       --cert signer.pem --key signer.key --ca issuing-ca.pem \
+//!       [--tsa-cert tsa.pem --tsa-key tsa.key]
+//!
+//! With a TSA certificate and key (for example from
+//! `generate-test-pki.sh --mirror`), the signature is time-stamped by a local
+//! test TSA and the token stored as `sigTst2`, as on real devices.
 
 use anyhow::{anyhow, Result};
-use c2pa::{create_signer, SigningAlg};
+use c2pa::{create_signer, Signer, SigningAlg};
+use c2pa_x509_zk_demo::local_tsa::{LocalTsa, TimeStampingSigner};
 use clap::Parser;
 use std::fs;
 use std::path::PathBuf;
@@ -37,6 +43,14 @@ struct Args {
     /// in x5chain. The root is not included, per the C2PA specification.
     #[arg(long)]
     ca: PathBuf,
+
+    /// Test TSA certificate (PEM): time-stamp the signature with a local TSA
+    #[arg(long, requires = "tsa_key")]
+    tsa_cert: Option<PathBuf>,
+
+    /// Test TSA private key (PEM)
+    #[arg(long, requires = "tsa_cert")]
+    tsa_key: Option<PathBuf>,
 }
 
 const CLAIM_GENERATOR: &str = "c2pa-x509-zk-demo/0.1";
@@ -61,17 +75,31 @@ fn main() -> Result<()> {
     println!("Loaded CA cert from {:?}", args.ca);
 
     // Create c2pa signer with ES256 (P-256 ECDSA)
-    let signer = create_signer::from_keys(
+    let mut signer: Box<dyn Signer> = create_signer::from_keys(
         cert_chain.as_bytes(),
         signer_key_pem.as_bytes(),
         SigningAlg::Es256,
-        None, // no TSA
+        None, // no network TSA
     )
     .map_err(|e| anyhow!("failed to create signer: {e}"))?;
+    if let (Some(cert), Some(key)) = (args.tsa_cert, args.tsa_key) {
+        println!("Time-stamping with the local TSA {cert:?}");
+        signer = Box::new(TimeStampingSigner::new(signer, LocalTsa { cert, key }));
+    }
 
     // Build manifest using Builder API
+    // A c2pa.created action, as C2PA requires of a new asset's first manifest
+    // and real device claims carry.
     let definition = serde_json::json!({
-        "claim_generator_info": [{ "name": CLAIM_GENERATOR, "version": "0.1" }]
+        "claim_generator_info": [{ "name": CLAIM_GENERATOR, "version": "0.1" }],
+        "assertions": [{
+            "label": "c2pa.actions.v2",
+            "data": { "actions": [{
+                "action": "c2pa.created",
+                "description": "Created by the c2pa-x509-zk test signer.",
+                "digitalSourceType": "http://cv.iptc.org/newscodes/digitalsourcetype/digitalCapture"
+            }]}
+        }]
     });
     let mut builder = c2pa::Builder::from_json(&definition.to_string())
         .map_err(|e| anyhow!("failed to create builder: {e}"))?;

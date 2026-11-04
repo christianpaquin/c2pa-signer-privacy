@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 
 pub mod circuit;
 pub mod circuit_native;
+pub mod jumbf;
+pub mod local_tsa;
 pub mod manifest;
+pub mod original_signature;
 pub mod trust;
 pub mod types;
 

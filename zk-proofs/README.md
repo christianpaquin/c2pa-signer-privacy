@@ -226,18 +226,19 @@ pairing someone else's CA-signed certificate with their own key pair.
 
 ### Performance
 
-Measured on a 20-core machine with 31 GB of RAM (WSL2). Expect different times on other hardware, but similar memory use.
+Measured with the [benchmark harness](#benchmarks) on a 13th Gen Intel Core i7-13800H laptop (20 logical CPUs, 32 GB of RAM, WSL2); full record in [`bench/results/2026-11-03-baseline.json`](bench/results/2026-11-03-baseline.json) and analysis in [FEASIBILITY.md](FEASIBILITY.md#v0-baseline-measured-detail). Each phase ran in its own process.
 
-| Phase | Time | Peak RAM | Notes |
+| Phase | Time | Peak RSS | Notes |
 |-------|------|----------|-------|
-| Circuit compilation | ~4 min | ~6.3 GB | One-time (`circom`) |
-| Trusted setup | ~1 min | ~10.4 GB | One-time, native Rust |
-| Anonymization (witness + proof) | ~10.5 min | ~11.8 GB | Per asset; witness generation runs the circuit's WASM |
-| Verification | ~0.02 s | ~13 MB | Per asset |
+| Circuit compilation | ~3.4 min | ~6.0 GiB | One-time (`circom`) |
+| Trusted setup | ~49 s | ~9.9 GiB | One-time, native Rust |
+| Preparation | ~0.03 s | ~19 MiB | Per asset: read the signed manifest, validate the issuing chain, build the circuit inputs |
+| Witness generation | ~3.8 min | ~4.0 GiB | Per asset; almost all of it running the circuit's WASM witness generator |
+| Proving | ~6.3 min | ~11.1 GiB | Per asset; **~5.8 min of it is loading the 1 GB proving key** (stored compressed and fully validated on load); the Groth16 proof itself takes ~32 s |
+| Packaging | ~0.03 s | ~23 MiB | Per asset: build the assertion, rewrite the manifest, check the digest |
+| Verification | ~0.01 s | ~9 MiB | Per asset; the full verifier CLI (with trust-list chain validation) takes ~0.02 s |
 
-Peak memory for the real-proof flow is ~12 GB, so a 16 GB machine should be enough (not tested). Use [Placeholder Mode](#placeholder-mode) on smaller machines.
-
-Constraints fell 61% with the switch to `VarShiftLeft` (see [Constraint Count](#constraint-count)), but anonymization time fell only ~50% (from ~20 minutes), which suggests WASM witness generation is a large share of proving time.
+Anonymizing one asset takes ~10.2 minutes, of which the cryptographic proving is about 5%: key deserialization (57%) and WASM witness generation (37%) dominate. Peak memory is ~11 GiB, while loading the proving key, so a 16 GB machine should be enough (not tested). Use [Placeholder Mode](#placeholder-mode) on smaller machines.
 
 ### COSE Integration
 
@@ -372,6 +373,32 @@ Conventions:
 
 The prover checks every witness against the circuit's R1CS constraints before proving, because ark-circom's witness generator does not stop on a failing `===` (its exception handler is a no-op, whether or not `sanity_check` is set). Without that check, an input the circuit rejects still yields a proof that only fails verification. The prover computes the witness without ark-circom's `CircomBuilder::build`, whose debug-build assertion would panic on a rejected input before the check can report it, so the behavior is the same in debug and release builds. The check evaluates constraints exactly as Arkworks does when proving (wire 0 is the constant one), and rejects a witness whose constant entry is not 1; tests compare its verdicts with Arkworks' own constraint system on adversarial witnesses.
 
+## Benchmarks
+
+`c2pa-x509-zk-bench` measures the current statement end to end on fixed inputs (a generated test PKI and `fixtures/cards.png`) and writes one JSON record:
+
+```bash
+cargo build --release
+./target/release/c2pa-x509-zk-bench run --out bench/results/<date>-<variant>.json
+# --reuse-build links circuits/build's compiled circuit instead of compiling (compile is then not measured)
+# --keep keeps the work directory (circuit, keys, witness); by default it is removed
+# --work-dir DIR uses a new directory DIR (refused if it exists); --out must resolve (through symlinks and ..) outside it
+```
+
+Every phase runs as a separate process, so its wall time and peak memory (`wait4`'s peak RSS for that process) are its own; steps within a phase, such as loading the proving key or serializing the witness, are timed separately so no cost falls between phases. Phases are grouped into categories, and the record carries their totals:
+
+| Category | Phases | Total |
+|---|---|---|
+| Test fixture | Generate the test PKI, sign the sample asset | Not counted |
+| One-time | Compile the circuit, Groth16 setup | `one_time` |
+| Anonymization (per asset) | Prepare (read the signed manifest, validate the issuing chain, build circuit inputs), witness, prove, package (build the assertion, rewrite the manifest, check the digest) | `anonymization_per_asset`, with `anonymization_witness_plus_prove` as the proof-generation subtotal |
+| Verification | Load and prepare the verifying key, verify the proof | `verification` |
+| Full verification | The verifier CLI on the anonymized asset (trust-list chain validation, assertion and digest checks, the proof) | `verification_full` |
+
+The harness works in a directory it creates itself, a new one under `target/bench` by default, with its own compiled circuit and keys; `circuits/build` is not touched. A requested `--work-dir` must not exist, and only the directory the run created is removed afterwards.
+
+The record contains the variant and the exact statement proved, the accounting boundaries above, the environment at the start of the run (CPU, memory, OS, WSL, rustc, circom, git commit and any changed tracked files), artifact hashes and sizes, input sizes, per-phase and per-step measurements with category totals, and output sizes: the Groth16 proof, the embedded proof container, the assertion, `x5chain`, and the whole manifest store added to the asset. A full run takes ~15 minutes and ~11 GiB of RAM. Results are compared in [FEASIBILITY.md](FEASIBILITY.md).
+
 ## Current Limitations
 
 What the current prototype does not establish. Every experiment states which of these still apply to its results.
@@ -385,7 +412,7 @@ What the current prototype does not establish. Every experiment states which of 
 - **Unauthenticated trust lists.** Trust lists are read from files; the C2PA lists are not signed.
 - **Proof system.** Groth16 on BN254 (~100-bit security) with a single-party local setup, whose operator could forge proofs ([H5](#h5-production-proving-setup), [E7](#e7-curve-bn254-vs-bls12-381)).
 - **Metadata not scrubbed.** Asset metadata (for example EXIF) and other manifest fields are not removed; privacy scans cover known signer identifiers only ([H6](#h6-metadata-privacy-beyond-the-signature)).
-- **Cost.** ~10.5 minutes and ~12 GB of RAM per proof ([Performance](#performance)).
+- **Cost.** ~10 minutes and ~11 GiB of RAM per proof, mostly loading the proving key and generating the witness in WASM rather than proving ([Performance](#performance), [FEASIBILITY.md](FEASIBILITY.md#observations)).
 - **Tool display.** `c2patool` presents the issuing CA as the signer ([H8](#h8-c2patool-support)).
 
 ## Roadmap
@@ -399,6 +426,7 @@ The order follows the method in [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIO
 - **Signer certificate removed from anonymized output** ([#6](https://github.com/christianpaquin/c2pa-signer-privacy/issues/6)).
 - **Certificate field binding:** the circuit pins the signer key and validity period inside the CA-signed TBSCertificate; previously a prover with no certificate could forge a proof (see [Certificate field binding](#certificate-field-binding)).
 - **Certificate dates computed one month late:** the in-circuit UTCTime conversion indexed its days-before-month table off by one, shifting every `notBefore`/`notAfter` 28-31 days later. Certificates less than about a month old could not produce valid proofs, and certificates expired up to about a month earlier were still accepted. Fixed, with tests against Python's calendar for every month, leap days, and both ends of the UTCTime range.
+- **F2. Benchmark harness and the R1 matrix:** `c2pa-x509-zk-bench` measures each phase in its own process (see [Benchmarks](#benchmarks)), and [FEASIBILITY.md](FEASIBILITY.md) holds the R1 matrix with the measured baseline, provisional targets, and stop rules. The baseline showed that the Groth16 proof itself is ~5% of per-asset anonymization time; loading the proving key (57%) and WASM witness generation (37%) dominate.
 - **F3. Minimum correctness infrastructure:** the prover checks every witness against the R1CS before proving and reports a typed `WitnessRejected` (ark-circom's witness generator ignores failing constraints even with `sanity_check` set, contrary to what this roadmap previously assumed); forgery tests at both the constraint and proof levels; a build manifest identifying the circuit and keys, recorded in the assertion (now version 0.2) as diagnostics; verification needs only the verifying key; privacy scans on every anonymized test output; and the [Testing](#testing) conventions and [Current Limitations](#current-limitations).
 - **F1. C2PA-like test PKI and trust lists:** a generated 3-cert PKI (root → issuing CA that is itself a trust anchor → signer with the claim-signing EKU and a 90-day lifetime); trust lists in PEM and the C2PA JSON format; the anonymized asset's `x5chain` carries the issuing chain (decision D4), which the verifier validates against the trust list before checking the issuing CA's key against the proof's public inputs; `issuer_key_id` is now the SHA-256 of the issuing CA's public key, so it survives certificate renewal (see [Test PKI and Trust Lists](#test-pki-and-trust-lists)). Privacy note: the issuing CA is disclosed, so the anonymity set is everyone that CA has issued certificates to; a narrowly scoped CA can nearly identify the signer (see [H4](#h4-hiding-the-issuing-ca)).
 
@@ -431,17 +459,6 @@ Done. Measuring each component showed that per-byte `SelectByte` reads (1,662 of
 Setup now also records a hash of the `.r1cs` alongside the keys, and setup and the anonymizer refuse keys from an older circuit (see [Building Circuits](#building-circuits)).
 
 ### Foundation
-
-#### F2. Benchmark harness and the R1 matrix
-
-One command that runs a variant on a fixed set of inputs and records, separately:
-
-- compilation, setup, witness generation, proving, and verification (time and peak memory each; witness generation and proving are currently measured together);
-- the complete output size (proof plus public inputs and encoding), and proving and verifying key sizes;
-- constraint count, which is comparable only within the same proof stack, not across different arithmetizations;
-- the hardware and software configuration, the input sizes (certificate and claim sizes), and the exact statement proved.
-
-F2 also starts the [R1](#r1-feasibility-matrix) matrix with the current baseline, so every later experiment adds a row rather than a separate write-up.
 
 ### Goal 1: prove the technology and compare the options
 
@@ -488,7 +505,7 @@ Decision D3: the same circuit and prover on both curves, comparing proving time,
 
 #### R1. Feasibility matrix
 
-A living matrix, started with F2 and updated after each experiment. Its axes:
+A living matrix in [FEASIBILITY.md](FEASIBILITY.md), started with F2 and updated after each experiment. Its axes:
 
 - trust model (A, B, C) × anonymization mode (signer-side, third-party);
 - what is authenticated and what is disclosed;

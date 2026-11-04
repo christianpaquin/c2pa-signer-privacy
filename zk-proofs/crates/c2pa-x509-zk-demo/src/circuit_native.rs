@@ -356,46 +356,85 @@ pub fn generate_proof_native_with(
     if !paths.setup_complete() {
         bail!("Setup not complete. Run native_setup first.");
     }
-    
-    println!("Loading circuit and computing witness...");
-    let cfg = CircomConfig::<Fr>::new(&paths.wasm, &paths.r1cs)
-        .map_err(|e| anyhow!("failed to load circuit: {e}"))?;
-    let mut builder = CircomBuilder::new(cfg);
-    
-    // Set circuit inputs
-    set_circuit_inputs(&mut builder, circuit_inputs)?;
+    let circuit = compute_checked_witness(circuit_inputs, paths, options)?;
 
-    let circom = compute_witness(builder)?;
-
-    if options.check_witness {
-        println!("Checking witness against the circuit's constraints...");
-        check_witness(&circom)?;
-    }
-    
-    let public_inputs = circom.get_public_inputs()
-        .ok_or_else(|| anyhow!("failed to get public inputs"))?;
-    
     // Load proving key
     println!("Loading proving key...");
     let pk = load_proving_key(&paths.proving_key)?;
-    
-    // Generate proof
+
     println!("Generating proof...");
-    let mut rng = thread_rng();
-    let proof = GrothBn::prove(&pk, circom, &mut rng)
-        .map_err(|e| anyhow!("failed to generate proof: {e}"))?;
-    
-    // Convert public inputs to strings
-    let public_input_strings: Vec<String> = public_inputs
-        .iter()
-        .map(|f| format!("{}", f))
-        .collect();
-    
+    let proof = prove_circuit(circuit, &pk)?;
     println!("✅ Proof generated!");
+    Ok(proof)
+}
+
+/// Load the circuit, compute the witness for `circuit_inputs`, and (unless
+/// `options.check_witness` is off) check it against every constraint.
+/// The first step of `generate_proof_native_with`, exposed so the
+/// benchmark harness can time and measure it on its own.
+pub fn compute_checked_witness(
+    circuit_inputs: &CircuitInputs,
+    paths: &NativeCircuitPaths,
+    options: ProveOptions,
+) -> Result<ark_circom::CircomCircuit<Fr>> {
+    println!("Loading circuit and computing witness...");
+    let circuit = compute_witness(circuit_builder(circuit_inputs, paths)?)?;
+
+    if options.check_witness {
+        println!("Checking witness against the circuit's constraints...");
+        check_witness(&circuit)?;
+    }
+    Ok(circuit)
+}
+
+/// Load the circuit (its .r1cs and witness-generator WASM) and set its
+/// inputs, ready for `compute_witness`.
+pub fn circuit_builder(circuit_inputs: &CircuitInputs, paths: &NativeCircuitPaths) -> Result<CircomBuilder<Fr>> {
+    let cfg = CircomConfig::<Fr>::new(&paths.wasm, &paths.r1cs)
+        .map_err(|e| anyhow!("failed to load circuit: {e}"))?;
+    let mut builder = CircomBuilder::new(cfg);
+    set_circuit_inputs(&mut builder, circuit_inputs)?;
+    Ok(builder)
+}
+
+/// Prove `circuit` (constraints and witness) with `pk`. The second step of
+/// `generate_proof_native_with`.
+pub fn prove_circuit(circuit: ark_circom::CircomCircuit<Fr>, pk: &ProvingKey<Bn254>) -> Result<NativeProof> {
+    let public_inputs = circuit
+        .get_public_inputs()
+        .ok_or_else(|| anyhow!("failed to get public inputs"))?;
+    let mut rng = thread_rng();
+    let proof = GrothBn::prove(pk, circuit, &mut rng).map_err(|e| anyhow!("failed to generate proof: {e}"))?;
     Ok(NativeProof {
         proof,
-        public_inputs: public_input_strings,
+        public_inputs: public_inputs.iter().map(|f| format!("{}", f)).collect(),
     })
+}
+
+/// Load a circuit's R1CS without its witness generator, with the wire
+/// mapping disabled as `CircomBuilder::setup` does for proving.
+pub fn load_r1cs(path: &Path) -> Result<ark_circom::circom::R1CS<Fr>> {
+    let file = std::fs::File::open(path).map_err(|e| anyhow!("failed to open {path:?}: {e}"))?;
+    let r1cs_file = ark_circom::circom::R1CSFile::<Fr>::new(std::io::BufReader::new(file))
+        .map_err(|e| anyhow!("failed to read {path:?}: {e}"))?;
+    let mut r1cs = ark_circom::circom::R1CS::from(r1cs_file);
+    r1cs.wire_mapping = None;
+    Ok(r1cs)
+}
+
+/// Save a witness (one field element per wire) to `path`.
+pub fn write_witness(path: &Path, witness: &[Fr]) -> Result<()> {
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    witness.to_vec().serialize_uncompressed(&mut out).map_err(|e| anyhow!("failed to write witness: {e}"))?;
+    use std::io::Write;
+    out.flush()?;
+    Ok(())
+}
+
+/// Load a witness saved by `write_witness`.
+pub fn read_witness(path: &Path) -> Result<Vec<Fr>> {
+    let input = std::io::BufReader::new(std::fs::File::open(path)?);
+    Vec::<Fr>::deserialize_uncompressed_unchecked(input).map_err(|e| anyhow!("failed to read witness: {e}"))
 }
 
 /// Verify a ZK proof using native Rust
@@ -403,34 +442,33 @@ pub fn verify_proof_native(
     proof: &NativeProof,
     paths: &NativeCircuitPaths,
 ) -> Result<bool> {
-    use std::str::FromStr;
-    
     println!("Loading verifying key...");
-    let vk = load_verifying_key(&paths.verifying_key)?;
-    let pvk = GrothBn::process_vk(&vk)
-        .map_err(|e| anyhow!("failed to process verifying key: {e}"))?;
-    
-    // Parse public inputs back to field elements
-    let public_inputs: Result<Vec<Fr>> = proof.public_inputs
-        .iter()
-        .map(|s| {
-            Fr::from_str(s).map_err(|_| anyhow!("invalid public input: {s}"))
-        })
-        .collect();
-    let public_inputs = public_inputs?;
-    
-    // Verify
+    let pvk = prepare_verifying_key(&load_verifying_key(&paths.verifying_key)?)?;
+
     println!("Verifying proof...");
-    let valid = GrothBn::verify_with_processed_vk(&pvk, &public_inputs, &proof.proof)
-        .map_err(|e| anyhow!("verification error: {e}"))?;
-    
+    let valid = verify_proof_prepared(proof, &pvk)?;
     if valid {
         println!("✅ Proof verified!");
     } else {
         println!("❌ Proof verification failed!");
     }
-    
     Ok(valid)
+}
+
+/// Preprocess a verifying key for verification (Groth16's prepared key).
+pub fn prepare_verifying_key(vk: &VerifyingKey<Bn254>) -> Result<ark_groth16::PreparedVerifyingKey<Bn254>> {
+    GrothBn::process_vk(vk).map_err(|e| anyhow!("failed to process verifying key: {e}"))
+}
+
+/// Verify a proof against a prepared verifying key.
+pub fn verify_proof_prepared(proof: &NativeProof, pvk: &ark_groth16::PreparedVerifyingKey<Bn254>) -> Result<bool> {
+    use std::str::FromStr;
+    let public_inputs = proof
+        .public_inputs
+        .iter()
+        .map(|s| Fr::from_str(s).map_err(|_| anyhow!("invalid public input: {s}")))
+        .collect::<Result<Vec<Fr>>>()?;
+    GrothBn::verify_with_processed_vk(pvk, &public_inputs, &proof.proof).map_err(|e| anyhow!("verification error: {e}"))
 }
 
 /// Set circuit inputs on the builder using the x509_issue_and_possession signal layout.

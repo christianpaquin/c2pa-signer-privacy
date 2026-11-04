@@ -1,0 +1,134 @@
+{
+  "environment": {
+    "cpu": "13th Gen Intel(R) Core(TM) i7-13800H",
+    "git_changed_files": [],
+    "git_commit": "438ed6da29be71a6820b256d63b78b3e1b5913cd",
+    "gnark": "v0.16.4",
+    "gnark_crypto": "v0.21.1-0.20260913224755-1409fe592052",
+    "go": "go1.27.3",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "logical_cpus": 20,
+    "memory": "32774804 kB",
+    "os": "Ubuntu 24.04.2 LTS",
+    "wsl": true
+  },
+  "experiment": "E1: in-circuit cost of P-384/SHA-384 next to P-256/SHA-256 (standalone primitives)",
+  "measurements": [
+    {
+      "data": {
+        "description": "CA signature (ECDSA P-256, SHA-256) over a 1,500-byte TBS",
+        "internal_variables": 1607235,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 292931329,
+        "proving_key_bytes_raw": 582644929,
+        "public_inputs": 8,
+        "public_variables": 9,
+        "r1cs_constraints": 1156320,
+        "scs_constraints": 3693065,
+        "secret_variables": 1508,
+        "verifying_key_bytes": 768
+      },
+      "name": "ca-p256-sha256-1500",
+      "peak_rss_mib": 3229.359375,
+      "steps": {
+        "compile_s": 3.265241797,
+        "compile_scs_s": 3.338059659,
+        "prove_s": 4.290866112,
+        "setup_s": 96.941553843,
+        "solve_s": 0.557290418,
+        "verify_s": 0.001513083,
+        "witness_s": 0.001593317
+      },
+      "wall_s": 109.167372435
+    },
+    {
+      "data": {
+        "description": "CA signature (ECDSA P-384, SHA-384) over a 1,500-byte TBS",
+        "internal_variables": 2155249,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 367879757,
+        "proving_key_bytes_raw": 731445741,
+        "public_inputs": 12,
+        "public_variables": 13,
+        "r1cs_constraints": 1521300,
+        "scs_constraints": 5109304,
+        "secret_variables": 1512,
+        "verifying_key_bytes": 896
+      },
+      "name": "ca-p384-sha384-1500",
+      "peak_rss_mib": 3776.05078125,
+      "steps": {
+        "compile_s": 4.689565366,
+        "compile_scs_s": 4.75873572,
+        "prove_s": 4.982453175,
+        "setup_s": 123.051467824,
+        "solve_s": 0.641631429,
+        "verify_s": 0.001518829,
+        "witness_s": 0.00169685
+      },
+      "wall_s": 139.043634889
+    },
+    {
+      "data": {
+        "description": "CA signature (ECDSA P-256, SHA-256) over a 1,500-byte TBS",
+        "internal_variables": 1607235,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 292931329,
+        "proving_key_bytes_raw": 582644929,
+        "public_inputs": 8,
+        "public_variables": 9,
+        "r1cs_constraints": 1156320,
+        "scs_constraints": 3693065,
+        "secret_variables": 1508,
+        "verifying_key_bytes": 768
+      },
+      "name": "ca-p256-sha256-1500",
+      "peak_rss_mib": 3451.05078125,
+      "steps": {
+        "compile_s": 3.164293174,
+        "compile_scs_s": 3.455396343,
+        "prove_s": 4.169914208,
+        "setup_s": 94.586585983,
+        "solve_s": 0.559457265,
+        "verify_s": 0.001467423,
+        "witness_s": 0.001720866
+      },
+      "wall_s": 106.64970285
+    },
+    {
+      "data": {
+        "description": "CA signature (ECDSA P-384, SHA-384) over a 1,500-byte TBS",
+        "internal_variables": 2155249,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 367879757,
+        "proving_key_bytes_raw": 731445741,
+        "public_inputs": 12,
+        "public_variables": 13,
+        "r1cs_constraints": 1521300,
+        "scs_constraints": 5109304,
+        "secret_variables": 1512,
+        "verifying_key_bytes": 896
+      },
+      "name": "ca-p384-sha384-1500",
+      "peak_rss_mib": 3706.82421875,
+      "steps": {
+        "compile_s": 4.683581344,
+        "compile_scs_s": 4.472582074,
+        "prove_s": 5.080002948,
+        "setup_s": 125.333370541,
+        "solve_s": 0.654962773,
+        "verify_s": 0.001649968,
+        "witness_s": 0.001606012
+      },
+      "wall_s": 141.108656807
+    }
+  ],
+  "schema": "c2pa-x509-zk-e1/1",
+  "shortcuts": "Primitive benchmarks: no certificate parsing, no field extraction, no chain or validity checks. Hashes run over a message whose length is fixed at compile time (a real circuit hashes a variable-length TBS up to a maximum, at about the cost of the maximum). ECDSA verifies under a public key given as a public input, as the anonymization circuit does for the issuing CA; keys and signatures are fresh per run and the messages are deterministic stand-ins, neither of which affects cost.",
+  "stack": "gnark v0.16.4, Groth16 on BN254 (R1CS); emulated (non-native) P-256 and P-384 arithmetic",
+  "step_notes": "compile = R1CS compilation; setup = Groth16 setup (single party, not a ceremony); witness = assigning inputs; solve = computing the full witness (gnark's equivalent of witness generation), with a fixed lookup challenge in place of the commitment the prover computes; prove = groth16.Prove, which solves again internally, so prove includes solve; verify = groth16.Verify; compile_scs = compiling the same circuit for a PLONKish backend, for its constraint count only. Proving keys are reported compressed (WriteTo) and raw (WriteRawTo, uncompressed). gnark's hash and range-check gadgets use lookup arguments, which its Groth16 backend implements with a commitment (proof_commitments), adding a commitment and a proof of knowledge to the proof."
+}

@@ -477,6 +477,8 @@ The signer-side mode gets the same treatment: it should bind to a claim rather t
 
 Standalone benchmarks of the primitives real deployments use, next to today's P-256 + SHA-256, prioritising **P-384 ECDSA with SHA-384**, which the official list's CAs and the documented real sample use; then RSA-2048 and RSA-4096 with PKCS#1 v1.5 and PSS (RSA CAs and PS256 signers), and optionally P-521. Independent of E2a, so it can run in parallel and show early whether real CAs are affordable in-circuit. Feeds the choice of proof system (E6).
 
+Status: the P-384/SHA-384 spike is measured in gnark ([FEASIBILITY.md](FEASIBILITY.md#e1-p-384-and-sha-384-primitives), [`experiments/e1-p384`](experiments/e1-p384/)). A CA signature over a 1,500-byte TBS costs 1.52M constraints with P-384 and SHA-384, 1.3× P-256 with SHA-256 in the same stack and 0.56× the current circom P-256 component, and proves in ~5 s; the hash dominates at real certificate sizes. RSA remains.
+
 #### E2b. Third-party anonymization
 
 Implement the statement specified in E2a: the circuit verifies the original COSE signature over the original `Sig_structure`, so no private key is needed. Compared with the signer-side mode on the axes of [R1](#r1-feasibility-matrix).

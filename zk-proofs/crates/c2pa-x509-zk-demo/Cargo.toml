@@ -23,6 +23,10 @@ name = "c2pa-x509-zk-setup"
 path = "src/bin/setup.rs"
 
 [[bin]]
+name = "c2pa-x509-zk-statement-inputs"
+path = "src/bin/statement_inputs.rs"
+
+[[bin]]
 name = "c2pa-x509-zk-bench"
 path = "src/bin/bench.rs"
 

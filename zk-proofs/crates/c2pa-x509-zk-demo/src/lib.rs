@@ -17,6 +17,7 @@ pub mod local_tsa;
 pub mod manifest;
 pub mod original_signature;
 pub mod proving_key;
+pub mod third_party;
 pub mod trust;
 pub mod types;
 

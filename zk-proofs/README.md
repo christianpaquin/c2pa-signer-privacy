@@ -468,7 +468,7 @@ Setup now also records a hash of the `.r1cs` alongside the keys, and setup and t
 
 #### E2a. Third-party proof statement and privacy design
 
-**Status: proposed** in [THIRD-PARTY-STATEMENT.md](THIRD-PARTY-STATEMENT.md), with defaults and decisions for review.
+**Status: adopted** in [THIRD-PARTY-STATEMENT.md](THIRD-PARTY-STATEMENT.md) (PR #18); implemented in E2b.
 
 Decisions D6 and D7, specified before any circuit work, as a design document with a table of guarantees. It defines the complete connection the proof must establish, trusted issuer → authorized signer → original COSE signature → original claim → asset binding → anonymized output, including:
 
@@ -489,7 +489,11 @@ Status: the P-384/SHA-384 spike is measured in gnark ([FEASIBILITY.md](FEASIBILI
 
 Implement the statement specified in E2a: the circuit verifies the original COSE signature over the original `Sig_structure`, so no private key is needed. Compared with the signer-side mode on the axes of [R1](#r1-feasibility-matrix).
 
-Status: **fixtures done**. The [mirror PKI profile](#test-pki-and-trust-lists) and a local test TSA produce standard, trusted, time-stamped assets with the structure of real device assets. `jumbf.rs` locates the active manifest's claim and claim signature (with its position, for the in-place replacement), and `original_signature.rs` rebuilds the exact bytes the circuit must hash: the claim signature's `Sig_structure` and the time stamp's countersignature structure, both confirmed on a real device-signed asset. Next: the circuit and prover (pending the choice of stack), then the anonymizer and verifier.
+Status:
+
+- **Fixtures (done).** The [mirror PKI profile](#test-pki-and-trust-lists) and a local test TSA produce standard, trusted, time-stamped assets with the structure of real device assets. `jumbf.rs` locates the active manifest's claim and claim signature (with its position, for the in-place replacement), and `original_signature.rs` rebuilds the exact bytes the circuit must hash, confirmed on a real device-signed asset.
+- **Statement and prover (done).** The statement is a gnark circuit ([`gnark/`](gnark/)): 4.7M constraints at the E2a size limits, with the structural certificate walk. `c2pa-x509-zk-statement-inputs` prepares its inputs from a signed asset, and the `c2pa-zk-gnark` CLI checks, proves, and verifies. A real c2pa-signed fixture is proved and verified at the default sizes. Forgery tests cover the claim, time, imprint, CA, signatures, and certificate purpose.
+- **Next:** the anonymizer and verifier (the in-place COSE replacement with the size check before proving, off-circuit chain and time-stamp validation), and a benchmark of the full statement under the [harness's accounting](#benchmarks).
 
 #### E3. Trust model B: Merkle membership
 

@@ -1,6 +1,6 @@
 # E2a: Third-Party Proof Statement and Privacy Design
 
-**Status: proposal for review.** This document specifies what third-party anonymization proves ([D6](ARCHITECTURE-DECISIONS.md#d6-who-anonymizes-signer-side-or-third-party)) and the time policy ([D7](ARCHITECTURE-DECISIONS.md#d7-time-policy)), before any circuit work ([roadmap E2a](README.md#e2a-third-party-proof-statement-and-privacy-design)). Each open choice is listed under [Decisions for review](#decisions-for-review) with a proposed default; E2b implements the defaults once they are approved.
+**Status: adopted** (reviewed and merged in PR #18; implemented in [E2b](#implementation-e2b)). This document specifies what third-party anonymization proves ([D6](ARCHITECTURE-DECISIONS.md#d6-who-anonymizes-signer-side-or-third-party)) and the time policy ([D7](ARCHITECTURE-DECISIONS.md#d7-time-policy)), before any circuit work ([roadmap E2a](README.md#e2a-third-party-proof-statement-and-privacy-design)). Each open choice is listed under [Decisions for review](#decisions-for-review) with its default, as reviewed; E2b implements the defaults.
 
 Section references are to the [C2PA 2.5 specification](https://spec.c2pa.org/specifications/specifications/2.5/specs/C2PA_Specification.html). Sizes come from a real device-signed photo on the official trust list (a P-256 signer certificate issued by a P-384 CA, an ES256 claim signature, and a `sigTst2` time stamp); its anatomy is in [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md#anatomy-of-a-real-manifest).
 
@@ -182,6 +182,15 @@ Under O1 every original assertion stays visible and authenticated, so the anonym
 ### Q10. First algorithms
 
 E2b starts with what the official-list sample uses for the claim signature: **ES256** (P-256 signer key) with a **`sigTst2`** time stamp, which E2b requires ([Q6](#q6-time-policy)). The issuing CA is P-256 on the test PKI first, then P-384 following E1, as planned in [R2](README.md#r2-anonymizing-real-signed-content). Then `sigTst` (v1, used by interim-list samples) and PS256 claim signatures (RSA signer keys, common on the interim list).
+
+## Implementation (E2b)
+
+The statement is implemented in gnark ([`gnark/`](gnark/)), following E1. Under the defaults above, it needs 4.7 million R1CS constraints at the proposed size limits, against the ~7 million estimated below for circom. The implementation makes four choices this document leaves open:
+
+- **Accepted encodings.** `P` must be `{1: ES256, 33: [signer certificate, ...]}`, with the certificate and its TBS in two-byte DER lengths, as in both real assets and c2pa-rs; the signer certificate's validity times must be UTCTime (2000–2049). Other encodings are refused before proving.
+- **The CA's signature** is any valid ECDSA P-384 signature by the issuing CA over the TBS, supplied by the prover, rather than the certificate's own signature field; the statement ("the CA signed this TBS") is the same.
+- **The claim signature** must have `r` and `s` below the group order. ECDSA's malleability (`(r, n - s)` is also valid) does not help backdating: a new time stamp over the altered signature attests the current time, at which the certificate must still be valid.
+- **The time-stamp token is required and `sigTst2` only** for now (Q6, Q10); assets without one, or with `sigTst`, are refused when preparing the inputs.
 
 ## Estimated cost
 

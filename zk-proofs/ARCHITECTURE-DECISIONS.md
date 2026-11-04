@@ -24,8 +24,8 @@ Designs target the official [C2PA trust list](https://github.com/c2pa-org/confor
 | D3 | Curve | Compare BN254 and BLS12-381 | [E7](README.md#e7-curve-bn254-vs-bls12-381) |
 | D4 | Where the issuing CA chain lives | **Decided:** in `x5chain`, without the signer's certificate | [F1](README.md#test-pki-and-trust-lists) |
 | D5 | How key possession is proved | Prototype and compare | [E5](README.md#e5-key-possession) |
-| D6 | Who anonymizes: signer-side or third-party | Statement **proposed** in [THIRD-PARTY-STATEMENT.md](THIRD-PARTY-STATEMENT.md), pending review; then prototype | [E2a](README.md#e2a-third-party-proof-statement-and-privacy-design), [E2b](README.md#e2b-third-party-anonymization) |
-| D7 | Time policy: when must the certificate have been valid, and on what evidence | **Proposed** in [THIRD-PARTY-STATEMENT.md](THIRD-PARTY-STATEMENT.md#q6-time-policy), pending review | [E2a](README.md#e2a-third-party-proof-statement-and-privacy-design) |
+| D6 | Who anonymizes: signer-side or third-party | Statement **adopted** in [THIRD-PARTY-STATEMENT.md](THIRD-PARTY-STATEMENT.md); being prototyped in E2b | [E2a](README.md#e2a-third-party-proof-statement-and-privacy-design), [E2b](README.md#e2b-third-party-anonymization) |
+| D7 | Time policy: when must the certificate have been valid, and on what evidence | **Adopted** in [THIRD-PARTY-STATEMENT.md](THIRD-PARTY-STATEMENT.md#q6-time-policy): a trusted time stamp is required | [E2a](README.md#e2a-third-party-proof-statement-and-privacy-design) |
 
 ## D1. Trust model: what the circuit proves about issuance
 

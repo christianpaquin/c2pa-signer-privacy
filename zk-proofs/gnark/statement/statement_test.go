@@ -104,11 +104,15 @@ func TestTamperedPublicInputsAreRejected(t *testing.T) {
 func TestTamperedPrivateInputsAreRejected(t *testing.T) {
 	f := newFixture(t, fixtureOptions{})
 	cases := map[string]func(c *Circuit){
-		"claim signature":     func(c *Circuit) { c.ClaimSig[40] = (c.ClaimSig[40].(byte) ^ 1) },
-		"signer certificate":  func(c *Circuit) { c.SigStructure[tbsContentOffset+60] = (c.SigStructure[tbsContentOffset+60].(byte) ^ 1) },
-		"protected header":    func(c *Circuit) { c.SigStructure[protectedOffset+700] = (c.SigStructure[protectedOffset+700].(byte) ^ 1) },
-		"protected length":    func(c *Circuit) { c.ProtectedLen = len(f.in.Protected) - 1 },
-		"CA signature":        func(c *Circuit) { c.CASig = assign(t, newFixture(t, fixtureOptions{}).in).CASig },
+		"claim signature": func(c *Circuit) { c.ClaimSig[40] = (c.ClaimSig[40].(byte) ^ 1) },
+		"signer certificate": func(c *Circuit) {
+			c.SigStructure[tbsContentOffset+60] = (c.SigStructure[tbsContentOffset+60].(byte) ^ 1)
+		},
+		"protected header": func(c *Circuit) {
+			c.SigStructure[protectedOffset+700] = (c.SigStructure[protectedOffset+700].(byte) ^ 1)
+		},
+		"protected length": func(c *Circuit) { c.ProtectedLen = len(f.in.Protected) - 1 },
+		"CA signature":     func(c *Circuit) { c.CASig = assign(t, newFixture(t, fixtureOptions{}).in).CASig },
 	}
 	for name, tamper := range cases {
 		c := assign(t, f.in)
@@ -123,11 +127,11 @@ func TestTamperedPrivateInputsAreRejected(t *testing.T) {
 // (THIRD-PARTY-STATEMENT.md, Q5).
 func TestCertificatePurposeIsEnforced(t *testing.T) {
 	cases := map[string]fixtureOptions{
-		"no claim-signing purpose":         {purposes: []asn1.ObjectIdentifier{oidEmailProtection}},
-		"no extended key usage":            {noEKU: true},
-		"EKU hidden in another extension":  {hiddenEKU: true},
+		"no claim-signing purpose":          {purposes: []asn1.ObjectIdentifier{oidEmailProtection}},
+		"no extended key usage":             {noEKU: true},
+		"EKU hidden in another extension":   {hiddenEKU: true},
 		"two extended key usage extensions": {duplicateEKU: true},
-		"a CA certificate":                 {isCA: true},
+		"a CA certificate":                  {isCA: true},
 	}
 	for name, opt := range cases {
 		f := newFixture(t, opt)
@@ -143,13 +147,53 @@ func TestCertificatePurposeIsEnforced(t *testing.T) {
 	}
 }
 
+// Basic constraints is decoded structurally: a CA is rejected however its
+// sequence is encoded, and unrecognized content is rejected, not ignored.
+func TestBasicConstraintsIsDecodedStructurally(t *testing.T) {
+	// The review's reproduction: cA TRUE in a sequence long enough to need a
+	// long-form length (a 123-byte pathLenConstraint).
+	longForm := append([]byte{0x30, 0x81, 0x80, 0x01, 0x01, 0xff, 0x02, 0x7b, 0x01}, make([]byte, 122)...)
+	var parsed struct {
+		IsCA    bool `asn1:"optional"`
+		PathLen *big.Int
+	}
+	if rest, err := asn1.Unmarshal(longForm, &parsed); err != nil || len(rest) != 0 || !parsed.IsCA {
+		t.Fatalf("the long-form value should be valid DER with cA TRUE: %v", err)
+	}
+	accepted := map[string]fixtureOptions{
+		"absent":           {noBasicConstraints: true},
+		"empty sequence":   {basicConstraints: []byte{0x30, 0x00}},
+		"cA FALSE written": {basicConstraints: []byte{0x30, 0x03, 0x01, 0x01, 0x00}},
+		"pathLen only":     {basicConstraints: []byte{0x30, 0x03, 0x02, 0x01, 0x05}},
+	}
+	rejected := map[string]fixtureOptions{
+		"cA TRUE":                       {basicConstraints: []byte{0x30, 0x03, 0x01, 0x01, 0xff}},
+		"cA TRUE, long-form length":     {basicConstraints: longForm},
+		"cA TRUE with pathLen":          {basicConstraints: []byte{0x30, 0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x00}},
+		"BOOLEAN of length 2":           {basicConstraints: []byte{0x30, 0x04, 0x01, 0x02, 0x00, 0xff}},
+		"unexpected first element":      {basicConstraints: []byte{0x30, 0x03, 0x04, 0x01, 0x00}},
+		"sequence shorter than value":   {basicConstraints: []byte{0x30, 0x00, 0x00}},
+		"BOOLEAN past the sequence end": {basicConstraints: []byte{0x30, 0x02, 0x01, 0x01, 0xff}},
+	}
+	for name, opt := range accepted {
+		if !solved(t, assign(t, newFixture(t, opt).in)) {
+			t.Errorf("%s: rejected", name)
+		}
+	}
+	for name, opt := range rejected {
+		if solved(t, assign(t, newFixture(t, opt).in)) {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
 // Assign refuses inputs the circuit cannot represent.
 func TestAssignRefusesOutOfRangeInputs(t *testing.T) {
 	f := newFixture(t, fixtureOptions{})
 	for name, in := range map[string]Inputs{
-		"claim too long":   {Public: Public{Claim: make([]byte, testSizes.MaxClaim+1), IssuerCert: f.in.IssuerCert, Imprint: f.in.Imprint}, Protected: f.in.Protected, Signature: f.in.Signature},
-		"short signature":  {Public: f.in.Public, Protected: f.in.Protected, Signature: f.in.Signature[:63]},
-		"other layout":     {Public: f.in.Public, Protected: append([]byte{0xa1}, f.in.Protected[1:]...), Signature: f.in.Signature},
+		"claim too long":  {Public: Public{Claim: make([]byte, testSizes.MaxClaim+1), IssuerCert: f.in.IssuerCert, Imprint: f.in.Imprint}, Protected: f.in.Protected, Signature: f.in.Signature},
+		"short signature": {Public: f.in.Public, Protected: f.in.Protected, Signature: f.in.Signature[:63]},
+		"other layout":    {Public: f.in.Public, Protected: append([]byte{0xa1}, f.in.Protected[1:]...), Signature: f.in.Signature},
 	} {
 		if _, err := Assign(in, testSizes); err == nil {
 			t.Errorf("%s: assigned", name)

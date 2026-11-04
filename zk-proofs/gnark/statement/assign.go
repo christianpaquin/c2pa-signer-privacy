@@ -117,7 +117,7 @@ func AssignPublic(pub Public, s Sizes) (*Circuit, error) {
 	return c, nil
 }
 
-// SigStructure is ["Signature1", protected, h'', claim], CBOR-encoded with
+// SigStructure is ["Signature1", protected, h”, claim], CBOR-encoded with
 // the header lengths the circuit expects (protected 256 bytes or more).
 func SigStructure(protected, claim []byte) []byte {
 	out := append([]byte{}, sigContext...)
@@ -133,7 +133,7 @@ func SigStructure(protected, claim []byte) []byte {
 }
 
 // Countersignature is the v2 time stamp's countersignature structure,
-// ["CounterSignature", protected, h'', bstr(bstr(signature))].
+// ["CounterSignature", protected, h”, bstr(bstr(signature))].
 func Countersignature(protected, signature []byte) []byte {
 	out := append([]byte{}, csContext...)
 	out = append(out, 0x59, byte(len(protected)>>8), byte(len(protected)))

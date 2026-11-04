@@ -183,4 +183,3 @@ func bitsPartition(api frontend.API, v frontend.Variable, n int) (frontend.Varia
 	b := bits.ToBinary(api, v, bits.WithNbDigits(32))
 	return bits.FromBinary(api, b[:n]), bits.FromBinary(api, b[n:])
 }
-

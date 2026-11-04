@@ -8,7 +8,7 @@ Public inputs, all derived by the verifier from the anonymized asset: the claim 
 
 | Link ([chain of trust](../THIRD-PARTY-STATEMENT.md#the-chain-of-trust)) | In the circuit |
 |---|---|
-| Authorized signer | The CA's key verifies an ECDSA P-384 signature over SHA-384 of the TBS. A structural DER walk of the TBS reads, at parsed positions: a v3 certificate, the subject's P-256 key, the validity period (`notBefore <= t <= notAfter`), exactly one extended key usage extension that includes C2PA claim signing, and basic constraints absent or with `cA` false ([Q5](../THIRD-PARTY-STATEMENT.md#q5-in-circuit-certificate-checks)) |
+| Authorized signer | The CA's key verifies an ECDSA P-384 signature over SHA-384 of the TBS. A structural DER walk of the TBS reads, at parsed positions: a v3 certificate, the subject's P-256 key, the validity period (`notBefore <= t <= notAfter`), exactly one extended key usage extension that includes C2PA claim signing, and basic constraints absent or with `cA` false, its sequence decoded like every other field (an encoding the walk does not recognize fails, never passes) ([Q5](../THIRD-PARTY-STATEMENT.md#q5-in-circuit-certificate-checks)) |
 | Signer certificate in the header | `P` is `{1: ES256, 33: [signer certificate, ...]}`, and the certificate whose TBS is walked is its first `x5chain` entry |
 | Original COSE signature | The signer key verifies the ES256 signature (`r`, `s` in range) over SHA-256 of `["Signature1", P, h'', claim]` |
 | Original claim | The claim in the `Sig_structure` equals the public claim, byte for byte, with canonical zero padding |
@@ -25,7 +25,7 @@ Off the circuit, the verifier validates the issuing CA's chain to the trust list
 
 **Shortcuts** (listed in the statement's [guarantees](../THIRD-PARTY-STATEMENT.md#guarantees-and-shortcuts)): no revocation; key usage, unknown critical extensions, name constraints, and policies are not checked ([H2](../README.md#h2-full-certificate-validation-in-the-circuit)); the issuing CA must be P-384 (the mirror PKI's and the official list's dominant algorithm); ES256 claim signatures and `sigTst2` only ([Q10](../THIRD-PARTY-STATEMENT.md#q10-first-algorithms)).
 
-**Sizes** ([Q4](../THIRD-PARTY-STATEMENT.md#q4-circuit-size-limits)): `P` 2 KB, claim 1 KB, TBS 1 KB, 16 extensions, 8 key purposes: 4,710,762 constraints and 50 public inputs (34 for the claim, 12 for the CA key, the claim length, the time, and two for the imprint).
+**Sizes** ([Q4](../THIRD-PARTY-STATEMENT.md#q4-circuit-size-limits)): `P` 2 KB, claim 1 KB, TBS 1 KB, 16 extensions, 8 key purposes: 4,710,820 constraints and 50 public inputs (34 for the claim, 12 for the CA key, the claim length, the time, and two for the imprint).
 
 ## Using it
 
@@ -54,6 +54,7 @@ C2PA_ZK_GROTH16=1 go test ./...     # adds a real setup, proof, and verification
 
 - Valid statements are accepted, with both claim header forms.
 - Rejected: a changed claim byte or length, imprint, a time just outside validity (the boundaries are inclusive), another CA, a changed claim signature, signer certificate byte, protected header byte, protected length, or CA signature.
+- Basic constraints: accepted when absent, empty, with `cA` FALSE written out, or with only a path length; rejected for `cA` TRUE in short and long-form sequences (a valid DER sequence with a 123-byte path length), with a path length, as a BOOLEAN of length 2, with an unexpected first element, or when the sequence does not fill the extension value or the BOOLEAN runs past it.
 - Certificate purpose: rejected without the claim-signing purpose, without an extended key usage extension, with the EKU hidden inside another extension, with two EKU extensions, or for a CA certificate; accepted with claim signing alone or among other purposes.
 - Components: variable-length SHA-384 against `crypto/sha512` at padding boundaries; UTCTime conversion against Go's `time` (leap days, the 2049 limit) and malformed dates.
 

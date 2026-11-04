@@ -32,12 +32,14 @@ var (
 )
 
 type fixtureOptions struct {
-	purposes     []asn1.ObjectIdentifier // default: email protection and C2PA claim signing
-	noEKU        bool                    // omit the extended key usage extension
-	duplicateEKU bool                    // a second extended key usage extension
-	hiddenEKU    bool                    // a full EKU extension inside a private extension's value
-	isCA         bool                    // basic constraints cA TRUE
-	claimLen     int                     // default 377
+	purposes           []asn1.ObjectIdentifier // default: email protection and C2PA claim signing
+	noEKU              bool                    // omit the extended key usage extension
+	duplicateEKU       bool                    // a second extended key usage extension
+	hiddenEKU          bool                    // a full EKU extension inside a private extension's value
+	isCA               bool                    // basic constraints cA TRUE
+	basicConstraints   []byte                  // this basic constraints value instead (DER)
+	noBasicConstraints bool                    // omit the basic constraints extension
+	claimLen           int                     // default 377
 }
 
 type fixture struct {
@@ -82,12 +84,18 @@ func newFixture(t *testing.T, opt fixtureOptions) *fixture {
 	if opt.isCA {
 		bc = []byte{0x30, 0x03, 0x01, 0x01, 0xff}
 	}
-	extensions := []pkix.Extension{
-		{Id: oidBC, Critical: true, Value: bc},
+	if opt.basicConstraints != nil {
+		bc = opt.basicConstraints
+	}
+	var extensions []pkix.Extension
+	if !opt.noBasicConstraints {
+		extensions = append(extensions, pkix.Extension{Id: oidBC, Critical: true, Value: bc})
+	}
+	extensions = append(extensions, []pkix.Extension{
 		{Id: oidKU, Critical: true, Value: mustMarshal(t, asn1.BitString{Bytes: []byte{0xc0}, BitLength: 2})},
 		{Id: oidSKI, Value: mustMarshal(t, make([]byte, 20))},
 		{Id: oidAIA, Value: mustMarshal(t, []string{"http://ocsp.example.invalid/", "http://pki.example.invalid/ca.crt"})},
-	}
+	}...)
 	if !opt.noEKU && !opt.hiddenEKU {
 		extensions = append(extensions, eku)
 	}

@@ -17,7 +17,7 @@ type Sizes struct {
 var DefaultSizes = Sizes{MaxProtected: 2048, MaxClaim: 1024, MaxTBS: 1024, MaxExtensions: 16, MaxEKUs: 8}
 
 // Fixed layout of the hashed structures. The claim signature's Sig_structure
-// is ["Signature1", P, h'', claim]:
+// is ["Signature1", P, h”, claim]:
 //
 //	84 6A "Signature1"   59 Lp Lp   P   40   58 Lc | 59 Lc Lc   claim
 //
@@ -28,7 +28,7 @@ var DefaultSizes = Sizes{MaxProtected: 2048, MaxClaim: 1024, MaxTBS: 1024, MaxEx
 // so the signer certificate and its TBS start at fixed offsets. Both real
 // device-signed assets and c2pa-rs produce exactly this encoding; others are
 // refused. The time stamp's countersignature structure (v2) is
-// ["CounterSignature", P, h'', bstr(bstr(signature))]:
+// ["CounterSignature", P, h”, bstr(bstr(signature))]:
 //
 //	84 70 "CounterSignature"   59 Lp Lp   P   40   58 42 58 40 (r || s)
 const (

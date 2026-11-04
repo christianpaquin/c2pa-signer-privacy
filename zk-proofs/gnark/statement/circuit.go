@@ -7,7 +7,7 @@
 // signer certificate), the claim signature, and the CA's signature over the
 // signer certificate's TBS. The circuit proves:
 //
-//   - the Sig_structure is ["Signature1", P, h'', claim] for the public claim;
+//   - the Sig_structure is ["Signature1", P, h”, claim] for the public claim;
 //   - P is {1: ES256, 33: [signer certificate, ...]};
 //   - the CA's key signed the certificate's TBS (ECDSA P-384, SHA-384);
 //   - walking the TBS's DER structure: it is a v3 certificate whose subject key
@@ -15,7 +15,7 @@
 //     usage extension, including C2PA claim signing, and which is not a CA
 //     (basic constraints absent or cA false);
 //   - that key signed the Sig_structure (ES256);
-//   - the imprint is SHA-256(["CounterSignature", P, h'', bstr(bstr(r || s))]),
+//   - the imprint is SHA-256(["CounterSignature", P, h”, bstr(bstr(r || s))]),
 //     binding a sigTst2 time stamp to the original signature.
 //
 // The verifier checks off-circuit that the CA chains to the trust list at t,
@@ -43,11 +43,11 @@ type Circuit struct {
 	Sizes Sizes `gnark:"-"`
 
 	// Public inputs, all derived by the verifier from the anonymized asset.
-	Claim    []frontend.Variable                                `gnark:",public"` // 31 bytes per element, big-endian, zero-padded
-	ClaimLen frontend.Variable                                  `gnark:",public"`
+	Claim    []frontend.Variable                               `gnark:",public"` // 31 bytes per element, big-endian, zero-padded
+	ClaimLen frontend.Variable                                 `gnark:",public"`
 	CAKey    ecdsa.PublicKey[emulated.P384Fp, emulated.P384Fr] `gnark:",public"`
-	Time     frontend.Variable                                  `gnark:",public"` // Unix seconds
-	Imprint  [2]frontend.Variable                               `gnark:",public"` // SHA-256, two 16-byte halves
+	Time     frontend.Variable                                 `gnark:",public"` // Unix seconds
+	Imprint  [2]frontend.Variable                              `gnark:",public"` // SHA-256, two 16-byte halves
 
 	// Private inputs.
 	SigStructure []frontend.Variable // the Sig_structure's bytes, zero-padded
@@ -160,7 +160,7 @@ func (c *Circuit) Define(api frontend.API) error {
 	// byte on both sides: a subtracted value could wrap around).
 	r.small.AssertIsLessEq(0x81, S[protectedOffset+5])
 	r.small.AssertIsLessEq(S[protectedOffset+5], 0x97)
-	api.AssertIsEqual(S[protectedOffset+6], 0x59)                  // the first is a byte string of 256 bytes or more
+	api.AssertIsEqual(S[protectedOffset+6], 0x59) // the first is a byte string of 256 bytes or more
 	leafLen := api.Add(api.Mul(S[protectedOffset+7], 256), S[protectedOffset+8])
 	api.AssertIsEqual(S[leafOffset], 0x30)
 	api.AssertIsEqual(S[leafOffset+1], 0x82)
@@ -170,7 +170,7 @@ func (c *Circuit) Define(api frontend.API) error {
 	tbsLen := api.Add(4, api.Mul(S[tbsOffset+2], 256), S[tbsOffset+3])
 	tbsEnd := api.Add(tbsOffset, tbsLen)
 	r.pos.AssertIsLessEq(tbsLen, s.MaxTBS)
-	r.pos.AssertIsLessEq(tbsEnd, api.Add(leafOffset, leafLen))                // the TBS lies in the certificate,
+	r.pos.AssertIsLessEq(tbsEnd, api.Add(leafOffset, leafLen))                         // the TBS lies in the certificate,
 	r.pos.AssertIsLessEq(api.Add(leafOffset, leafLen), api.Add(protectedOffset, pLen)) // which lies in P
 
 	// ---- The CA's signature over the TBS (ECDSA P-384, SHA-384) ----------
@@ -203,9 +203,9 @@ func (c *Circuit) Define(api frontend.API) error {
 		return err
 	}
 	p = api.Add(p, spkiLen)
-	ekuPos, ekuLen, bcPos, bcPresent := r.extensions(p, tbsEnd, s.MaxExtensions)
+	ekuPos, ekuLen, bcPos, bcLen, bcPresent := r.extensions(p, tbsEnd, s.MaxExtensions)
 	r.claimSigningEKU(ekuPos, ekuLen, s.MaxEKUs)
-	r.notCA(bcPos, bcPresent)
+	r.notCA(bcPos, bcLen, bcPresent)
 
 	timeCmp := cmp.NewBoundedComparator(api, big.NewInt(1<<34), false)
 	timeCmp.AssertIsLessEq(notBefore, c.Time)
@@ -301,8 +301,8 @@ func (r *reader) p256Key(bapi *uints.Bytes, p frontend.Variable) (*ecdsa.PublicK
 
 // extensions walks the [3] extensions at p, which must end the TBS, and
 // returns where the (single) extended key usage value and the basic
-// constraints value (if any) lie.
-func (r *reader) extensions(p, tbsEnd frontend.Variable, maxExtensions int) (ekuPos, ekuLen, bcPos, bcPresent frontend.Variable) {
+// constraints value (if any) lie, with their lengths.
+func (r *reader) extensions(p, tbsEnd frontend.Variable, maxExtensions int) (ekuPos, ekuLen, bcPos, bcLen, bcPresent frontend.Variable) {
 	api := r.api
 	api.AssertIsEqual(r.at(p), 0xa3)
 	l, hl := r.header(p, 1)
@@ -315,7 +315,7 @@ func (r *reader) extensions(p, tbsEnd frontend.Variable, maxExtensions int) (eku
 	api.AssertIsEqual(end, tbsEnd)
 
 	ekuCount, bcCount := frontend.Variable(0), frontend.Variable(0)
-	ekuPos, ekuLen, bcPos = 0, 0, 0
+	ekuPos, ekuLen, bcPos, bcLen = 0, 0, 0, 0
 	for k := 0; k < maxExtensions; k++ {
 		active := r.pos.IsLess(cur, end)
 		// Extension ::= SEQUENCE { extnID OID, critical BOOLEAN DEFAULT FALSE, extnValue OCTET STRING }
@@ -342,13 +342,14 @@ func (r *reader) extensions(p, tbsEnd frontend.Variable, maxExtensions int) (eku
 		ekuPos = api.Add(ekuPos, api.Mul(isEKU, valuePos))
 		ekuLen = api.Add(ekuLen, api.Mul(isEKU, valueLen))
 		bcPos = api.Add(bcPos, api.Mul(isBC, valuePos))
+		bcLen = api.Add(bcLen, api.Mul(isBC, valueLen))
 
 		cur = api.Select(active, extEnd, cur)
 	}
 	api.AssertIsEqual(cur, end) // no more extensions than the circuit walks
 	api.AssertIsEqual(ekuCount, 1)
 	api.AssertIsEqual(api.Mul(bcCount, api.Sub(bcCount, 1)), 0) // at most one
-	return ekuPos, ekuLen, bcPos, bcCount
+	return ekuPos, ekuLen, bcPos, bcLen, bcCount
 }
 
 // claimSigningEKU asserts the extended key usage value at pos is a sequence of
@@ -374,19 +375,36 @@ func (r *reader) claimSigningEKU(pos, length frontend.Variable, maxEKUs int) {
 	api.AssertIsEqual(api.IsZero(found), 0)
 }
 
-// notCA asserts that basic constraints, if present at pos, does not set cA.
-// BasicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE, pathLen INTEGER OPTIONAL }
-func (r *reader) notCA(pos, present frontend.Variable) {
+// notCA asserts that basic constraints, if present at pos (its extension
+// value, length bytes long), does not set cA.
+//
+//	BasicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE, pathLenConstraint INTEGER OPTIONAL }
+//
+// The sequence is decoded like every other field (short or long-form
+// length) and must fill the extension value. Its content is empty (not a
+// CA), starts with an INTEGER (pathLenConstraint only: not a CA), or starts
+// with a BOOLEAN of length 1, which must be false. Anything else is rejected:
+// throughout the walk, an encoding the circuit does not recognize must fail
+// the check, never pass it.
+func (r *reader) notCA(pos, length, present frontend.Variable) {
 	api := r.api
 	r.assertIf(present, r.at(pos), 0x30)
-	length := r.at(api.Add(pos, 1))
-	hasBoolean := api.Mul(r.small.IsLess(2, length), r.isEq(r.at(api.Add(pos, 2)), 0x01), r.isEq(r.at(api.Add(pos, 3)), 0x01))
-	isCA := api.Mul(present, hasBoolean, api.Sub(1, api.IsZero(r.at(api.Add(pos, 4)))))
+	seqLen, seqHL := r.header(pos, present)
+	r.assertIf(present, api.Add(seqHL, seqLen), length)
+	content := api.Add(pos, seqHL)
+	nonEmpty := api.Mul(present, api.Sub(1, api.IsZero(seqLen)))
+	tag := r.at(content)
+	isBoolean, isInteger := r.isEq(tag, 0x01), r.isEq(tag, 0x02)
+	r.assertIf(nonEmpty, api.Add(isBoolean, isInteger), 1)
+	boolean := api.Mul(nonEmpty, isBoolean)
+	r.assertIf(boolean, r.pos.IsLess(2, seqLen), 1)   // the BOOLEAN lies within the sequence
+	r.assertIf(boolean, r.at(api.Add(content, 1)), 1) // of length 1
+	isCA := api.Mul(boolean, api.Sub(1, api.IsZero(r.at(api.Add(content, 2)))))
 	api.AssertIsEqual(isCA, 0)
 }
 
 // imprint asserts the public imprint is the SHA-256 of the countersignature
-// structure ["CounterSignature", P, h'', bstr(bstr(r || s))], built from the
+// structure ["CounterSignature", P, h”, bstr(bstr(r || s))], built from the
 // Sig_structure's P and the claim signature.
 func (c *Circuit) imprint(api frontend.API, bapi *uints.Bytes, r *reader, sig []uints.U8, pLen frontend.Variable) error {
 	s := c.Sizes

@@ -30,6 +30,10 @@ struct Fixture {
 impl Fixture {
     /// `time_stamp`: sign with the local TSA.
     fn new(mirror: bool, time_stamp: bool) -> Self {
+        Self::with_claim_version(mirror, time_stamp, 2)
+    }
+
+    fn with_claim_version(mirror: bool, time_stamp: bool, claim_version: u8) -> Self {
         let dir = tempdir().unwrap();
         let mut generate = std::process::Command::new("bash");
         generate.arg(zk_root().join("generate-test-pki.sh"));
@@ -45,6 +49,7 @@ impl Fixture {
         for (flag, file) in [("--cert", "signer.pem"), ("--key", "signer.key"), ("--ca", "issuing-ca.pem")] {
             sign.arg(flag).arg(fixture.pki(file));
         }
+        sign.arg("--claim-version").arg(claim_version.to_string());
         if time_stamp {
             sign.arg("--tsa-cert").arg(fixture.pki("tsa.pem")).arg("--tsa-key").arg(fixture.pki("tsa.key"));
         }
@@ -121,7 +126,7 @@ fn mirror_fixture_has_the_structure_of_real_device_assets() {
     assert_eq!(original.time_stamp.as_ref().map(|t| t.version), Some(TimeStampVersion::V2));
 
     // The issuing CA is P-384 and signed the signer certificate with ECDSA-SHA384.
-    let signer = x509_cert::Certificate::from_der(original.signer_certificate()).unwrap();
+    let signer = x509_cert::Certificate::from_der(original.signer_certificate().unwrap()).unwrap();
     assert_eq!(signer.signature_algorithm.oid, const_oid::db::rfc5912::ECDSA_WITH_SHA_384);
     let ca = x509_cert::Certificate::from_der(&original.x5chain[1]).unwrap();
     let ca_curve = key_curve(&ca);
@@ -161,7 +166,7 @@ fn time_stamp_imprint_covers_the_countersignature_structure() {
     assert!(!imprint_matches_sha256(&info, &original.sig_structure()));
 
     // The attested time lies within the signer certificate's validity.
-    let signer = x509_cert::Certificate::from_der(original.signer_certificate()).unwrap();
+    let signer = x509_cert::Certificate::from_der(original.signer_certificate().unwrap()).unwrap();
     let validity = signer.tbs_certificate.validity;
     let g = info.gen_time.as_bytes();
     let num = |r: std::ops::Range<usize>| std::str::from_utf8(&g[r]).unwrap().parse::<u16>().unwrap();
@@ -180,4 +185,27 @@ fn default_profile_without_a_tsa_is_unchanged() {
     let ca = x509_cert::Certificate::from_der(&original.x5chain[1]).unwrap();
     let ca_curve = key_curve(&ca);
     assert_eq!(ca_curve, const_oid::db::rfc5912::SECP_256_R_1);
+}
+
+/// Legacy claim v1 stores a `TimeStampResp` in `sigTst` (C2PA §10.3.2.5.4),
+/// countersigning the claim; the token inside it is normalized out.
+#[test]
+fn legacy_claim_v1_time_stamp_is_normalized_and_covers_the_claim() {
+    let fixture = Fixture::with_claim_version(true, true, 1);
+    let reader = c2pa_reader(&fixture.signed(), &fixture, &["trust-list.pem", "tsa-trust-list.pem"]);
+    let (success, failure) = codes(&reader);
+    assert!(failure.is_empty(), "failures: {failure:?}");
+    assert!(success.contains(&"timeStamp.trusted".to_string()), "{success:?}");
+
+    let original = fixture.original();
+    assert_eq!(original.manifest.claim_label, "c2pa.claim");
+    original.verify_es256().unwrap();
+    let ts = original.time_stamp.as_ref().unwrap();
+    assert_eq!(ts.version, TimeStampVersion::V1);
+    assert_ne!(ts.stored, ts.token, "sigTst stores the response, not the bare token");
+    assert!(tst_info(&ts.stored).is_err());
+
+    let info = tst_info(&ts.token).unwrap();
+    assert!(imprint_matches_sha256(&info, &original.countersignature_structure(TimeStampVersion::V1)));
+    assert!(!imprint_matches_sha256(&info, &original.countersignature_structure(TimeStampVersion::V2)));
 }

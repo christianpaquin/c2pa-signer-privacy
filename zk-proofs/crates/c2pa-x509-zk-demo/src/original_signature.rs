@@ -28,11 +28,14 @@ pub enum TimeStampVersion {
     V2,
 }
 
-/// An RFC 3161 time-stamp token from the unprotected header.
+/// An RFC 3161 time stamp from the unprotected header.
 #[derive(Debug, Clone)]
 pub struct TimeStamp {
     pub version: TimeStampVersion,
-    /// The `TimeStampToken` (CMS `ContentInfo`), DER.
+    /// The value as stored: a `TimeStampResp` for `sigTst` (v1), a
+    /// `TimeStampToken` for `sigTst2` (v2) (C2PA §10.3.2.5.4).
+    pub stored: Vec<u8>,
+    /// The `TimeStampToken` (CMS `ContentInfo`), DER, for either version.
     pub token: Vec<u8>,
 }
 
@@ -109,11 +112,19 @@ impl OriginalSignature {
             Some(Value::Bytes(cert)) => vec![cert.clone()],
             _ => bail!("protected header has no x5chain"),
         };
+        if x5chain.is_empty() {
+            bail!("x5chain is empty: no signer certificate");
+        }
 
         let mut time_stamps = Vec::new();
         for (label, version) in [("sigTst", TimeStampVersion::V1), ("sigTst2", TimeStampVersion::V2)] {
             if let Some(value) = map_get(&unprotected, &Value::Text(label.into())) {
-                time_stamps.push(TimeStamp { version, token: single_token(value)? });
+                let stored = single_token(value)?;
+                let token = match version {
+                    TimeStampVersion::V1 => time_stamp_token_from_response(&stored)?,
+                    TimeStampVersion::V2 => stored.clone(),
+                };
+                time_stamps.push(TimeStamp { version, stored, token });
             }
         }
         if time_stamps.len() > 1 {
@@ -124,8 +135,8 @@ impl OriginalSignature {
     }
 
     /// The signer certificate: the first `x5chain` entry (C2PA §13.5).
-    pub fn signer_certificate(&self) -> &[u8] {
-        &self.x5chain[0]
+    pub fn signer_certificate(&self) -> Result<&[u8]> {
+        self.x5chain.first().map(Vec::as_slice).ok_or_else(|| anyhow!("x5chain is empty: no signer certificate"))
     }
 
     /// `Sig_structure` for the claim signature: `["Signature1", protected,
@@ -163,7 +174,7 @@ impl OriginalSignature {
         if self.alg != COSE_ALG_ES256 {
             bail!("claim signature alg is {}, not ES256", self.alg);
         }
-        let cert = x509_cert::Certificate::from_der(self.signer_certificate())?;
+        let cert = x509_cert::Certificate::from_der(self.signer_certificate()?)?;
         let spki = cert.tbs_certificate.subject_public_key_info.to_der()?;
         let key = VerifyingKey::from_public_key_der(&spki).map_err(|e| anyhow!("signer key is not P-256: {e}"))?;
         let signature = Signature::from_slice(&self.signature).map_err(|e| anyhow!("malformed ES256 signature: {e}"))?;
@@ -216,6 +227,30 @@ fn der_expect(input: &[u8], tag: u8) -> Result<(&[u8], &[u8])> {
     Ok((content, rest))
 }
 
+/// The `TimeStampToken` in an RFC 3161 `TimeStampResp` (as `sigTst` stores
+/// it): `SEQUENCE { status PKIStatusInfo, timeStampToken OPTIONAL }`. The
+/// status must be granted (0) or granted with modifications (1), and the
+/// token present.
+pub fn time_stamp_token_from_response(response: &[u8]) -> Result<Vec<u8>> {
+    let (body, trailing) = der_expect(response, 0x30)?;
+    if !trailing.is_empty() {
+        bail!("data after the TimeStampResp");
+    }
+    let (status_info, rest) = der_expect(body, 0x30)?;
+    let (status, _) = der_expect(status_info, 0x02)?;
+    if !matches!(status, [0] | [1]) {
+        bail!("time-stamp response status {status:02x?} is not granted");
+    }
+    if rest.is_empty() {
+        bail!("time-stamp response has no token");
+    }
+    let (tag, _, after) = der_tlv(rest)?;
+    if tag != 0x30 || !after.is_empty() {
+        bail!("malformed time-stamp token in the response");
+    }
+    Ok(rest.to_vec())
+}
+
 /// The `TSTInfo` of an RFC 3161 `TimeStampToken`: ContentInfo → [0] SignedData
 /// → encapContentInfo → [0] OCTET STRING → TSTInfo. The token's CMS signature
 /// is not checked here; c2pa (and, in E2b, the verifier) validates it.
@@ -254,4 +289,73 @@ pub const SHA256_OID: [u8; 9] = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
 /// Whether `info`'s imprint is the SHA-256 of `message`.
 pub fn imprint_matches_sha256(info: &TstInfo, message: &[u8]) -> bool {
     info.hash_algorithm_oid == SHA256_OID && info.hashed_message[..] == Sha256::digest(message)[..]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ops::Range;
+
+    /// A tagged, detached COSE_Sign1 with an ES256 protected header holding
+    /// `x5chain` and the given unprotected header.
+    fn cose(x5chain: Value, unprotected: Vec<(Value, Value)>) -> ActiveManifest {
+        let protected = cbor(&Value::Map(vec![
+            (Value::Integer(COSE_HEADER_ALG.into()), Value::Integer(COSE_ALG_ES256.into())),
+            (Value::Integer(COSE_HEADER_X5CHAIN.into()), x5chain),
+        ]));
+        let sign1 = cbor(&Value::Tag(
+            COSE_SIGN1_TAG,
+            Box::new(Value::Array(vec![Value::Bytes(protected), Value::Map(unprotected), Value::Null, Value::Bytes(vec![0; 64])])),
+        ));
+        let range: Range<usize> = 0..sign1.len();
+        ActiveManifest { label: "urn:c2pa:test".into(), claim_label: "c2pa.claim.v2".into(), claim: b"claim".to_vec(), cose_sign1: sign1, cose_sign1_range: range }
+    }
+
+    fn certs(n: usize) -> Value {
+        Value::Array((0..n).map(|_| Value::Bytes(vec![0x30, 0])).collect())
+    }
+
+    fn time_stamp_header(label: &str, tokens: Vec<Vec<u8>>) -> Vec<(Value, Value)> {
+        let tokens = tokens.into_iter().map(|t| Value::Map(vec![(Value::Text("val".into()), Value::Bytes(t))])).collect();
+        vec![(Value::Text(label.into()), Value::Map(vec![(Value::Text("tstTokens".into()), Value::Array(tokens))]))]
+    }
+
+    #[test]
+    fn empty_or_malformed_x5chain_is_an_error_not_a_panic() {
+        let err = OriginalSignature::from_manifest(cose(certs(0), vec![])).unwrap_err();
+        assert!(err.to_string().contains("x5chain is empty"), "{err}");
+        assert!(OriginalSignature::from_manifest(cose(Value::Array(vec![Value::Integer(1.into())]), vec![])).is_err());
+
+        // A parsed signature whose chain is later emptied still fails cleanly.
+        let mut parsed = OriginalSignature::from_manifest(cose(certs(1), vec![])).unwrap();
+        parsed.x5chain.clear();
+        assert!(parsed.signer_certificate().is_err());
+        assert!(parsed.verify_es256().is_err());
+    }
+
+    #[test]
+    fn time_stamp_headers_must_hold_exactly_one_token() {
+        for tokens in [vec![], vec![vec![0x30, 0], vec![0x30, 0]]] {
+            assert!(OriginalSignature::from_manifest(cose(certs(1), time_stamp_header("sigTst2", tokens))).is_err());
+        }
+    }
+
+    #[test]
+    fn v1_response_must_be_granted_and_hold_a_token() {
+        // TimeStampResp { status = rejection (2) }, no token.
+        let rejected = vec![0x30, 0x05, 0x30, 0x03, 0x02, 0x01, 0x02];
+        let err = OriginalSignature::from_manifest(cose(certs(1), time_stamp_header("sigTst", vec![rejected]))).unwrap_err();
+        assert!(err.to_string().contains("not granted"), "{err}");
+        // Granted, but no token.
+        let empty = vec![0x30, 0x05, 0x30, 0x03, 0x02, 0x01, 0x00];
+        assert!(time_stamp_token_from_response(&empty).is_err());
+        // Granted, with a (stand-in) token: the token is returned as is.
+        let token = [0x30, 0x02, 0x05, 0x00];
+        let response = [&[0x30, 0x09, 0x30, 0x03, 0x02, 0x01, 0x00][..], &token].concat();
+        assert_eq!(time_stamp_token_from_response(&response).unwrap(), token);
+        // A v2 header holds the token itself.
+        let parsed = OriginalSignature::from_manifest(cose(certs(1), time_stamp_header("sigTst2", vec![token.to_vec()]))).unwrap();
+        let ts = parsed.time_stamp.unwrap();
+        assert_eq!((ts.version, ts.token.as_slice(), ts.stored.as_slice()), (TimeStampVersion::V2, &token[..], &token[..]));
+    }
 }

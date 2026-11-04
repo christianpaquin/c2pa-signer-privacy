@@ -51,6 +51,11 @@ struct Args {
     /// Test TSA private key (PEM)
     #[arg(long, requires = "tsa_cert")]
     tsa_key: Option<PathBuf>,
+
+    /// C2PA claim version: 2 (current; time stamp in `sigTst2`) or 1 (legacy;
+    /// time stamp in `sigTst`, as in older real assets)
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=2))]
+    claim_version: u8,
 }
 
 const CLAIM_GENERATOR: &str = "c2pa-x509-zk-demo/0.1";
@@ -91,6 +96,7 @@ fn main() -> Result<()> {
     // A c2pa.created action, as C2PA requires of a new asset's first manifest
     // and real device claims carry.
     let definition = serde_json::json!({
+        "claim_version": args.claim_version,
         "claim_generator_info": [{ "name": CLAIM_GENERATOR, "version": "0.1" }],
         "assertions": [{
             "label": "c2pa.actions.v2",

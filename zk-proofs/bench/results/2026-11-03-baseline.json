@@ -1,5 +1,5 @@
 {
-  "schema": "c2pa-x509-zk-bench/1",
+  "schema": "c2pa-x509-zk-bench/2",
   "variant": {
     "mode": "signer-side",
     "trust_model": "A",
@@ -10,6 +10,7 @@
     "circuit": "x509_issue_and_possession"
   },
   "statement": "Signer-side anonymization, trust model A: the issuing CA's P-256 key (a public input) signed, with ECDSA-SHA256, a certificate whose P-256 subject key (pinned inside the signed TBSCertificate) signed the manifest-stripped asset digest (a public input), and the certificate's validity period (also pinned) contains a prover-chosen timestamp (a public input the verifier does not check). Off-circuit, the issuing CA chain in x5chain is validated against a trust list.",
+  "accounting": "one_time = compile + setup (per circuit and keys). anonymization_per_asset = prepare + witness + prove + package: the complete latency of anonymizing one asset, from a signed asset to an anonymized one, excluding one-time work; anonymization_witness_plus_prove is the subtotal for proof generation alone. verification = loading and preparing the verifying key and verifying the proof; verification_full = the verifier CLI on the anonymized asset (trust-list chain validation, assertion and digest checks, and the proof). test_fixture (generating the test PKI and signing the sample asset) is not part of any total. Peak memory per category is the maximum over its phases, each a separate process.",
   "environment": {
     "cpu": "13th Gen Intel(R) Core(TM) i7-13800H",
     "logical_cpus": 20,
@@ -19,36 +20,95 @@
     "wsl": true,
     "rustc": "rustc 1.93.0 (254b59607 2026-01-19)",
     "circom": "circom compiler 2.1.6",
-    "git_commit": "b4e38292f6e93fa1a7d6ca5038f7fc88eb2c5575",
+    "git_commit": "4afb4f86024e670eef3fc999d994f27b7021925e",
     "git_changed_files": [],
     "build_profile": "release"
   },
   "artifacts": {
     "r1cs_sha256": "f3bddeaa5047b0ac93f2bfd70f1de9c733b5e406855e22fb0606bac332abda0c",
-    "verifying_key_sha256": "32e5b4bbca7d7436a23bb92af4940fd986813c8f47d4ffaab49b96d18c26db50",
+    "verifying_key_sha256": "7fc44f326495107a0ddb1746e386788aebbef1557c6b6b45e90f2f67b1478f4f",
     "r1cs_bytes": 1139579408,
-    "wasm_bytes": 25465820
+    "wasm_bytes": 25465820,
+    "proving_key_bytes": 1026490480,
+    "verifying_key_bytes": 872,
+    "constraints": 4776263,
+    "wires": 4737842
   },
   "inputs": {
-    "signer_certificate_bytes": 505,
+    "signer_certificate_bytes": 504,
     "tbs_certificate_bytes": 414,
     "issuing_chain_certificates": 1,
     "asset_bytes": 1887546
   },
+  "totals": {
+    "one_time": {
+      "phases": [
+        "compile",
+        "setup"
+      ],
+      "wall_s": 255.27969278999998,
+      "peak_rss_mib": 10185.9453125
+    },
+    "anonymization_per_asset": {
+      "phases": [
+        "prepare",
+        "witness",
+        "prove",
+        "package"
+      ],
+      "wall_s": 611.282053182,
+      "peak_rss_mib": 11326.56640625
+    },
+    "anonymization_witness_plus_prove": {
+      "phases": [
+        "witness",
+        "prove"
+      ],
+      "wall_s": 611.218298625,
+      "peak_rss_mib": 11326.56640625
+    },
+    "verification": {
+      "phases": [
+        "verify"
+      ],
+      "wall_s": 0.013390608,
+      "peak_rss_mib": 9.30078125
+    },
+    "verification_full": {
+      "phases": [
+        "verify_cli"
+      ],
+      "wall_s": 0.018891587,
+      "peak_rss_mib": 13.4765625
+    }
+  },
   "phases": [
     {
+      "name": "fixtures",
+      "category": "test-fixture",
+      "wall_s": 0.194240142,
+      "peak_rss_mib": 21.3125,
+      "steps": {
+        "generate_pki_s": 0.164500444,
+        "sign_asset_s": 0.024574934
+      },
+      "data": {}
+    },
+    {
       "name": "compile",
-      "wall_s": 198.593322828,
-      "peak_rss_mib": 6194.73828125,
+      "category": "one-time",
+      "wall_s": 206.423231647,
+      "peak_rss_mib": 6196.68359375,
       "steps": null,
       "data": null
     },
     {
       "name": "setup",
-      "wall_s": 50.579044926,
-      "peak_rss_mib": 10177.43359375,
+      "category": "one-time",
+      "wall_s": 48.856461143,
+      "peak_rss_mib": 10185.9453125,
       "steps": {
-        "setup_s": 50.282613737
+        "setup_s": 48.541079986
       },
       "data": {
         "proving_key_bytes": 1026490480,
@@ -56,15 +116,34 @@
       }
     },
     {
-      "name": "witness",
-      "wall_s": 229.271509048,
-      "peak_rss_mib": 4099.6328125,
+      "name": "prepare",
+      "category": "anonymization",
+      "wall_s": 0.034392248,
+      "peak_rss_mib": 19.05078125,
       "steps": {
-        "read_inputs_s": 0.000325109,
-        "load_circuit_s": 4.190026023,
-        "compute_witness_s": 223.563140083,
-        "check_witness_s": 0.865427115,
-        "write_witness_s": 0.136813691
+        "load_trust_list_s": 0.000298061,
+        "read_signed_manifest_s": 0.024535094,
+        "validate_issuing_chain_s": 0.000691874,
+        "build_circuit_inputs_s": 0.00062761,
+        "write_inputs_s": 0.00021664
+      },
+      "data": {
+        "signer_certificate_bytes": 504,
+        "tbs_certificate_bytes": 414,
+        "issuing_chain_certificates": 1
+      }
+    },
+    {
+      "name": "witness",
+      "category": "anonymization",
+      "wall_s": 230.50222021,
+      "peak_rss_mib": 4101.41796875,
+      "steps": {
+        "read_inputs_s": 0.000220137,
+        "load_circuit_s": 4.109013079,
+        "compute_witness_s": 224.86979462,
+        "check_witness_s": 0.870638664,
+        "write_witness_s": 0.143373417
       },
       "data": {
         "constraints": 4776263,
@@ -73,32 +152,56 @@
     },
     {
       "name": "prove",
-      "wall_s": 378.642626556,
-      "peak_rss_mib": 11327.00390625,
+      "category": "anonymization",
+      "wall_s": 380.716078415,
+      "peak_rss_mib": 11326.56640625,
       "steps": {
-        "load_r1cs_s": 2.769418511,
-        "read_witness_s": 0.255359557,
-        "load_proving_key_s": 342.301515728,
-        "prove_s": 32.970535132,
-        "write_proof_s": 0.000171317
+        "load_r1cs_s": 2.762604747,
+        "read_witness_s": 0.263386451,
+        "load_proving_key_s": 345.466380117,
+        "prove_s": 31.916349897,
+        "write_proof_s": 0.000174661
       },
       "data": {}
     },
     {
-      "name": "verify",
-      "wall_s": 0.03379665,
-      "peak_rss_mib": 18.73828125,
+      "name": "package",
+      "category": "anonymization",
+      "wall_s": 0.029362309,
+      "peak_rss_mib": 22.78125,
       "steps": {
-        "read_proof_s": 0.000768567,
-        "load_verifying_key_s": 0.010471241,
-        "load_and_verify_s": 0.010078862
+        "read_context_s": 0.000162505,
+        "build_assertion_s": 0.000027601,
+        "rewrite_manifest_s": 0.014828597,
+        "check_digest_s": 0.005618072
+      },
+      "data": {
+        "groth16_proof_bytes": 128,
+        "public_inputs": 19,
+        "proof_container_bytes": 668,
+        "assertion_json_bytes": 1183,
+        "x5chain_bytes": 481,
+        "manifest_store_bytes": 11386
+      }
+    },
+    {
+      "name": "verify",
+      "category": "verification",
+      "wall_s": 0.013390608,
+      "peak_rss_mib": 9.30078125,
+      "steps": {
+        "read_proof_s": 0.000262753,
+        "load_verifying_key_s": 0.00372983,
+        "prepare_verifying_key_s": 0.001114403,
+        "verify_s": 0.00171973
       },
       "data": {}
     },
     {
       "name": "verify_cli",
-      "wall_s": 0.020555788,
-      "peak_rss_mib": 26.8125,
+      "category": "verification-full",
+      "wall_s": 0.018891587,
+      "peak_rss_mib": 13.4765625,
       "steps": null,
       "data": null
     }
@@ -109,7 +212,7 @@
     "proof_container_bytes": 668,
     "assertion_json_bytes": 1183,
     "x5chain_bytes": 481,
-    "manifest_store_bytes": 11385,
+    "manifest_store_bytes": 11386,
     "note": "manifest_store_bytes is the whole C2PA store added to the asset, including the COSE signature's reserved padding; proof_container_bytes is the proof as embedded (base64 of JSON with the public inputs); the COSE signature field holds the same container decoded once."
   }
 }

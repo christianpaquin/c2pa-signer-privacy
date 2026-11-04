@@ -230,13 +230,15 @@ Measured with the [benchmark harness](#benchmarks) on a 13th Gen Intel Core i7-1
 
 | Phase | Time | Peak RSS | Notes |
 |-------|------|----------|-------|
-| Circuit compilation | ~3.3 min | ~6.0 GiB | One-time (`circom`) |
-| Trusted setup | ~51 s | ~9.9 GiB | One-time, native Rust |
+| Circuit compilation | ~3.4 min | ~6.0 GiB | One-time (`circom`) |
+| Trusted setup | ~49 s | ~9.9 GiB | One-time, native Rust |
+| Preparation | ~0.03 s | ~19 MiB | Per asset: read the signed manifest, validate the issuing chain, build the circuit inputs |
 | Witness generation | ~3.8 min | ~4.0 GiB | Per asset; almost all of it running the circuit's WASM witness generator |
-| Proving | ~6.3 min | ~11.1 GiB | Per asset; **~5.7 min of it is loading the 1 GB proving key** (stored compressed and fully validated on load); the Groth16 proof itself takes ~33 s |
-| Verification | ~0.01 s | ~19 MiB | Per asset |
+| Proving | ~6.3 min | ~11.1 GiB | Per asset; **~5.8 min of it is loading the 1 GB proving key** (stored compressed and fully validated on load); the Groth16 proof itself takes ~32 s |
+| Packaging | ~0.03 s | ~23 MiB | Per asset: build the assertion, rewrite the manifest, check the digest |
+| Verification | ~0.01 s | ~9 MiB | Per asset; the full verifier CLI (with trust-list chain validation) takes ~0.02 s |
 
-Per proof, that is ~10.1 minutes, of which the cryptographic proving is about 5%: key deserialization (56%) and WASM witness generation (37%) dominate. Peak memory is ~11 GiB, while loading the proving key, so a 16 GB machine should be enough (not tested). Use [Placeholder Mode](#placeholder-mode) on smaller machines.
+Anonymizing one asset takes ~10.2 minutes, of which the cryptographic proving is about 5%: key deserialization (57%) and WASM witness generation (37%) dominate. Peak memory is ~11 GiB, while loading the proving key, so a 16 GB machine should be enough (not tested). Use [Placeholder Mode](#placeholder-mode) on smaller machines.
 
 ### COSE Integration
 
@@ -424,7 +426,7 @@ The order follows the method in [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIO
 - **Signer certificate removed from anonymized output** ([#6](https://github.com/christianpaquin/c2pa-signer-privacy/issues/6)).
 - **Certificate field binding:** the circuit pins the signer key and validity period inside the CA-signed TBSCertificate; previously a prover with no certificate could forge a proof (see [Certificate field binding](#certificate-field-binding)).
 - **Certificate dates computed one month late:** the in-circuit UTCTime conversion indexed its days-before-month table off by one, shifting every `notBefore`/`notAfter` 28-31 days later. Certificates less than about a month old could not produce valid proofs, and certificates expired up to about a month earlier were still accepted. Fixed, with tests against Python's calendar for every month, leap days, and both ends of the UTCTime range.
-- **F2. Benchmark harness and the R1 matrix:** `c2pa-x509-zk-bench` measures each phase in its own process (see [Benchmarks](#benchmarks)), and [FEASIBILITY.md](FEASIBILITY.md) holds the R1 matrix with the measured baseline, provisional targets, and stop rules. The baseline showed that the Groth16 proof itself is ~5% of per-proof time; loading the proving key (56%) and WASM witness generation (37%) dominate.
+- **F2. Benchmark harness and the R1 matrix:** `c2pa-x509-zk-bench` measures each phase in its own process (see [Benchmarks](#benchmarks)), and [FEASIBILITY.md](FEASIBILITY.md) holds the R1 matrix with the measured baseline, provisional targets, and stop rules. The baseline showed that the Groth16 proof itself is ~5% of per-asset anonymization time; loading the proving key (57%) and WASM witness generation (37%) dominate.
 - **F3. Minimum correctness infrastructure:** the prover checks every witness against the R1CS before proving and reports a typed `WitnessRejected` (ark-circom's witness generator ignores failing constraints even with `sanity_check` set, contrary to what this roadmap previously assumed); forgery tests at both the constraint and proof levels; a build manifest identifying the circuit and keys, recorded in the assertion (now version 0.2) as diagnostics; verification needs only the verifying key; privacy scans on every anonymized test output; and the [Testing](#testing) conventions and [Current Limitations](#current-limitations).
 - **F1. C2PA-like test PKI and trust lists:** a generated 3-cert PKI (root → issuing CA that is itself a trust anchor → signer with the claim-signing EKU and a 90-day lifetime); trust lists in PEM and the C2PA JSON format; the anonymized asset's `x5chain` carries the issuing chain (decision D4), which the verifier validates against the trust list before checking the issuing CA's key against the proof's public inputs; `issuer_key_id` is now the SHA-256 of the issuing CA's public key, so it survives certificate renewal (see [Test PKI and Trust Lists](#test-pki-and-trust-lists)). Privacy note: the issuing CA is disclosed, so the anonymity set is everyone that CA has issued certificates to; a narrowly scoped CA can nearly identify the signer (see [H4](#h4-hiding-the-issuing-ca)).
 

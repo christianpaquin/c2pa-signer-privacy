@@ -50,7 +50,7 @@ Trade-offs:
 
 ## D2. Proof system
 
-The current Groth16/circom stack gives ~1 KB proofs and millisecond verification, but needs ~11 GiB of RAM and ~10 minutes per proof, and a circuit-specific trusted setup that must be redone (and redistributed) after every circuit change. The [baseline measurement](FEASIBILITY.md#observations) shows the Groth16 proof itself takes ~33 s; loading the 1 GB proving key (56% of the time) and WASM witness generation (37%) dominate, so the cheapest gains are engineering ones within this stack (key format, native witness generation) before any change of proof system.
+The current Groth16/circom stack gives ~1 KB proofs and millisecond verification, but needs ~11 GiB of RAM and ~10 minutes per asset, and a circuit-specific trusted setup that must be redone (and redistributed) after every circuit change. The [baseline measurement](FEASIBILITY.md#observations) shows the Groth16 proof itself takes ~32 s; loading the 1 GB proving key (57% of the time) and WASM witness generation (37%) dominate, so the cheapest gains are engineering ones within this stack (key format, native witness generation) before any change of proof system.
 
 | Option | Setup | Proof size / verification | Proving cost for P-256 + SHA-256 | Notes |
 |--------|-------|---------------------------|----------------------------------|-------|

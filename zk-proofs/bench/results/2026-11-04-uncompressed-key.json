@@ -1,0 +1,216 @@
+{
+  "schema": "c2pa-x509-zk-bench/2",
+  "variant": {
+    "mode": "signer-side",
+    "trust_model": "A",
+    "signer_key": "P-256",
+    "ca_signature": "ECDSA P-256 with SHA-256",
+    "proof_system": "Groth16 (ark-groth16, ark-circom witness generation in WASM)",
+    "curve": "BN254",
+    "circuit": "x509_issue_and_possession",
+    "proving_key": "uncompressed-parallel-on-curve-sha256"
+  },
+  "statement": "Signer-side anonymization, trust model A: the issuing CA's P-256 key (a public input) signed, with ECDSA-SHA256, a certificate whose P-256 subject key (pinned inside the signed TBSCertificate) signed the manifest-stripped asset digest (a public input), and the certificate's validity period (also pinned) contains a prover-chosen timestamp (a public input the verifier does not check). Off-circuit, the issuing CA chain in x5chain is validated against a trust list.",
+  "accounting": "one_time = compile + setup (per circuit and keys). anonymization_per_asset = prepare + witness + prove + package: the complete latency of anonymizing one asset, from a signed asset to an anonymized one, excluding one-time work; anonymization_witness_plus_prove is the subtotal for proof generation alone. verification = loading and preparing the verifying key and verifying the proof; verification_full = the verifier CLI on the anonymized asset (trust-list chain validation, assertion and digest checks, and the proof). test_fixture (generating the test PKI and signing the sample asset) is not part of any total. Peak memory per category is the maximum over its phases, each a separate process.",
+  "environment": {
+    "cpu": "13th Gen Intel(R) Core(TM) i7-13800H",
+    "logical_cpus": 20,
+    "memory": "32774804 kB",
+    "os": "Ubuntu 24.04.2 LTS",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "wsl": true,
+    "rustc": "rustc 1.93.0 (254b59607 2026-01-19)",
+    "circom": "circom compiler 2.1.6",
+    "git_commit": "31a88aaf2661ebbb71d2888b5006e434c4185ece",
+    "git_changed_files": [],
+    "build_profile": "release"
+  },
+  "artifacts": {
+    "r1cs_sha256": "f3bddeaa5047b0ac93f2bfd70f1de9c733b5e406855e22fb0606bac332abda0c",
+    "verifying_key_sha256": "5d31f322b12b6a5e58269b08c17fb0383cf9ab0d3f7660c860b78b57b42afccb",
+    "r1cs_bytes": 1139579408,
+    "wasm_bytes": 25465820,
+    "proving_key_bytes": 2052980912,
+    "verifying_key_bytes": 872,
+    "constraints": 4776263,
+    "wires": 4737842
+  },
+  "inputs": {
+    "signer_certificate_bytes": 505,
+    "tbs_certificate_bytes": 414,
+    "issuing_chain_certificates": 1,
+    "asset_bytes": 1887546
+  },
+  "totals": {
+    "one_time": {
+      "phases": [
+        "compile",
+        "setup"
+      ],
+      "measured": false
+    },
+    "anonymization_per_asset": {
+      "phases": [
+        "prepare",
+        "witness",
+        "prove",
+        "package"
+      ],
+      "wall_s": 338.872168972,
+      "peak_rss_mib": 11471.359375
+    },
+    "anonymization_witness_plus_prove": {
+      "phases": [
+        "witness",
+        "prove"
+      ],
+      "wall_s": 338.80877216399995,
+      "peak_rss_mib": 11471.359375
+    },
+    "verification": {
+      "phases": [
+        "verify"
+      ],
+      "wall_s": 0.014656091,
+      "peak_rss_mib": 9.42578125
+    },
+    "verification_full": {
+      "phases": [
+        "verify_cli"
+      ],
+      "wall_s": 0.04622312,
+      "peak_rss_mib": 13.48046875
+    }
+  },
+  "phases": [
+    {
+      "name": "fixtures",
+      "category": "test-fixture",
+      "wall_s": 0.269005689,
+      "peak_rss_mib": 21.30078125,
+      "steps": {
+        "generate_pki_s": 0.199762001,
+        "sign_asset_s": 0.061346564
+      },
+      "data": {}
+    },
+    {
+      "name": "compile",
+      "category": "one-time",
+      "skipped": "reused circuits/build"
+    },
+    {
+      "name": "setup",
+      "category": "one-time",
+      "wall_s": 82.739413835,
+      "peak_rss_mib": 10180.23828125,
+      "steps": {
+        "setup_s": 82.319126034
+      },
+      "data": {
+        "proving_key_bytes": 2052980912,
+        "verifying_key_bytes": 872
+      }
+    },
+    {
+      "name": "prepare",
+      "category": "anonymization",
+      "wall_s": 0.032474659,
+      "peak_rss_mib": 19.83203125,
+      "steps": {
+        "load_trust_list_s": 0.000150404,
+        "read_signed_manifest_s": 0.024333368,
+        "validate_issuing_chain_s": 0.000659481,
+        "build_circuit_inputs_s": 0.000666891,
+        "write_inputs_s": 0.000204856
+      },
+      "data": {
+        "signer_certificate_bytes": 505,
+        "tbs_certificate_bytes": 414,
+        "issuing_chain_certificates": 1
+      }
+    },
+    {
+      "name": "witness",
+      "category": "anonymization",
+      "wall_s": 295.78637702,
+      "peak_rss_mib": 4029.3125,
+      "steps": {
+        "read_inputs_s": 0.000260812,
+        "load_circuit_s": 5.6980126559999995,
+        "compute_witness_s": 287.615413967,
+        "check_witness_s": 1.419633487,
+        "write_witness_s": 0.256763248
+      },
+      "data": {
+        "constraints": 4776263,
+        "wires": 4737842
+      }
+    },
+    {
+      "name": "prove",
+      "category": "anonymization",
+      "wall_s": 43.022395144,
+      "peak_rss_mib": 11471.359375,
+      "steps": {
+        "load_r1cs_s": 2.918380312,
+        "read_witness_s": 0.251058961,
+        "check_proving_key_sha256_s": 1.960278147,
+        "load_proving_key_s": 3.146168447,
+        "prove_s": 34.157191686,
+        "write_proof_s": 0.000296466
+      },
+      "data": {}
+    },
+    {
+      "name": "package",
+      "category": "anonymization",
+      "wall_s": 0.030922149,
+      "peak_rss_mib": 24.6953125,
+      "steps": {
+        "read_context_s": 0.000056695,
+        "build_assertion_s": 0.000032795,
+        "rewrite_manifest_s": 0.01605926,
+        "check_digest_s": 0.0059068
+      },
+      "data": {
+        "groth16_proof_bytes": 128,
+        "public_inputs": 19,
+        "proof_container_bytes": 664,
+        "assertion_json_bytes": 1179,
+        "x5chain_bytes": 481,
+        "manifest_store_bytes": 11378
+      }
+    },
+    {
+      "name": "verify",
+      "category": "verification",
+      "wall_s": 0.014656091,
+      "peak_rss_mib": 9.42578125,
+      "steps": {
+        "read_proof_s": 0.000302908,
+        "load_verifying_key_s": 0.003987559,
+        "prepare_verifying_key_s": 0.001224213,
+        "verify_s": 0.001606911
+      },
+      "data": {}
+    },
+    {
+      "name": "verify_cli",
+      "category": "verification-full",
+      "wall_s": 0.04622312,
+      "peak_rss_mib": 13.48046875,
+      "steps": null,
+      "data": null
+    }
+  ],
+  "output": {
+    "groth16_proof_bytes": 128,
+    "public_inputs": 19,
+    "proof_container_bytes": 664,
+    "assertion_json_bytes": 1179,
+    "x5chain_bytes": 481,
+    "manifest_store_bytes": 11378,
+    "note": "manifest_store_bytes is the whole C2PA store added to the asset, including the COSE signature's reserved padding; proof_container_bytes is the proof as embedded (base64 of JSON with the public inputs); the COSE signature field holds the same container decoded once."
+  }
+}

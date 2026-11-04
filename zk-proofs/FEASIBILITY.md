@@ -69,8 +69,74 @@ An earlier run on the same machine measured 657 s per asset (witness 261 s, prov
 
 ### Observations
 
-- **Proving is 5% of the per-asset time.** The Groth16 proof takes 32 s. Deserializing the 1 GB proving key takes 345 s (57%): it is stored compressed and fully validated on load, decompressing and checking every curve point. A key written by local setup could be stored uncompressed and loaded without re-validation, likely bringing this to seconds. A candidate quick win outside the experiment plan.
+- **Proving is 5% of the per-asset time.** The Groth16 proof takes 32 s. Deserializing the 1 GB proving key takes 345 s (57%): it is stored compressed and fully validated on load, decompressing and checking every curve point. [Proving-key loading](#proving-key-loading) measures the options: an uncompressed key checked against its recorded hash loads in about 5 s.
 - **Witness generation in WASM takes 225 s (37%).** Loading the circuit and checking the witness are negligible, and so are preparing the inputs and packaging the anonymized asset (under 0.1 s together). Native (C++) witness generation is the first E6 experiment.
-- **Memory peaks while loading the proving key** (11.06 GiB in the prove phase); witness generation peaks at 4.00 GiB.
+- **Memory peaks in the prove phase** (11.06 GiB), during proving rather than key loading: loading the key alone peaks at 2.1–3.2 GiB, and the prove phase still peaks at 11.2 GiB with a 5-second key load ([Proving-key loading](#proving-key-loading)). Witness generation peaks at 4.00 GiB.
 - **Verification is already within target** (13 ms, or 19 ms for the full verifier; 872-byte verifying key), and so is the proof container (668 B). The total manifest store (11.4 KB) is dominated by reserved padding.
 - **Against the third-party target** (≤ 5 min, ≤ 16 GB): about 2× over on time, within on memory, even before the two engineering fixes above. The signer-side device target (≤ 30 s, ≤ 2 GB) is about 20× off on time and 5× on memory. BN254 misses the security target.
+
+## Proving-key loading
+
+Measured with `c2pa-x509-zk-bench pk-load` ([record](bench/results/2026-11-04-proving-key-load.json)) on the V0 proving key: 22.6 million G1 points and 4.74 million G2 points (4.14 million of them non-zero), 1.03 GB compressed, 2.05 GB uncompressed. Each load ran in its own process, once after evicting the key file from the Linux page cache and once warm. The loads in the table produce the same key; tests check that every loader reads back the key that was written.
+
+What the checks cover: BN254's G1 has cofactor 1, so a G1 point on the curve is in the prime-order subgroup; G2 points also need a subgroup check, a scalar multiplication each. Decoding a compressed point solves the curve equation, so it is always on the curve, but not necessarily in G2's subgroup. An uncompressed point is taken as written unless checked. "Full" is what arkworks' `Validate::Yes` does today. The arkworks loader already runs its checks in parallel; it decompresses points one at a time. The parallel loader also decompresses in parallel.
+
+| Encoding | Loader | Point checks | SHA-256 checked | Load, cold / warm | Peak RSS |
+|---|---|---|---|---|---|
+| Compressed | arkworks | Full (**today**) | No | 369 s / 365 s | 2.1 GiB |
+| Compressed | arkworks | None (on the curve by construction) | No | 289 s / 310 s | 2.1 GiB |
+| Compressed | parallel | Full | No | 124 s / 127 s | 2.8 GiB |
+| Compressed | parallel | None (on the curve by construction) | No | 60 s / 58 s | 2.9 GiB |
+| Uncompressed | arkworks | Full | No | 95 s / 109 s | 2.1 GiB |
+| Uncompressed | parallel | Full | No | 131 s / 139 s | 3.1 GiB |
+| Uncompressed | parallel | Full | Yes | 109 s / 86 s | 3.1 GiB |
+| Uncompressed | parallel | On the curve | No | 6.4 s / 3.7 s | 3.2 GiB |
+| **Uncompressed** | **parallel** | **On the curve** | **Yes** | **7.3 s / 6.7 s** (hash 2.4 / 1.8 s) | 3.2 GiB |
+| Uncompressed | arkworks | None | No | 8.8 s / 6.7 s | 2.1 GiB |
+| Uncompressed | arkworks | None | Yes | 9.9 s / 8.7 s | 2.1 GiB |
+| Uncompressed | parallel | None | No | 5.0 s / 5.8 s | 3.1 GiB |
+| Uncompressed | parallel | None | Yes | 6.9 s / 5.2 s | 3.1 GiB |
+
+The parallel configurations were noisy. An earlier run of the same code on the same machine (record not kept) measured:
+
+- 104–109 s for compressed, parallel, full checks;
+- 37 s for compressed, parallel, no checks;
+- 74–76 s for uncompressed, parallel, full checks;
+- 3–5 s for the uncompressed configurations without the subgroup check;
+- 350 s for today's configuration.
+
+The ranking was the same. The heavy runs of a concurrent experiment were serialized with these, but other work on the machine was not, which most likely explains the slower second run.
+
+Where the time goes:
+
+- Decompressing the points one at a time costs about 290 s, or 40–60 s in parallel.
+- G2's subgroup check costs 70–130 s, even in parallel.
+- Reading an uncompressed key without the subgroup check takes 3–9 s; hashing the 2 GB file takes 1.6–3.3 s.
+- At setup, writing the key takes 5.8 s uncompressed against 3.0 s compressed, plus 1.8 s to hash it.
+
+**End to end** ([record](bench/results/2026-11-04-uncompressed-key.json)): setup wrote the key uncompressed, and the prover checked its SHA-256 against the build manifest and every point on the curve.
+
+- The prove phase took **43 s** against 381 s in the baseline: load R1CS 2.9 s; check the key's SHA-256 2.0 s; load the key 3.2 s; Groth16 proof 34 s.
+- Per-asset anonymization took **339 s** against 611 s.
+- Witness generation was slower in this run (296 s against 231 s), and so was setup (83 s against 49 s, of which only about 4 s is the larger key and its hash). Both are unchanged code, so this is most likely load from other work on the machine.
+- Peak memory did not change (11.2 GiB in the prove phase): it comes from proving, not from loading the key.
+
+### What the checks protect against
+
+Only the prover uses the proving key. Verifiers use the verifying key, and arkworks checks a proof's points when a verifier decodes it, so no proving key, however malformed, can make a verifier accept a false statement. A bad proving key affects the prover:
+
+- **Corruption or mix-ups** (a truncated copy, a key from another circuit or another setup): proofs that never verify, after minutes of work, or, for malformed encodings, a crash. Point checks catch only some of these, since a key from another setup consists of valid points. A hash checked against the value recorded at setup catches all of them. The loader also refuses lengths the file cannot hold, truncated files, and trailing data.
+- **A malicious key** from an untrusted source: Groth16's zero-knowledge assumes a correctly generated key, and a subverted one can weaken the randomization that hides the witness (the subversion zero-knowledge literature studies exactly this). Point checks do not help: a malicious key can consist entirely of valid subgroup points. A hash helps only if the expected value comes from somewhere the attacker cannot change. A hash recorded in the build manifest next to the key does not qualify against an attacker who can write to that directory, who could replace both, and likely the binaries too. Points outside G2's subgroup would put the proof's B element outside the subgroup; verifiers reject such a proof, but the prover has already produced it, and the anonymizer does not verify its own proof before embedding it.
+
+Today, keys come only from local setup, and the prover loads them from the same directory, so the realistic threat is corruption or a mix-up, which a hash recorded at setup covers completely. For a key written by setup and unchanged since (matching hash), the point checks add nothing, because setup wrote points it computed itself. Keys from a ceremony ([H5](README.md#h5-production-proving-setup)) change this: the expected hash would have to be pinned outside the key's directory (for example, published with the verifying key), and only a check of the key's well-formedness (pairing equations over its elements) would protect zero-knowledge against a subverted key. Neither is in place, and neither is needed for local setup.
+
+### Proposal (for decision)
+
+- **Recommended:** setup writes the proving key uncompressed and records its SHA-256 in the build manifest (already done on this branch). The prover refuses a key whose hash does not match, then loads it in parallel with on-curve checks, skipping G2's subgroup check: about 5–7 s instead of 345 s, at twice the file size (2.05 GB). The on-curve check costs about a second, and also covers manifests that predate the recorded hash; a key without a recorded hash could fall back to full checks.
+- **Alternatives:**
+  - Keep the compressed format and decompress and check in parallel: 104–127 s, with no format change and no reliance on the manifest.
+  - Uncompressed with full checks and the hash: 86–109 s, the most checking, still a 3–4× gain.
+  - Uncompressed with the hash and no point checks: about 1 s faster than the recommendation.
+- **Not recommended:** skipping both the hash and the checks. It saves a further 1–2 s, and nothing would detect a wrong or corrupted key until proofs fail to verify.
+- **Separately:** the anonymizer could verify its own proof (13 ms) before embedding it, which would catch any key problem the checks miss.
+

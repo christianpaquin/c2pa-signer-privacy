@@ -5,7 +5,7 @@ How the X.509 + ZK prototype evolved, for reporting. Details live in the pull re
 | Tag | Commit | State |
 |---|---|---|
 | `v0-original` | `3dac0e0` | The prototype as published with the blog post (after #5) |
-| `v0-sound` | `1cd7620` | The same design, with its soundness and privacy defects fixed (after #13) |
+| `v0-sound` | `1cd7620` | The same design with the known defects fixed through #13; still an experimental baseline (no claim binding or time policy, certificate fields pinned by pattern, single-party setup) |
 | `foundation` | `538c2dc` | Test PKI, correctness checks, benchmark harness, first measured baseline (after #17) |
 | `e2b-v1` | after #24 | Third-party anonymization end to end, measured |
 
@@ -56,7 +56,7 @@ All on the same laptop ([reference machine](FEASIBILITY.md#reference-machine)); 
 ## Lessons
 
 - **Write the statement before optimizing it.** The original circuit was efficient at proving the wrong thing: an asset digest, an unchecked time, and byte patterns rather than certificate fields. Specifying the chain of trust first (E2a) surfaced what had to be proved.
-- **Byte patterns are not structure.** Finding the expected bytes somewhere in signed data does not show they are the field they appear to be: that is how #10's forgery worked, and why certificate purpose is read by a structural DER walk (Q5) rather than by pattern. Parse the structure, and make anything unrecognized fail.
+- **Signed is not the same as parsed.** Two distinct problems: fields read from bytes outside the CA-signed TBS (the forgery fixed in #10, by pinning them inside it), and expected bytes found inside the wrong signed field, such as an extension (addressed by the structural DER walk, Q5, in E2b). Bind fields to the signed data, parse its structure, and make anything unrecognized fail.
 - **Test what a check rejects, and why.** Proofs from bad witnesses and the forgery both hid behind checks that passed for the wrong reason. Negative tests now assert the reason for rejection, and positive controls show the check can pass.
 - **Formats should leave no room for other data.** Strict decoding (exact fields, zero padding, fixed-length proof) closed places where identifying data could ride along (#23).
 - **Measure the conditions, not just the time.** Record the cache state rather than assume it, repeat runs on a noisy machine (single runs here varied by 2×), compare only under the same accounting, and keep primitive timings apart from per-asset ones (#17, #19, #21, #24).

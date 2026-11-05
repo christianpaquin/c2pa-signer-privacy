@@ -93,7 +93,7 @@ const COLD_MAX_RESIDENT: f64 = 0.01;
 
 /// The page-cache state a load actually started from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CacheState {
+pub(super) enum CacheState {
     /// Eviction was requested and the file was (almost) not resident.
     Cold,
     /// Eviction was requested but the pages stayed resident: not a cold
@@ -104,7 +104,7 @@ enum CacheState {
 }
 
 impl CacheState {
-    fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
             CacheState::Cold => "cold",
             CacheState::EvictionFailed => "eviction-failed",
@@ -114,7 +114,7 @@ impl CacheState {
 }
 
 /// Label a load from the residency observed before it.
-fn cache_state(eviction_requested: bool, resident_before: f64) -> CacheState {
+pub(super) fn cache_state(eviction_requested: bool, resident_before: f64) -> CacheState {
     match (eviction_requested, resident_before <= COLD_MAX_RESIDENT) {
         (false, _) => CacheState::Warm,
         (true, true) => CacheState::Cold,
@@ -123,7 +123,7 @@ fn cache_state(eviction_requested: bool, resident_before: f64) -> CacheState {
 }
 
 /// Drop the file's cached pages (they are clean: the key was synced when written).
-fn evict(path: &Path) -> Result<()> {
+pub(super) fn evict(path: &Path) -> Result<()> {
     use std::os::fd::AsRawFd;
     let file = std::fs::File::open(path)?;
     // SAFETY: plain syscall on an open descriptor.
@@ -135,7 +135,7 @@ fn evict(path: &Path) -> Result<()> {
 }
 
 /// Fraction of the file's pages in the page cache, via mincore.
-fn resident_fraction(path: &Path) -> Result<f64> {
+pub(super) fn resident_fraction(path: &Path) -> Result<f64> {
     use std::os::fd::AsRawFd;
     let file = std::fs::File::open(path)?;
     let len = file.metadata()?.len() as usize;

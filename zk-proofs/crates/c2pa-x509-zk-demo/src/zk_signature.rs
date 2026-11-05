@@ -11,6 +11,10 @@
 //!   this one), then `pad` and `pad2` to reach the original's exact size.
 //! - Payload `nil` (detached); signature: a format version byte, then the
 //!   proof. Every public input of the proof is derived by the verifier.
+//!
+//! Decoding is strict, so the format leaves no room for other data (a signer
+//! certificate, say): exactly one CBOR item, exactly these header fields,
+//! all-zero padding, and a proof of exactly `PROOF_LEN` bytes.
 
 use anyhow::{anyhow, bail, Result};
 use ciborium::Value;
@@ -44,6 +48,29 @@ fn cbor(value: &Value) -> Vec<u8> {
     let mut out = Vec::new();
     ciborium::into_writer(value, &mut out).expect("CBOR serialization to memory cannot fail");
     out
+}
+
+/// Decode `bytes` as exactly one CBOR item, with nothing after it.
+fn single_item(bytes: &[u8]) -> Result<Value> {
+    let mut cursor = std::io::Cursor::new(bytes);
+    let value: Value = ciborium::from_reader(&mut cursor)?;
+    if cursor.position() as usize != bytes.len() {
+        bail!("{} bytes follow the CBOR item", bytes.len() - cursor.position() as usize);
+    }
+    Ok(value)
+}
+
+/// Every key of `map` is one of `allowed` (each at most once).
+fn only_keys(map: &[(Value, Value)], allowed: &[Value], what: &str) -> Result<()> {
+    for (i, (key, _)) in map.iter().enumerate() {
+        if !allowed.contains(key) {
+            bail!("unexpected field {key:?} in the {what}");
+        }
+        if map[..i].iter().any(|(k, _)| k == key) {
+            bail!("duplicate field {key:?} in the {what}");
+        }
+    }
+    Ok(())
 }
 
 fn map_get<'a>(map: &'a [(Value, Value)], key: &Value) -> Option<&'a Value> {
@@ -100,9 +127,24 @@ impl ZkSignature {
         bail!("cannot pad the ZK signature to exactly {size} bytes")
     }
 
+    /// Whether `cose` declares itself a third-party ZK signature (its `alg`
+    /// and statement), without validating the rest: so that a malformed one
+    /// is reported by `decode`'s errors rather than taken for another kind.
+    pub fn is_declared(cose: &[u8]) -> bool {
+        let Ok(Value::Tag(COSE_SIGN1_TAG, inner)) = ciborium::from_reader::<Value, _>(cose) else { return false };
+        let Some(Value::Bytes(protected)) = inner.as_array().and_then(|f| f.first()) else { return false };
+        let Ok(Value::Map(header)) = ciborium::from_reader::<Value, _>(protected.as_slice()) else { return false };
+        map_get(&header, &Value::Integer(1.into())) == Some(&Value::Integer(ZK_ALG.into()))
+            && map_get(&header, &text(CRIT_LABEL))
+                .and_then(Value::as_map)
+                .and_then(|ext| map_get(ext, &text("statement")))
+                == Some(&text(STATEMENT))
+    }
+
     /// Parse a third-party ZK signature; fails for any other `COSE_Sign1`.
     pub fn decode(cose: &[u8]) -> Result<Self> {
-        let Value::Tag(COSE_SIGN1_TAG, inner) = ciborium::from_reader::<Value, _>(cose)? else {
+        let value = single_item(cose)?;
+        let Value::Tag(COSE_SIGN1_TAG, inner) = value else {
             bail!("not a tagged COSE_Sign1");
         };
         let Value::Array(fields) = *inner else {
@@ -113,9 +155,18 @@ impl ZkSignature {
         else {
             bail!("malformed COSE_Sign1 fields (the payload must be detached)");
         };
-        let Value::Map(header) = ciborium::from_reader::<Value, _>(protected.as_slice())? else {
+        let Value::Map(header) = single_item(&protected)? else {
             bail!("protected header is not a map");
         };
+        only_keys(&header, &[Value::Integer(1.into()), Value::Integer(2.into()), Value::Integer(33.into()), text(CRIT_LABEL)], "protected header")?;
+        only_keys(&unprotected, &[text(TIME_STAMP_LABEL), text("pad"), text("pad2")], "unprotected header")?;
+        for pad in ["pad", "pad2"] {
+            match map_get(&unprotected, &text(pad)) {
+                None => {}
+                Some(Value::Bytes(b)) if b.iter().all(|&x| x == 0) => {}
+                Some(_) => bail!("{pad} is not a byte string of zeros"),
+            }
+        }
         if map_get(&header, &Value::Integer(1.into())) != Some(&Value::Integer(ZK_ALG.into())) {
             bail!("not a ZK signature (alg is not {ZK_ALG})");
         }
@@ -123,6 +174,7 @@ impl ZkSignature {
             bail!("the ZK extension is not marked critical");
         }
         let ext = map_get(&header, &text(CRIT_LABEL)).and_then(Value::as_map).ok_or_else(|| anyhow!("no ZK extension"))?;
+        only_keys(ext, &[text("statement"), text("vk")], "ZK extension")?;
         if map_get(ext, &text("statement")) != Some(&text(STATEMENT)) {
             bail!("not a third-party ZK signature (statement is not {STATEMENT})");
         }
@@ -136,23 +188,26 @@ impl ZkSignature {
         if issuing_chain.is_empty() {
             bail!("x5chain is empty");
         }
-        let tokens = map_get(&unprotected, &text(TIME_STAMP_LABEL))
-            .and_then(Value::as_map)
-            .and_then(|m| map_get(m, &text("tstTokens")))
+        let time_stamp = map_get(&unprotected, &text(TIME_STAMP_LABEL)).and_then(Value::as_map).ok_or_else(|| anyhow!("no time stamp"))?;
+        only_keys(time_stamp, &[text("tstTokens")], "time-stamp header")?;
+        let tokens = map_get(time_stamp, &text("tstTokens"))
             .and_then(Value::as_array)
             .ok_or_else(|| anyhow!("no time stamp"))?;
         let [token] = tokens.as_slice() else {
             bail!("the time-stamp header must hold exactly one token");
         };
-        let time_stamp_token = token
-            .as_map()
-            .and_then(|m| map_get(m, &text("val")))
+        let token = token.as_map().ok_or_else(|| anyhow!("malformed time-stamp token"))?;
+        only_keys(token, &[text("val")], "time-stamp token")?;
+        let time_stamp_token = map_get(token, &text("val"))
             .and_then(Value::as_bytes)
             .cloned()
             .ok_or_else(|| anyhow!("time-stamp token has no val"))?;
         let (&version, proof) = signature.split_first().ok_or_else(|| anyhow!("empty signature"))?;
         if version != FORMAT_VERSION {
             bail!("unsupported ZK signature format version {version}");
+        }
+        if proof.len() != PROOF_LEN {
+            bail!("the proof is {} bytes; format version {FORMAT_VERSION} has {PROOF_LEN}", proof.len());
         }
         Ok(Self { issuing_chain, vk_sha256, time_stamp_token, proof: proof.to_vec() })
     }
@@ -192,17 +247,60 @@ mod tests {
         assert!(err.to_string().contains("needs"), "{err}");
     }
 
+    /// Re-encode a signature's CBOR with a change, for the strictness tests.
+    fn tweak(z: &ZkSignature, f: impl FnOnce(&mut Vec<Value>)) -> Vec<u8> {
+        let Value::Tag(_, inner) = ciborium::from_reader::<Value, _>(z.encode(0, 0).as_slice()).unwrap() else { unreachable!() };
+        let Value::Array(mut fields) = *inner else { unreachable!() };
+        f(&mut fields);
+        cbor(&Value::Tag(COSE_SIGN1_TAG, Box::new(Value::Array(fields))))
+    }
+
+    /// The format leaves no room for other data: a truncated or extended
+    /// proof (an appended certificate, say), bytes after the item, non-zero
+    /// padding, and unknown or duplicate header fields are all rejected.
+    #[test]
+    fn decode_is_strict() {
+        let z = sample();
+        let certificate = vec![0x30, 0x82, 0x02, 0x00];
+        for proof in [vec![7; PROOF_LEN - 1], [vec![7; PROOF_LEN], certificate.clone()].concat(), vec![]] {
+            let other = ZkSignature { proof, ..z.clone() };
+            assert!(ZkSignature::decode(&other.encode(0, 0)).is_err());
+        }
+        let trailing = [z.encode(0, 0), certificate].concat();
+        assert!(ZkSignature::decode(&trailing).is_err());
+
+        let unprotected = |f: fn(&mut Vec<(Value, Value)>)| {
+            tweak(&z, |fields| {
+                let Value::Map(m) = &mut fields[1] else { unreachable!() };
+                f(m)
+            })
+        };
+        let nonzero_pad = unprotected(|m| m.iter_mut().filter(|(k, _)| k == &text("pad")).for_each(|(_, v)| *v = Value::Bytes(vec![1, 2, 3])));
+        let extra = unprotected(|m| m.push((text("x5chain"), Value::Bytes(vec![0x30]))));
+        let duplicate = unprotected(|m| m.push((text("pad"), Value::Bytes(vec![]))));
+        let extra_protected = tweak(&z, |fields| {
+            let Value::Bytes(p) = &fields[0] else { unreachable!() };
+            let Value::Map(mut m) = ciborium::from_reader::<Value, _>(p.as_slice()).unwrap() else { unreachable!() };
+            m.push((Value::Integer(4.into()), Value::Bytes(vec![1])));
+            fields[0] = Value::Bytes(cbor(&Value::Map(m)));
+        });
+        for (name, bytes) in [("non-zero pad", nonzero_pad), ("extra field", extra), ("duplicate field", duplicate), ("extra protected field", extra_protected)] {
+            assert!(ZkSignature::decode(&bytes).is_err(), "{name} accepted");
+        }
+        // The untouched re-encoding still decodes.
+        assert!(ZkSignature::decode(&tweak(&z, |_| {})).is_ok());
+    }
+
     #[test]
     fn decode_rejects_other_signatures() {
         let z = sample();
         let good = z.encode(0, 0);
         assert!(ZkSignature::decode(&good[1..]).is_err());
-        let mut versioned = z.clone();
-        versioned.proof.clear();
-        let mut bytes = versioned.encode(0, 0);
-        let last = bytes.len() - 1;
-        bytes[last] = 9; // format version 9, empty proof
-        assert!(ZkSignature::decode(&bytes).is_err());
+        let wrong_version = tweak(&z, |fields| {
+            let Value::Bytes(sig) = &mut fields[3] else { unreachable!() };
+            sig[0] = 9;
+        });
+        assert!(ZkSignature::decode(&wrong_version).is_err());
         let mut empty_chain = z;
         empty_chain.issuing_chain.clear();
         assert!(ZkSignature::decode(&empty_chain.encode(0, 0)).is_err());

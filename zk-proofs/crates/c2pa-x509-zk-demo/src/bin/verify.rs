@@ -280,7 +280,7 @@ fn third_party(args: &Args) -> Result<()> {
         Some(cli) => cli.clone(),
         None => std::env::current_exe()?.parent().and_then(|d| d.parent()).map(|d| d.join("c2pa-zk-gnark")).ok_or_else(|| anyhow!("cannot locate c2pa-zk-gnark; pass --gnark"))?,
     };
-    let report = c2pa_x509_zk_demo::third_party::verify(&args.input, &trust, tsa_trust, &c2pa_x509_zk_demo::third_party::Prover { cli, keys })?;
+    let report = c2pa_x509_zk_demo::third_party::verify(&args.input, &trust, tsa_trust, &c2pa_x509_zk_demo::third_party::Prover { cli, keys }, args.issuer.as_deref())?;
     println!("✅ Valid: the claim was signed by a certificate for C2PA claim signing,");
     println!("   issued by {}, valid at the time-stamped time {} (Unix).", report.issuer, report.time);
     println!("   Issuing path: {} certificate(s) to the trust list; time stamp trusted.", report.path.len());

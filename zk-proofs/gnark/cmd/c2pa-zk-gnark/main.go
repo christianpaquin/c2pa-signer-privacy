@@ -15,7 +15,6 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
-	"math/big"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -23,6 +22,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"time"
@@ -31,8 +31,8 @@ import (
 	"github.com/consensys/gnark/backend/groth16"
 	"github.com/consensys/gnark/constraint"
 	"github.com/consensys/gnark/constraint/solver"
-	"github.com/consensys/gnark/frontend/cs"
 	"github.com/consensys/gnark/frontend"
+	"github.com/consensys/gnark/frontend/cs"
 	"github.com/consensys/gnark/frontend/cs/r1cs"
 
 	"c2pa-zk-gnark/statement"
@@ -228,14 +228,13 @@ func verify(dir, publicPath, proofPath string) error {
 	if err := readFile(dir, vkFile, m, vk); err != nil {
 		return err
 	}
-	proof := groth16.NewProof(ecc.BN254)
-	f, err := os.Open(proofPath)
+	data, err := os.ReadFile(proofPath)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	if _, err := proof.ReadFrom(f); err != nil {
-		return fmt.Errorf("malformed proof: %w", err)
+	proof, err := readProof(data)
+	if err != nil {
+		return err
 	}
 	w, err := frontend.NewWitness(assignment, ecc.BN254.ScalarField(), frontend.PublicOnly())
 	if err != nil {
@@ -292,4 +291,18 @@ func readJSON(path string, v any) error {
 		return err
 	}
 	return json.Unmarshal(data, v)
+}
+
+// readProof decodes a proof that must be exactly the input: trailing bytes
+// (data appended to a valid proof) are rejected.
+func readProof(data []byte) (groth16.Proof, error) {
+	proof := groth16.NewProof(ecc.BN254)
+	n, err := proof.ReadFrom(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("malformed proof: %w", err)
+	}
+	if n != int64(len(data)) {
+		return nil, fmt.Errorf("malformed proof: %d bytes follow it", int64(len(data))-n)
+	}
+	return proof, nil
 }

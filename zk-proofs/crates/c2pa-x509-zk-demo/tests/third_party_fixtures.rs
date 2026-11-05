@@ -367,7 +367,7 @@ fn verifier_checks_trust_time_stamp_and_binding_before_the_proof() {
     let trust = c2pa_x509_zk_demo::TrustList::from_file(&fixture.pki("trust-list.pem")).unwrap();
     let tsa = fixture.pki("tsa-trust-list.pem");
     let verify = |asset: &Path, trust: &c2pa_x509_zk_demo::TrustList, tsa: &Path, prover: &Prover| {
-        third_party::verify(asset, trust, tsa, prover).unwrap_err().to_string()
+        third_party::verify(asset, trust, tsa, prover, None).unwrap_err().to_string()
     };
     assert!(third_party::is_third_party(&output) && !third_party::is_third_party(&fixture.signed()));
 
@@ -384,6 +384,26 @@ fn verifier_checks_trust_time_stamp_and_binding_before_the_proof() {
     assert!(!err.contains("proof does not verify"), "an untrusted chain reached the proof: {err}");
     let err = verify(&output, &trust, &tsa, &stand_in_prover(&fixture.dir.path().join("other"), &"11".repeat(32)));
     assert!(err.contains("other keys"), "{err}");
+
+    // An expected issuer: a mismatch is rejected before the proof, a match reaches it.
+    let issuer = c2pa_x509_zk_demo::extract_subject_dn(&std::fs::read(fixture.pki("issuing-ca.der")).unwrap()).unwrap();
+    let err = third_party::verify(&output, &trust, &tsa, &prover, Some("CN=Unrelated Expected Issuer")).unwrap_err().to_string();
+    assert!(err.contains("not the expected"), "{err}");
+    let err = third_party::verify(&output, &trust, &tsa, &prover, Some(&issuer)).unwrap_err().to_string();
+    assert!(err.contains("proof does not verify"), "{err}");
+
+    // A signature carrying extra data (here the signer certificate after the
+    // proof) is still detected as third-party, and rejected when decoded.
+    let store = manifest_store(&output).unwrap();
+    let manifest = active_manifest(&store).unwrap();
+    let mut signature = ZkSignature::decode(&manifest.cose_sign1).unwrap();
+    let signer_cert = OriginalSignature::from_asset(&fixture.signed()).unwrap().signer_certificate().unwrap().to_vec();
+    signature.proof.extend_from_slice(&signer_cert);
+    let extended = fixture.dir.path().join("extended.png");
+    third_party::replace_signature(&output, &extended, &store, &manifest, &signature.encode_exact(manifest.cose_sign1.len()).unwrap()).unwrap();
+    assert!(third_party::is_third_party(&extended));
+    let err = verify(&extended, &trust, &tsa, &prover);
+    assert!(err.contains("the proof is"), "{err}");
     let mut bytes = std::fs::read(&output).unwrap();
     let n = bytes.len();
     bytes[n - 100] ^= 1; // image data, inside the hard binding
@@ -443,14 +463,16 @@ fn third_party_anonymization_end_to_end() {
         .success()
         .stdout(predicates::str::contains("replaced in place"));
 
-    let verify = |asset: &Path| {
+    let verify_with = |asset: &Path, extra: &[&str]| {
         let mut cmd = Command::cargo_bin("c2pa-x509-zk-verify").unwrap();
         cmd.arg("--input").arg(asset)
             .arg("--trust-list").arg(fixture.pki("trust-list.pem"))
             .arg("--tsa-trust-list").arg(fixture.pki("tsa-trust-list.pem"))
-            .arg("--keys").arg(&keys).arg("--gnark").arg(&gnark);
+            .arg("--keys").arg(&keys).arg("--gnark").arg(&gnark)
+            .args(extra);
         cmd.assert()
     };
+    let verify = |asset: &Path| verify_with(asset, &[]);
     verify(&output).success().stdout(predicates::str::contains("Valid"));
 
     // A claim byte changed in place: c2pa's own checks do not see the claim
@@ -466,4 +488,16 @@ fn third_party_anonymization_end_to_end() {
     let tampered = fixture.dir.path().join("claim-changed.png");
     std::fs::write(&tampered, changed).unwrap();
     verify(&tampered).failure().stderr(predicates::str::contains("proof does not verify"));
+
+    // --issuer is enforced: the issuing CA's DN passes, another is rejected.
+    let issuer = c2pa_x509_zk_demo::extract_subject_dn(&std::fs::read(fixture.pki("issuing-ca.der")).unwrap()).unwrap();
+    verify_with(&output, &["--issuer", &issuer]).success();
+    verify_with(&output, &["--issuer", "CN=Unrelated Expected Issuer"]).failure().stderr(predicates::str::contains("not the expected"));
+
+    // A genuine proof followed by the signer's certificate is rejected.
+    let mut signature = ZkSignature::decode(&manifest.cose_sign1).unwrap();
+    signature.proof.extend_from_slice(OriginalSignature::from_asset(&fixture.signed()).unwrap().signer_certificate().unwrap());
+    let extended = fixture.dir.path().join("extended.png");
+    third_party::replace_signature(&output, &extended, &store, &manifest, &signature.encode_exact(manifest.cose_sign1.len()).unwrap()).unwrap();
+    verify(&extended).failure().stderr(predicates::str::contains("the proof is"));
 }

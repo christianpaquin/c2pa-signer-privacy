@@ -67,6 +67,7 @@ The verifier never sees `P`, so it cannot recompute any hash over the signed byt
 - **Two anonymized assets from the same signer** are not linkable through the proof: Groth16 proofs are zero-knowledge, and no per-signer value is public. They can still be correlated through disclosed content (the issuing CA, software version, metadata).
 - **Anyone holding the original signed asset** can link it to the anonymized one: the claim is identical. Anonymization protects the signer only if the original signed manifest is not published elsewhere. This is inherent to keeping the original claim, and the reason the output is otherwise unchanged.
 - **The TSA operator**, with a public token, can match the imprint to the original time-stamp request ([Q7](#q7-time-stamp-threat-model)).
+- **A dishonest anonymizer** can leak what the statement hides; the guarantees are toward verifiers, assuming the anonymizer is honest. The verifier decodes the ZK signature strictly (exactly the specified fields, all-zero padding, a proof of the fixed length, nothing after it), so the signature itself leaves no room for other data. But the time-stamp token, carried unchanged, can hold extra certificates and unsigned attributes outside the TSA's signature, so data could be hidden there without breaking it; and anyone holding the original can link it anyway.
 - **Assets without salted assertions:** any assertion hash in the claim can be checked against guesses. This matters only for assertions that are hidden (redacted); under the default nothing is hidden.
 
 ## Decisions for review

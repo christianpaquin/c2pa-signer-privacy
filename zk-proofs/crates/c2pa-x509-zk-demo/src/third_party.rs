@@ -302,8 +302,8 @@ pub fn anonymize(input: &Path, output: &Path, trust: &TrustList, prover: &Prover
 pub fn is_third_party(asset: &Path) -> bool {
     manifest_store(asset)
         .and_then(|store| active_manifest(&store))
-        .and_then(|m| ZkSignature::decode(&m.cose_sign1))
-        .is_ok()
+        .map(|m| ZkSignature::is_declared(&m.cose_sign1))
+        .unwrap_or(false)
 }
 
 /// What a successful verification established.
@@ -366,8 +366,9 @@ pub fn c2pa_claim_checks(asset: &Path) -> Result<Vec<String>> {
 
 /// Verify a third-party anonymized asset: the issuing chain and time stamp
 /// off-circuit, the claim's assertions and hard binding with c2pa, and the
-/// proof with public inputs all derived from the asset.
-pub fn verify(asset: &Path, trust: &TrustList, tsa_trust: &Path, prover: &Prover) -> Result<VerifyReport> {
+/// proof with public inputs all derived from the asset. With
+/// `expected_issuer`, the issuing CA's subject DN must equal it.
+pub fn verify(asset: &Path, trust: &TrustList, tsa_trust: &Path, prover: &Prover, expected_issuer: Option<&str>) -> Result<VerifyReport> {
     let store = manifest_store(asset)?;
     let manifest = active_manifest(&store)?;
     let signature = ZkSignature::decode(&manifest.cose_sign1)?;
@@ -385,11 +386,17 @@ pub fn verify(asset: &Path, trust: &TrustList, tsa_trust: &Path, prover: &Prover
 
     let path = validate_issuing_chain(&signature.issuing_chain, trust, time)?;
     let issuer = &signature.issuing_chain[0];
+    let issuer_dn = crate::extract_subject_dn(issuer)?;
+    if let Some(expected) = expected_issuer {
+        if issuer_dn != expected {
+            bail!("the issuing CA is {issuer_dn}, not the expected {expected}");
+        }
+    }
     let c2pa_success = c2pa_claim_checks(asset)?;
 
     let public = PublicInputs { claim: b64(&manifest.claim), issuer_certificate: b64(issuer), time, imprint: b64(&info.hashed_message) };
     if !prover.verify(&public, &signature.proof)? {
         bail!("the proof does not verify for this asset's claim, issuing CA, and time stamp");
     }
-    Ok(VerifyReport { claim, issuer: crate::extract_subject_dn(issuer)?, path, time, c2pa_success })
+    Ok(VerifyReport { claim, issuer: issuer_dn, path, time, c2pa_success })
 }

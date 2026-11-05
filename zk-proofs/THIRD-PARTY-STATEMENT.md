@@ -112,7 +112,7 @@ Signer-side mode today proves a fresh signature over a manifest-stripped asset d
 - the two modes prove the same thing and differ only in who runs the prover, so the comparison in R1 is about deployment, not guarantees;
 - the claim, its assertions, and the hard binding are authenticated in both modes;
 - key possession (D5) no longer arises: the original signature takes its place. E5 would compare only an alternative way to prove the same signature, so it is deprioritized;
-- the current asset-digest circuit stays as the V0 baseline row in [FEASIBILITY.md](FEASIBILITY.md) and is retired from the tools after E2b.
+- the asset-digest circuit is kept, frozen, as the V0 baseline: its code, tests, and benchmark remain so its results can be reproduced ([HISTORY.md](HISTORY.md)), and third-party mode is the documented default.
 
 ### Q3. How the claim enters the proof
 

@@ -1,0 +1,64 @@
+# Project History
+
+How the X.509 + ZK prototype evolved, for reporting. Details live in the pull requests, the [results records](bench/results/), and the design documents; this file links to them rather than repeating them. Git tags mark the milestones, so each stage can be checked out and re-run.
+
+| Tag | Commit | State |
+|---|---|---|
+| `v0-original` | `3dac0e0` | The prototype as published with the blog post (after #5) |
+| `v0-sound` | `1cd7620` | The same design, with its soundness and privacy defects fixed (after #13) |
+| `foundation` | `538c2dc` | Test PKI, correctness checks, benchmark harness, first measured baseline (after #17) |
+| `e2b-v1` | after #24 | Third-party anonymization end to end, measured |
+
+## Timeline
+
+| Phase | Dates | PRs | Outcome |
+|---|---|---|---|
+| Original prototype | Jan–May 2026 | #1–#5 | BBS and X.509 + ZK demonstrations; the ZK path re-signs with the signer's key and proves, in circom, that a trusted CA issued the signer's certificate |
+| Soundness and privacy fixes | Oct 29 – Nov 3 | #7, #8, #10, #11, #13 | The defects below fixed; standards-conformant COSE; cheaper in-circuit byte reads (12.2M → 4.8M constraints) |
+| Goals and plan | Oct 29 – Nov 3 | #9, #12, #15 | Two goals (prove and compare the options; find what works on today's deployments); decisions D1–D7; an analysis of real trust lists and signed assets ([DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md)); a roadmap ordered by guarantees first |
+| Foundation | Nov 3–4 | #14, #16, #17 | A C2PA-like test PKI and trust lists, with off-circuit chain validation (F1); witness checking and forgery tests (F3); a benchmark harness and the feasibility matrix with the measured baseline (F2) |
+| Third-party anonymization | Nov 4–5 | #18–#24 | The statement and time policy (E2a); the cost of P-384 and SHA-384 (E1); proving-key loading options; the statement in gnark, the anonymizer and verifier, and its benchmark (E2b) |
+
+## Defects found in the original prototype
+
+| Defect | Consequence | Found | Fixed |
+|---|---|---|---|
+| The signer's certificate stayed in the anonymized asset's `x5chain` | Anonymization revealed the signer | Issue #6 | #7 |
+| Private-use COSE algorithm IDs in the wrong range, `crit` under the wrong label, padding as trailing bytes | Not conformant COSE; standard tools failed | Review of the COSE encoding | #8 |
+| The circuit read the signer key and validity at unconstrained offsets | Anyone with any certificate from the CA could forge a proof for their own key (confirmed with a real proof) | Code review | #10 |
+| The in-circuit date conversion was off by one month | New certificates could not be proved; certificates expired up to a month earlier were accepted | Moving the tests to freshly generated certificates (F1) | #13 |
+| The prover produced proofs from witnesses that violate the constraints (ark-circom ignores failing assertions) | Rejected inputs produced proofs that only failed at verification, masking errors | The forgery test of #10 | #16 (F3) |
+
+## Decisions
+
+Recorded in [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIONS.md) (D1–D7) and [THIRD-PARTY-STATEMENT.md](THIRD-PARTY-STATEMENT.md) (Q1–Q10). The ones that changed the project's direction:
+
+- **Design against the official C2PA trust list** (#12); its CAs are P-384, which the original circuit could not verify.
+- **Third-party mode** (D6, #18): prove the original signature, so existing content can be anonymized without the signer's key, and **one statement for both modes** (Q2), which made the key-possession experiment (E5) moot.
+- **Replace the signature in place** (Q1): the original claim and its hard binding stay valid, with nothing added to the asset.
+- **A trusted time stamp is required** (D7, Q6): validity at the time a TSA attested the signature, as C2PA defines it; the token is public, so the TSA operator can link the output to the original (Q7).
+- **gnark for E2b** (#22), after E1 measured ECDSA at a thirteenth of circom's constraints and P-384 available.
+- **V0 kept as a frozen baseline** rather than retired, so the comparison can be reproduced.
+
+## Measurements over time
+
+All on the same laptop ([reference machine](FEASIBILITY.md#reference-machine)); from F2 on, with the harness, each phase in its own process.
+
+| Record | Statement | Per-asset anonymization | Peak memory | Notes |
+|---|---|---|---|---|
+| Original circuit, before #11 (informal) | Signer-side, P-256 CA, asset digest | ~20 min | ~28 GB | 12.2M constraints, most of them reading certificate bytes at variable offsets |
+| After #11 (informal) | Same | ~10.5 min | ~11.8 GB | 4.78M constraints; proving key 2.5 GB → 1.0 GB |
+| [V0 baseline](bench/results/2026-11-03-baseline.json) (#17) | Signer-side, P-256 CA, asset digest, no time policy | 611 s | 11.1 GiB | 57% loading the proving key, 37% WASM witness generation; the proof itself 32 s |
+| [E1 primitives](bench/results/2026-11-04-e1-p384-gnark.json) (#19) | A P-384 CA signature over a 1.5 KB TBS, in gnark | 5 s (key resident; not comparable) | 3.7 GiB | P-384 and SHA-384 cost 1.3–1.5× P-256 and SHA-256 |
+| [Proving-key loading](bench/results/2026-11-04-proving-key-load.json) (#21) | V0's key, loading only | 345 s → 7 s possible | — | Uncompressed key with a recorded hash; not adopted |
+| [V1 third-party](bench/results/2026-11-05-third-party.json) (#24) | The E2a statement, P-384 CA, `sigTst2`, in gnark | **79 s** | 7.5 GiB | 74% loading the proving key (CPU-bound); the proof 19.5 s |
+
+## Lessons
+
+- **Write the statement before optimizing it.** The original circuit was efficient at proving the wrong thing: an asset digest, an unchecked time, and byte patterns rather than certificate fields. Specifying the chain of trust first (E2a) surfaced what had to be proved.
+- **Byte patterns are not structure.** Finding the expected bytes somewhere in signed data does not show they are the field they appear to be: that is how #10's forgery worked, and why certificate purpose is read by a structural DER walk (Q5) rather than by pattern. Parse the structure, and make anything unrecognized fail.
+- **Test what a check rejects, and why.** Proofs from bad witnesses and the forgery both hid behind checks that passed for the wrong reason. Negative tests now assert the reason for rejection, and positive controls show the check can pass.
+- **Formats should leave no room for other data.** Strict decoding (exact fields, zero padding, fixed-length proof) closed places where identifying data could ride along (#23).
+- **Measure the conditions, not just the time.** Record the cache state rather than assume it, repeat runs on a noisy machine (single runs here varied by 2×), compare only under the same accounting, and keep primitive timings apart from per-asset ones (#17, #19, #21, #24).
+- **The proving key, not the proof, dominates.** In both stacks, loading and validating the 1 GB key costs more than proving; the cheapest remaining gain is there.
+- **Real deployments decide feasibility.** P-384 CAs, `sigTst2` time stamps, and unauthenticated EXIF were found by examining real trust lists and signed assets, not from the specification alone.

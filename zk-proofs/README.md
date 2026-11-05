@@ -9,7 +9,9 @@ This approach keeps standard X.509/ECDSA-P256 signing, then adds a post-processi
 - Generates a Groth16 ZK proof demonstrating valid CA issuance
 - Replaces the manifest signature with the proof
 
-The verifier can confirm the asset was anonymized from an asset signed by *someone* with a certificate from a trusted CA, without learning *who*. The anonymized asset's `x5chain` carries the issuing CA chain (never the signer's certificate), which the verifier validates against a trust list.
+The verifier can confirm the asset was anonymized from an asset signed by *someone* with a certificate from a trusted CA, without learning *who*.
+
+**Two modes.** [Third-party mode](#third-party-mode) is the current one: it proves the asset's *original* signature (in gnark), needs no private key, and replaces the signature in place. The signer-side mode described in the rest of this overview and in the Quick Start is the **V0 baseline, frozen**: kept so its results can be reproduced and compared, but no longer developed. [HISTORY.md](HISTORY.md) traces how the project moved from one to the other. The anonymized asset's `x5chain` carries the issuing CA chain (never the signer's certificate), which the verifier validates against a trust list.
 
 ## Quick Start
 
@@ -431,19 +433,20 @@ The record contains the variant and the exact statement proved, the accounting b
 
 ## Current Limitations
 
-What the current prototype does not establish. Every experiment states which of these still apply to its results.
+What the prototype does not establish, in third-party mode. Every experiment states which of these still apply to its results.
 
-- **Signer-side mode only.** The anonymizer re-signs with the signer's private key; existing content whose key is unavailable cannot be anonymized ([E2a](#e2a-third-party-proof-statement-and-privacy-design), [E2b](#e2b-third-party-anonymization)).
-- **Binding to the asset bytes only.** The proof binds to a digest of the asset with its manifest stripped, not to a claim, so the rest of the anonymized manifest is not authenticated.
-- **No historical validity.** The certificate-validity timestamp (`photoTimestamp`) is chosen by the prover and not checked by the verifier; no result claims the certificate was valid when the content was signed ([D7](ARCHITECTURE-DECISIONS.md#d7-time-policy)).
-- **Partial certificate validation in-circuit.** P-256 keys and ECDSA-SHA256 CA signatures only; the public key and validity are pinned inside the signed TBSCertificate by their encoding, without a full DER walk, and the signer certificate's version, key usage, `CA:FALSE`, and EKU are not checked in-circuit ([Certificate field binding](#certificate-field-binding), [H2](#h2-full-certificate-validation-in-the-circuit)).
-- **Off-circuit chain validation is not full RFC 5280 path validation.** It checks signatures, validity, `CA:TRUE`, `pathLen`, key usage, EKU, and rejects unrecognized critical extensions, but does not process name or policy constraints, and checks no revocation ([Test PKI and Trust Lists](#test-pki-and-trust-lists), [H3](#h3-revocation)).
+- **No revocation check** of the signer certificate ([H3](#h3-revocation)).
+- **Partial certificate validation in-circuit.** The structural walk checks the certificate's purpose (claim-signing EKU, not a CA) and validity, but not key usage, unknown critical extensions, name constraints, or policies ([H2](#h2-full-certificate-validation-in-the-circuit)). Off-circuit chain validation checks signatures, validity, `CA:TRUE`, `pathLen`, key usage, EKU, and unrecognized critical extensions, but is not full RFC 5280 path validation.
+- **Algorithms and encodings.** ES256 claim signatures, P-384 issuing CAs, and `sigTst2` time stamps only, and the protected-header encoding that real device assets and c2pa-rs use ([E1](#e1-cost-of-reality-p-384-sha-384-and-rsa-in-circuit), [Q10](THIRD-PARTY-STATEMENT.md#q10-first-algorithms)). Measured on a fixture that mirrors a real deployment, not yet on a real asset ([R2](#r2-anonymizing-real-signed-content)).
 - **Issuing CA disclosed.** The anonymity set is everyone that CA has certified ([H4](#h4-hiding-the-issuing-ca)).
+- **Time-stamp linkability.** The public time-stamp token lets the TSA operator link the anonymized asset to the original request ([Q7](THIRD-PARTY-STATEMENT.md#q7-time-stamp-threat-model)).
 - **Unauthenticated trust lists.** Trust lists are read from files; the C2PA lists are not signed.
 - **Proof system.** Groth16 on BN254 (~100-bit security) with a single-party local setup, whose operator could forge proofs ([H5](#h5-production-proving-setup), [E7](#e7-curve-bn254-vs-bls12-381)).
-- **Metadata not scrubbed.** Asset metadata (for example EXIF) and other manifest fields are not removed; privacy scans cover known signer identifiers only ([H6](#h6-metadata-privacy-beyond-the-signature)).
-- **Cost.** ~10 minutes and ~11 GiB of RAM per proof, mostly loading the proving key and generating the witness in WASM rather than proving ([Performance](#performance), [FEASIBILITY.md](FEASIBILITY.md#observations)).
-- **Tool display.** `c2patool` presents the issuing CA as the signer ([H8](#h8-c2patool-support)).
+- **Metadata.** Data outside the hard binding (for example EXIF) is reported, not scrubbed ([H6](#h6-metadata-privacy-beyond-the-signature)).
+- **Cost.** 79 s and 7.5 GiB per asset, three quarters of it loading the proving key ([FEASIBILITY.md](FEASIBILITY.md#v1-third-party-e2b-measured-detail)).
+- **Tool display.** Standard C2PA validators reject the ZK signature, an unknown critical algorithm ([H8](#h8-c2patool-support)).
+
+The frozen **V0 baseline** (signer-side) additionally binds only to the asset bytes rather than the claim, makes no historical-validity claim (its timestamp is chosen by the prover), pins certificate fields by byte pattern rather than structure, supports P-256 CAs only, and takes ~10 minutes and ~11 GiB per asset.
 
 ## Roadmap
 
@@ -533,6 +536,8 @@ Decision D1, option C: the registration entity issues a SNARK-friendly credentia
 #### E5. Key possession
 
 Decision D5: in-circuit ECDSA (today) against a P-256 commitment with a Schnorr-style proof outside the circuit. Applies only to signer-side mode; pursued only if that mode remains valuable after E2b.
+
+Status: **moot.** Both modes use the same statement, which verifies the original signature, so no separate proof of key possession arises ([Q2](THIRD-PARTY-STATEMENT.md#q2-one-statement-for-both-modes)).
 
 #### E6. Proof systems
 

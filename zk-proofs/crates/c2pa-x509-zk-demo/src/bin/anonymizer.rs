@@ -5,6 +5,11 @@
 //!
 //! Usage:
 //!   c2pa-x509-zk-anonymizer --input signed.jpg --output anon.jpg --trust-list trust-list.pem
+//!   c2pa-x509-zk-anonymizer --third-party --keys gnark-keys/ --input signed.jpg --output anon.jpg \
+//!       --trust-list trust-list.pem
+//!
+//! The default (signer-side) mode re-signs with the signer's key; third-party
+//! mode (roadmap E2b) proves the original signature and replaces it in place.
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
@@ -55,11 +60,27 @@ struct Args {
     /// Use placeholder proof (for testing without ZK setup)
     #[arg(long)]
     placeholder: bool,
+
+    /// Third-party mode (E2b): prove the original signature in gnark and
+    /// replace it in place; no private key needed (requires --keys)
+    #[arg(long)]
+    third_party: bool,
+
+    /// Key directory from `c2pa-zk-gnark setup` (third-party mode)
+    #[arg(long)]
+    keys: Option<PathBuf>,
+
+    /// The c2pa-zk-gnark CLI (default: c2pa-zk-gnark next to the target directory)
+    #[arg(long)]
+    gnark: Option<PathBuf>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if args.third_party {
+        return third_party(&args);
+    }
 
     println!("=== C2PA X.509 ZK Anonymizer ===\n");
 
@@ -261,3 +282,37 @@ fn parse_ec_private_key_pem(pem: &str) -> Result<Vec<u8>> {
         .map_err(|e| anyhow!("invalid base64 in PEM: {e}"))
 }
 
+
+/// The c2pa-zk-gnark prover from --keys and --gnark.
+pub fn gnark_prover(keys: Option<&PathBuf>, gnark: Option<&PathBuf>) -> Result<c2pa_x509_zk_demo::third_party::Prover> {
+    let keys = keys.ok_or_else(|| anyhow!("third-party mode needs --keys (a directory from c2pa-zk-gnark setup)"))?.clone();
+    let cli = match gnark {
+        Some(cli) => cli.clone(),
+        // target/release/<this binary> -> target/c2pa-zk-gnark
+        None => std::env::current_exe()?.parent().and_then(|d| d.parent()).map(|d| d.join("c2pa-zk-gnark")).ok_or_else(|| anyhow!("cannot locate c2pa-zk-gnark; pass --gnark"))?,
+    };
+    Ok(c2pa_x509_zk_demo::third_party::Prover { cli, keys })
+}
+
+fn third_party(args: &Args) -> Result<()> {
+    use c2pa_x509_zk_demo::third_party::anonymize;
+    println!("=== C2PA X.509 ZK Anonymizer (third-party mode) ===\n");
+    let trust = TrustList::from_file(&args.trust_list)?;
+    let prover = gnark_prover(args.keys.as_ref(), args.gnark.as_ref())?;
+    println!("Proving the original signature of {:?} (this takes a few minutes)...", args.input);
+    let report = anonymize(&args.input, &args.output, &trust, &prover)?;
+    println!("\n✅ Anonymized asset written to {:?}", args.output);
+    println!("   Issuing CA: {}", c2pa_x509_zk_demo::extract_subject_dn(&report.issuing_chain[0])?);
+    println!("   Time stamp: {} (Unix)", report.time);
+    println!("   Claim signature: {} bytes, replaced in place ({} spare)", report.signature_bytes, report.spare_bytes);
+    println!("\nStill visible and authenticated by the claim:");
+    println!("   Claim generator: {}", report.claim.claim_generator);
+    println!("   Assertions: {}", report.claim.assertions.join(", "));
+    if report.claim.hard_binding_exclusions.len() > 1 {
+        println!(
+            "\n⚠️  The hard binding excludes {} byte ranges besides the manifest store: that data (for example EXIF or XMP) is neither authenticated nor anonymized.",
+            report.claim.hard_binding_exclusions.len() - 1
+        );
+    }
+    Ok(())
+}

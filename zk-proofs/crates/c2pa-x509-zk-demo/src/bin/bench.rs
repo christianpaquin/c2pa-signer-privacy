@@ -592,7 +592,11 @@ fn run(
             _ => eprintln!("{name:<18} {category:<15} {}", p["skipped"].as_str().unwrap_or("")),
         }
     }
-    eprintln!("Per-asset anonymization: {:.1} s", record["totals"]["anonymization_per_asset"]["wall_s"].as_f64().unwrap_or(f64::NAN));
+    let per_asset = &record["totals"]["anonymization_per_asset"];
+    eprintln!("Per-asset anonymization: {:.1} s", per_asset["wall_s"].as_f64().unwrap_or(f64::NAN));
+    if let Some(cache) = per_asset["prove_cache"].as_str().filter(|c| *c != "cold") {
+        eprintln!("warning: the prove phase was {cache}, not cold: do not report this as a cold per-asset figure");
+    }
     finish_workspace(&work_dir, keep)
 }
 

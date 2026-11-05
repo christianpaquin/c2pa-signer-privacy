@@ -32,8 +32,12 @@
 //! the prover does). `c2pa-x509-zk-bench pk-load` compares those
 //! configurations on their own (see bench/pk_load.rs).
 //!
+//! `--variant third-party` measures the third-party statement (gnark; roadmap
+//! E2b) under the same accounting instead: see bench/third_party.rs.
+//!
 //! Usage:
 //!   c2pa-x509-zk-bench run [--reuse-build] [--keep] [--work-dir NEW_DIR] [--out results.json] [--proving-key CONFIG]
+//!   c2pa-x509-zk-bench run --variant third-party [--gnark target/c2pa-zk-gnark] [--keep] [--work-dir NEW_DIR] [--out results.json]
 //!   c2pa-x509-zk-bench pk-load [--key KEY] [--reps N] [--only CONFIG]... [--keep] [--work-dir NEW_DIR] [--out results.json]
 //!
 //! Peak memory comes from the child's ru_maxrss, in KiB on Linux.
@@ -49,6 +53,8 @@ use std::time::Instant;
 
 #[path = "bench/pk_load.rs"]
 mod pk_load;
+#[path = "bench/third_party.rs"]
+mod third_party;
 
 use c2pa_x509_zk_demo::{
     check_witness, circuit, circuit_builder, compute_manifest_stripped_asset_digest, compute_witness,
@@ -106,6 +112,12 @@ enum Cmd {
         /// How setup writes the proving key and the prove phase loads it (see `pk-load`)
         #[arg(long, default_value = pk_load::CURRENT)]
         proving_key: String,
+        /// v0 (signer-side, circom) or third-party (gnark)
+        #[arg(long, default_value = "v0", value_parser = ["v0", "third-party"])]
+        variant: String,
+        /// The c2pa-zk-gnark CLI, for --variant third-party
+        #[arg(long, default_value = "target/c2pa-zk-gnark")]
+        gnark: PathBuf,
     },
     /// Measure loading the proving key in each encoding, loader, and level of checking
     PkLoad {
@@ -156,8 +168,9 @@ enum Cmd {
 
 fn main() -> Result<()> {
     match Args::parse().command {
-        Cmd::Run { work_dir, circuits_dir, reuse_build, keep, out, proving_key } => {
-            run(work_dir, &circuits_dir, reuse_build, keep, out, pk_load::config(&proving_key)?)
+        Cmd::Run { work_dir, circuits_dir, reuse_build, keep, out, proving_key, variant, gnark } => {
+            let gnark = (variant == "third-party").then(|| std::fs::canonicalize(&gnark)).transpose()?;
+            run(work_dir, &circuits_dir, reuse_build, keep, out, pk_load::config(&proving_key)?, gnark)
         }
         Cmd::PkLoad { key, work_dir, reps, only, keep, out } => pk_load::pk_load(&key, work_dir, reps, &only, keep, out),
         Cmd::Phase { name, work_dir, zk_root, proving_key } => {
@@ -277,6 +290,9 @@ fn b64(bytes: &[u8]) -> String {
 
 /// One phase, run inside a subprocess. Prints a `BENCH-RESULT` JSON line.
 fn phase(name: &str, work_dir: &Path, zk_root: &Path, proving_key: pk_load::PkConfig) -> Result<()> {
+    if name.starts_with("tp-") {
+        return third_party::phase(name, work_dir, zk_root);
+    }
     let paths = paths(work_dir);
     let pki = work_dir.join("pki");
     let signed = work_dir.join("signed.png");
@@ -411,20 +427,30 @@ fn phase(name: &str, work_dir: &Path, zk_root: &Path, proving_key: pk_load::PkCo
 
 // ---- Measurement ------------------------------------------------------------
 
-/// A subprocess's wall time, peak memory, and parsed BENCH-RESULT line.
+/// A subprocess's wall time, peak memory, parsed BENCH-RESULT line, and stderr.
 struct Measured {
     wall_s: f64,
     peak_rss_kib: i64,
     result: Option<Value>,
+    stdout: String,
+    stderr: String,
 }
 
 /// Run `cmd` to completion and measure it with wait4 (its own peak RSS).
 fn run_measured(cmd: &mut Command) -> Result<Measured> {
-    cmd.stdout(Stdio::piped());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let start = Instant::now();
     let mut child = cmd.spawn().with_context(|| format!("failed to start {cmd:?}"))?;
+    // Read stderr on its own thread, so neither pipe can fill and block the child.
+    let mut stderr_pipe = child.stderr.take().unwrap();
+    let stderr_reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr_pipe.read_to_string(&mut text);
+        text
+    });
     let mut stdout = String::new();
     child.stdout.take().unwrap().read_to_string(&mut stdout)?;
+    let stderr = stderr_reader.join().unwrap_or_default();
 
     let mut status = 0;
     // SAFETY: rusage is plain data; wait4 fills it for the child we spawned.
@@ -434,7 +460,7 @@ fn run_measured(cmd: &mut Command) -> Result<Measured> {
     }
     let wall_s = start.elapsed().as_secs_f64();
     if !(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0) {
-        eprintln!("{stdout}");
+        eprintln!("{stdout}\n{stderr}");
         bail!("{cmd:?} failed (wait status {status})");
     }
     let result = stdout
@@ -442,7 +468,7 @@ fn run_measured(cmd: &mut Command) -> Result<Measured> {
         .find_map(|l| l.strip_prefix(RESULT_PREFIX))
         .map(serde_json::from_str)
         .transpose()?;
-    Ok(Measured { wall_s, peak_rss_kib: usage.ru_maxrss, result })
+    Ok(Measured { wall_s, peak_rss_kib: usage.ru_maxrss, result, stdout, stderr })
 }
 
 fn phase_record(name: &str, category: &str, m: &Measured) -> Value {
@@ -519,7 +545,16 @@ fn environment(zk_root: &Path) -> Value {
 
 // ---- The run ----------------------------------------------------------------
 
-fn run(work_dir: Option<PathBuf>, circuits_dir: &Path, reuse_build: bool, keep: bool, out: Option<PathBuf>, proving_key: pk_load::PkConfig) -> Result<()> {
+/// `gnark`: the c2pa-zk-gnark CLI, to measure the third-party variant instead of V0.
+fn run(
+    work_dir: Option<PathBuf>,
+    circuits_dir: &Path,
+    reuse_build: bool,
+    keep: bool,
+    out: Option<PathBuf>,
+    proving_key: pk_load::PkConfig,
+    gnark: Option<PathBuf>,
+) -> Result<()> {
     let zk_root = std::env::current_dir()?;
     let exe = std::env::current_exe()?;
     let circuits_dir = std::fs::canonicalize(circuits_dir)?;
@@ -533,7 +568,10 @@ fn run(work_dir: Option<PathBuf>, circuits_dir: &Path, reuse_build: bool, keep: 
     eprintln!("Work directory: {}", work_dir.display());
     // Captured before any phase runs, so later edits to the tree are not attributed to this run.
     let environment = environment(&zk_root);
-    let record = measure(&exe, &zk_root, &work_dir, &circuits_dir, reuse_build, environment, proving_key)?;
+    let record = match &gnark {
+        Some(gnark) => third_party::measure(&exe, &zk_root, &work_dir, gnark, environment)?,
+        None => measure(&exe, &zk_root, &work_dir, &circuits_dir, reuse_build, environment, proving_key)?,
+    };
 
     let text = serde_json::to_string_pretty(&record)?;
     // Check again: the output path may have changed during the run. On
@@ -554,7 +592,11 @@ fn run(work_dir: Option<PathBuf>, circuits_dir: &Path, reuse_build: bool, keep: 
             _ => eprintln!("{name:<18} {category:<15} {}", p["skipped"].as_str().unwrap_or("")),
         }
     }
-    eprintln!("Per-asset anonymization: {:.1} s", record["totals"]["anonymization_per_asset"]["wall_s"].as_f64().unwrap_or(f64::NAN));
+    let per_asset = &record["totals"]["anonymization_per_asset"];
+    eprintln!("Per-asset anonymization: {:.1} s", per_asset["wall_s"].as_f64().unwrap_or(f64::NAN));
+    if let Some(cache) = per_asset["prove_cache"].as_str().filter(|c| *c != "cold") {
+        eprintln!("warning: the prove phase was {cache}, not cold: do not report this as a cold per-asset figure");
+    }
     finish_workspace(&work_dir, keep)
 }
 

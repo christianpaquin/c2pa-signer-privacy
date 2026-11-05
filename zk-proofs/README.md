@@ -407,6 +407,7 @@ The prover checks every witness against the circuit's R1CS constraints before pr
 ```bash
 cargo build --release
 ./target/release/c2pa-x509-zk-bench run --out bench/results/<date>-<variant>.json
+# --variant third-party measures the third-party statement (gnark) instead; needs the c2pa-zk-gnark CLI (--gnark)
 # --reuse-build links circuits/build's compiled circuit instead of compiling (compile is then not measured)
 # --keep keeps the work directory (circuit, keys, witness); by default it is removed
 # --work-dir DIR uses a new directory DIR (refused if it exists); --out must resolve (through symlinks and ..) outside it
@@ -519,7 +520,7 @@ Status:
 - **Fixtures (done).** The [mirror PKI profile](#test-pki-and-trust-lists) and a local test TSA produce standard, trusted, time-stamped assets with the structure of real device assets. `jumbf.rs` locates the active manifest's claim and claim signature (with its position, for the in-place replacement), and `original_signature.rs` rebuilds the exact bytes the circuit must hash, confirmed on a real device-signed asset.
 - **Statement and prover (done).** The statement is a gnark circuit ([`gnark/`](gnark/)): 4.7M constraints at the E2a size limits, with the structural certificate walk. `c2pa-x509-zk-statement-inputs` prepares its inputs from a signed asset, and the `c2pa-zk-gnark` CLI checks, proves, and verifies. A real c2pa-signed fixture is proved and verified at the default sizes. Forgery tests cover the claim, time, imprint, CA, signatures, and certificate purpose.
 - **Anonymizer and verifier (done).** [Third-party mode](#third-party-mode) end to end: the anonymizer refuses what the statement excludes before proving, checks its own proof, and replaces the claim signature in place at its exact size, keeping the claim and its hard binding; the verifier derives every public input from the asset and checks the time stamp (TSA trust list), the issuing chain, the claim's assertions and hard binding (c2pa), and the proof.
-- **Next:** a benchmark of the full statement under the [harness's accounting](#benchmarks), as a row next to V0 in [FEASIBILITY.md](FEASIBILITY.md).
+- **Benchmark (done).** `c2pa-x509-zk-bench run --variant third-party`, under V0's accounting: **79 s per asset** (V0: 611 s), 7.5 GiB, 30 ms verification; 74% of the time is loading the proving key, CPU-bound. Row V1 in [FEASIBILITY.md](FEASIBILITY.md#v1-third-party-e2b-measured-detail).
 
 #### E3. Trust model B: Merkle membership
 

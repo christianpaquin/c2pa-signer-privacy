@@ -14,6 +14,9 @@
 //! | verify      | verification      | `c2pa-zk-gnark verify`                                            |
 //! | verify_cli  | verification-full | the verifier CLI on the anonymized asset (time stamp, chain, c2pa checks, proof) |
 //! | prove_warm  | supplementary     | `c2pa-zk-gnark prove` again, its files in the page cache; not in any total |
+//!
+//! prove and prove_warm each run three times (this laptop's timings vary
+//! widely); the median run is reported, with every run in the record.
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
@@ -43,7 +46,9 @@ asset to an anonymized one; prove is measured cold (the constraint system and pr
 page cache before it, the observed residency recorded) and includes loading both files, solving the witness, and \
 proving, as separate steps; anonymization_witness_plus_prove = prove. verification = the gnark verify process \
 (loading the verifying key and verifying); verification_full = the verifier CLI on the anonymized asset. prove_warm \
-repeats prove with its files resident and is in no total. test_fixture is in no total. Peak memory per category is \
+repeats prove with its files resident and is in no total. Each of prove and prove_warm is run three times; \
+the phase reports the median run by wall time (its steps) and the maximum peak memory, with every run and its \
+observed cache state in data.runs. test_fixture is in no total. Peak memory per category is \
 the maximum over its phases, each a separate process.";
 
 /// One phase run inside a subprocess (the Rust-side phases).
@@ -184,24 +189,62 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// A gnark CLI phase: measured, with its steps parsed from stderr.
+/// A gnark CLI phase: measured, with its steps parsed from its output (the
+/// CLI prints its timings to stderr; gnark's logger writes to stdout).
 fn gnark_phase(name: &str, category: &str, cmd: &mut Command) -> Result<Value> {
     eprintln!("Phase: {name}...");
     let m: Measured = run_measured(cmd)?;
     let mut record = phase_record(name, category, &m);
-    record["steps"] = Value::Object(gnark_steps(&m.stderr));
+    record["steps"] = Value::Object(gnark_steps(&format!("{}\n{}", m.stderr, m.stdout)));
     Ok(record)
 }
 
-/// Evict the prover's files from the page cache and record the residency observed after.
-fn evict_prover_files(keys: &Path) -> Result<Value> {
+const PROVER_FILES: [&str; 2] = ["statement.ccs", "statement.pk"];
+
+/// The prover files' residency in the page cache, after evicting them if
+/// `evict_first`. Files just written by setup have dirty pages, which cannot
+/// be evicted until written back, so each is synced first.
+fn prover_files_residency(keys: &Path, evict_first: bool) -> Result<Value> {
     let mut residency = serde_json::Map::new();
-    for file in ["statement.ccs", "statement.pk"] {
+    for file in PROVER_FILES {
         let path = keys.join(file);
-        evict(&path)?;
+        if evict_first {
+            std::fs::File::open(&path)?.sync_all()?;
+            evict(&path)?;
+        }
         residency.insert(file.into(), json!(resident_fraction(&path)?));
     }
     Ok(Value::Object(residency))
+}
+
+/// `reps` prove runs, cold (files evicted first) or warm, each in its own
+/// process. The phase reports the median run (by wall time) with its steps,
+/// the maximum peak memory, and every run with its observed cache state.
+fn prove_runs(name: &str, category: &str, cold: bool, reps: usize, keys: &Path, cmd: impl Fn() -> Command) -> Result<Value> {
+    let mut runs = Vec::new();
+    for rep in 0..reps {
+        let residency = prover_files_residency(keys, cold)?;
+        let mut run = gnark_phase(&format!("{name} ({}/{reps})", rep + 1), category, &mut cmd())?;
+        run["cache"] = json!(cache_label(cold, &residency));
+        run["resident_before"] = residency;
+        runs.push(run);
+    }
+    let mut by_wall: Vec<&Value> = runs.iter().collect();
+    by_wall.sort_by(|a, b| a["wall_s"].as_f64().partial_cmp(&b["wall_s"].as_f64()).unwrap());
+    let median = by_wall[by_wall.len() / 2];
+    let caches: Vec<&str> = runs.iter().filter_map(|r| r["cache"].as_str()).collect();
+    Ok(json!({
+        "name": name,
+        "category": category,
+        "wall_s": median["wall_s"],
+        "peak_rss_mib": runs.iter().filter_map(|r| r["peak_rss_mib"].as_f64()).fold(0.0, f64::max),
+        "steps": median["steps"],
+        "data": {
+            "statistic": format!("median of {reps} runs (wall time); peak memory is the maximum"),
+            "cache": if caches.iter().all(|c| *c == caches[0]) { caches[0] } else { "mixed" },
+            "runs": runs,
+        },
+    }))
 }
 
 fn cache_label(evicted: bool, residency: &Value) -> &'static str {
@@ -209,7 +252,11 @@ fn cache_label(evicted: bool, residency: &Value) -> &'static str {
     cache_state(evicted, worst).label()
 }
 
+/// Prove runs per cache state; the per-asset figure is the cold median.
+pub const PROVE_REPS: usize = 3;
+
 pub fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, gnark: &Path, environment: Value) -> Result<Value> {
+    let reps = PROVE_REPS;
     let keys = work_dir.join("keys");
     let phase_cmd = |name: &str| {
         let mut cmd = Command::new(exe);
@@ -235,10 +282,7 @@ pub fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, gnark: &Path, enviro
     phases.push(gnark_phase("setup", "one-time", &mut gnark_cmd(&["setup".as_ref(), "--keys".as_ref(), keys.as_os_str()]))?);
     run_phase(&mut phases, "prepare", "anonymization", &mut phase_cmd("tp-prepare"))?;
 
-    let residency = evict_prover_files(&keys)?;
-    let mut prove = gnark_phase("prove", "anonymization", &mut gnark_cmd(&prove_args))?;
-    prove["data"] = json!({ "cache": cache_label(true, &residency), "resident_before": residency });
-    phases.push(prove);
+    phases.push(prove_runs("prove", "anonymization", true, reps, &keys, || gnark_cmd(&prove_args))?);
     phases.push(gnark_phase("self_verify", "anonymization", &mut gnark_cmd(&verify_args))?);
     run_phase(&mut phases, "package", "anonymization", &mut phase_cmd("tp-package"))?;
     phases.push(gnark_phase("verify", "verification", &mut gnark_cmd(&verify_args))?);
@@ -252,14 +296,11 @@ pub fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, gnark: &Path, enviro
             .arg("--tsa-trust-list").arg(work_dir.join("pki/tsa-trust-list.pem"))
             .arg("--keys").arg(&keys).arg("--gnark").arg(gnark),
     )?;
-    let residency: serde_json::Map<String, Value> = ["statement.ccs", "statement.pk"]
-        .iter()
-        .map(|f| Ok((f.to_string(), json!(resident_fraction(&keys.join(f))?))))
-        .collect::<Result<_>>()?;
-    let residency = Value::Object(residency);
-    let mut warm = gnark_phase("prove_warm", "supplementary", &mut gnark_cmd(&prove_args))?;
-    warm["data"] = json!({ "cache": cache_label(false, &residency), "resident_before": residency });
-    phases.push(warm);
+    // Warm runs: read the files once so they are resident, then prove.
+    for file in PROVER_FILES {
+        std::io::copy(&mut std::fs::File::open(keys.join(file))?, &mut std::io::sink())?;
+    }
+    phases.push(prove_runs("prove_warm", "supplementary", false, reps, &keys, || gnark_cmd(&prove_args))?);
 
     let data_of = |name: &str| phases.iter().find(|p| p["name"] == name).map(|p| p["data"].clone()).unwrap_or(Value::Null);
     let (prepare, package) = (data_of("prepare"), data_of("package"));

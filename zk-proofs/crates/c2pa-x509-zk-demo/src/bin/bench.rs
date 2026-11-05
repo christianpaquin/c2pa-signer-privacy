@@ -432,6 +432,7 @@ struct Measured {
     wall_s: f64,
     peak_rss_kib: i64,
     result: Option<Value>,
+    stdout: String,
     stderr: String,
 }
 
@@ -467,7 +468,7 @@ fn run_measured(cmd: &mut Command) -> Result<Measured> {
         .find_map(|l| l.strip_prefix(RESULT_PREFIX))
         .map(serde_json::from_str)
         .transpose()?;
-    Ok(Measured { wall_s, peak_rss_kib: usage.ru_maxrss, result, stderr })
+    Ok(Measured { wall_s, peak_rss_kib: usage.ru_maxrss, result, stdout, stderr })
 }
 
 fn phase_record(name: &str, category: &str, m: &Measured) -> Value {

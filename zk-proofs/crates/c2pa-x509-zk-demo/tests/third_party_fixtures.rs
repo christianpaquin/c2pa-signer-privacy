@@ -287,3 +287,183 @@ fn statement_inputs_hold_the_signed_parts_and_the_attested_time() {
     assert_eq!(inputs.public.imprint, b64(&info.hashed_message));
     assert_eq!(inputs.public.time, c2pa_x509_zk_demo::third_party::generalized_time_unix(&info.gen_time).unwrap());
 }
+
+// ---- Third-party anonymization and verification (E2b) --------------------
+
+use c2pa_x509_zk_demo::third_party::{self, Prover};
+use c2pa_x509_zk_demo::zk_signature::{ZkSignature, PROOF_LEN};
+
+/// A stand-in for the gnark CLI that reports every proof invalid (exit 1),
+/// and a key directory naming a verifying-key hash: reaching the proof check
+/// shows every check before it passed.
+fn stand_in_prover(dir: &Path, vk: &str) -> Prover {
+    let keys = dir.join("keys");
+    std::fs::create_dir_all(&keys).unwrap();
+    std::fs::write(keys.join("keys.json"), serde_json::json!({ "sha256": { "statement.vk": vk } }).to_string()).unwrap();
+    let cli = dir.join("gnark-stand-in.sh");
+    std::fs::write(&cli, "#!/bin/sh\necho 'proof is INVALID' >&2\nexit 1\n").unwrap();
+    std::fs::set_permissions(&cli, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    Prover { cli, keys }
+}
+
+/// The mirror fixture with its claim signature replaced in place by a ZK
+/// signature holding a placeholder proof, as the anonymizer writes it.
+fn replaced_with_placeholder(fixture: &Fixture) -> PathBuf {
+    let store = manifest_store(&fixture.signed()).unwrap();
+    let manifest = active_manifest(&store).unwrap();
+    let original = OriginalSignature::from_manifest(manifest.clone()).unwrap();
+    let signature = ZkSignature {
+        issuing_chain: vec![std::fs::read(fixture.pki("issuing-ca.der")).unwrap(), std::fs::read(fixture.pki("root.der")).unwrap()],
+        vk_sha256: "00".repeat(32),
+        time_stamp_token: original.time_stamp.unwrap().token,
+        proof: vec![0x5a; PROOF_LEN],
+    };
+    let cose = signature.encode_exact(manifest.cose_sign1.len()).unwrap();
+    let output = fixture.dir.path().join("anonymized.png");
+    third_party::replace_signature(&fixture.signed(), &output, &store, &manifest, &cose).unwrap();
+    output
+}
+
+#[test]
+fn in_place_replacement_keeps_the_claim_and_its_hard_binding() {
+    let fixture = Fixture::new(true, true);
+    let output = replaced_with_placeholder(&fixture);
+    let (before, after) = (std::fs::read(fixture.signed()).unwrap(), std::fs::read(&output).unwrap());
+    assert_eq!(before.len(), after.len());
+    let (old_store, new_store) = (manifest_store(&fixture.signed()).unwrap(), manifest_store(&output).unwrap());
+    assert_eq!(old_store.len(), new_store.len());
+    let (old, new) = (active_manifest(&old_store).unwrap(), active_manifest(&new_store).unwrap());
+    assert_eq!(old.claim, new.claim, "the claim is unchanged");
+    assert_eq!(old.cose_sign1_range, new.cose_sign1_range);
+    assert!(ZkSignature::decode(&new.cose_sign1).is_ok());
+    // Everything outside the signature is byte-identical.
+    assert_eq!(old_store[..old.cose_sign1_range.start], new_store[..new.cose_sign1_range.start]);
+    assert_eq!(old_store[old.cose_sign1_range.end..], new_store[new.cose_sign1_range.end..]);
+
+    // c2pa still validates the claim's assertions and hard binding.
+    let success = third_party::c2pa_claim_checks(&output).unwrap();
+    assert!(success.contains(&"assertion.dataHash.match".to_string()), "{success:?}");
+
+    // Nothing identifying the signer remains.
+    let original = OriginalSignature::from_asset(&fixture.signed()).unwrap();
+    let signer = x509_cert::Certificate::from_der(original.signer_certificate().unwrap()).unwrap();
+    let spki = signer.tbs_certificate.subject_public_key_info.subject_public_key.raw_bytes();
+    for (what, needle) in [
+        ("signer certificate", original.signer_certificate().unwrap()),
+        ("signer key", spki),
+        ("serial number", signer.tbs_certificate.serial_number.as_bytes()),
+        ("original protected header", original.protected.as_slice()),
+        ("original signature", original.signature.as_slice()),
+    ] {
+        assert!(!after.windows(needle.len()).any(|w| w == needle), "{what} found in the output");
+    }
+}
+
+#[test]
+fn verifier_checks_trust_time_stamp_and_binding_before_the_proof() {
+    let fixture = Fixture::new(true, true);
+    let output = replaced_with_placeholder(&fixture);
+    let prover = stand_in_prover(fixture.dir.path(), &"00".repeat(32));
+    let trust = c2pa_x509_zk_demo::TrustList::from_file(&fixture.pki("trust-list.pem")).unwrap();
+    let tsa = fixture.pki("tsa-trust-list.pem");
+    let verify = |asset: &Path, trust: &c2pa_x509_zk_demo::TrustList, tsa: &Path, prover: &Prover| {
+        third_party::verify(asset, trust, tsa, prover).unwrap_err().to_string()
+    };
+    assert!(third_party::is_third_party(&output) && !third_party::is_third_party(&fixture.signed()));
+
+    // All checks pass up to the proof, which the stand-in rejects.
+    let err = verify(&output, &trust, &tsa, &prover);
+    assert!(err.contains("proof does not verify"), "{err}");
+
+    // An untrusted TSA, an untrusted issuing chain, other keys, a changed asset.
+    let err = verify(&output, &trust, &fixture.pki("trust-list.pem"), &prover);
+    assert!(err.contains("time-stamp token does not verify"), "{err}");
+    let other = Fixture::new(true, false);
+    let other_trust = c2pa_x509_zk_demo::TrustList::from_file(&other.pki("trust-list.pem")).unwrap();
+    let err = verify(&output, &other_trust, &tsa, &prover);
+    assert!(!err.contains("proof does not verify"), "an untrusted chain reached the proof: {err}");
+    let err = verify(&output, &trust, &tsa, &stand_in_prover(&fixture.dir.path().join("other"), &"11".repeat(32)));
+    assert!(err.contains("other keys"), "{err}");
+    let mut bytes = std::fs::read(&output).unwrap();
+    let n = bytes.len();
+    bytes[n - 100] ^= 1; // image data, inside the hard binding
+    let tampered = fixture.dir.path().join("tampered.png");
+    std::fs::write(&tampered, bytes).unwrap();
+    let err = verify(&tampered, &trust, &tsa, &prover);
+    assert!(err.contains("c2pa validation failed") || err.contains("hard binding"), "{err}");
+}
+
+#[test]
+fn claims_with_identity_or_ingredients_are_refused() {
+    let fixture = Fixture::new(true, true);
+    let store = manifest_store(&fixture.signed()).unwrap();
+    let claim_with = |label: &str| {
+        let value = ciborium::Value::Map(vec![(
+            ciborium::Value::Text("created_assertions".into()),
+            ciborium::Value::Array(vec![ciborium::Value::Map(vec![(
+                ciborium::Value::Text("url".into()),
+                ciborium::Value::Text(format!("self#jumbf=c2pa.assertions/{label}")),
+            )])]),
+        )]);
+        let mut out = Vec::new();
+        ciborium::into_writer(&value, &mut out).unwrap();
+        out
+    };
+    for (label, expected) in [("cawg.identity", "identity assertion"), ("c2pa.ingredient.v3", "ingredient")] {
+        let err = third_party::check_claim(&store, &claim_with(label)).unwrap_err().to_string();
+        assert!(err.contains(expected), "{label}: {err}");
+    }
+    let report = third_party::check_claim(&store, &active_manifest(&store).unwrap().claim).unwrap();
+    let mut labels = report.assertions.clone();
+    labels.sort();
+    assert_eq!(labels, ["c2pa.actions.v2", "c2pa.hash.data"]);
+    assert!(report.claim_generator.starts_with("c2pa-x509-zk-demo"), "{}", report.claim_generator);
+    assert_eq!(report.hard_binding_exclusions.len(), 1, "a PNG excludes only its manifest chunk");
+}
+
+/// End to end with real proofs: the anonymizer and verifier CLIs in
+/// third-party mode, then rejection of a changed claim. Needs keys from
+/// `c2pa-zk-gnark setup` in $C2PA_ZK_KEYS (default target/gnark-keys) and
+/// the CLI built to target/c2pa-zk-gnark.
+#[test]
+#[ignore = "needs gnark keys and CLI; proves for ~1.5 min"]
+fn third_party_anonymization_end_to_end() {
+    let keys = std::env::var_os("C2PA_ZK_KEYS").map(PathBuf::from).unwrap_or_else(|| zk_root().join("target/gnark-keys"));
+    let gnark = zk_root().join("target/c2pa-zk-gnark");
+    assert!(keys.join("keys.json").exists() && gnark.exists(), "run c2pa-zk-gnark setup --keys {} first", keys.display());
+
+    let fixture = Fixture::new(true, true);
+    let output = fixture.dir.path().join("anonymized.png");
+    Command::cargo_bin("c2pa-x509-zk-anonymizer")
+        .unwrap()
+        .arg("--third-party").arg("--keys").arg(&keys).arg("--gnark").arg(&gnark)
+        .arg("--input").arg(fixture.signed()).arg("--output").arg(&output)
+        .arg("--trust-list").arg(fixture.pki("trust-list.pem"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("replaced in place"));
+
+    let verify = |asset: &Path| {
+        let mut cmd = Command::cargo_bin("c2pa-x509-zk-verify").unwrap();
+        cmd.arg("--input").arg(asset)
+            .arg("--trust-list").arg(fixture.pki("trust-list.pem"))
+            .arg("--tsa-trust-list").arg(fixture.pki("tsa-trust-list.pem"))
+            .arg("--keys").arg(&keys).arg("--gnark").arg(&gnark);
+        cmd.assert()
+    };
+    verify(&output).success().stdout(predicates::str::contains("Valid"));
+
+    // A claim byte changed in place: c2pa's own checks do not see the claim
+    // (its signature is the ZK one), but the proof is bound to it.
+    let store = manifest_store(&output).unwrap();
+    let manifest = active_manifest(&store).unwrap();
+    let bytes = std::fs::read(&output).unwrap();
+    let claim_at = bytes.windows(manifest.claim.len()).position(|w| w == manifest.claim.as_slice()).unwrap();
+    // Flip a byte inside a text value (the claim generator's name), so the claim still parses.
+    let name_at = claim_at + manifest.claim.windows(8).position(|w| w == b"c2pa-x50").unwrap();
+    let mut changed = bytes.clone();
+    changed[name_at] = b'C';
+    let tampered = fixture.dir.path().join("claim-changed.png");
+    std::fs::write(&tampered, changed).unwrap();
+    verify(&tampered).failure().stderr(predicates::str::contains("proof does not verify"));
+}

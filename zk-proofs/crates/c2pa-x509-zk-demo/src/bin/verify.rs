@@ -38,10 +38,25 @@ struct Args {
     /// Path to the Circom circuits build directory
     #[arg(long, default_value = "circuits")]
     circuits_dir: PathBuf,
+
+    /// TSA trust anchors (PEM), for third-party assets' time stamps
+    #[arg(long)]
+    tsa_trust_list: Option<PathBuf>,
+
+    /// Key directory from `c2pa-zk-gnark setup`, for third-party assets
+    #[arg(long)]
+    keys: Option<PathBuf>,
+
+    /// The c2pa-zk-gnark CLI (default: c2pa-zk-gnark next to the target directory)
+    #[arg(long)]
+    gnark: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if c2pa_x509_zk_demo::third_party::is_third_party(&args.input) {
+        return third_party(&args);
+    }
 
     println!("=== C2PA X.509 ZK Proof Verifier ===\n");
 
@@ -251,5 +266,26 @@ fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Verify a third-party (E2b) anonymized asset.
+fn third_party(args: &Args) -> Result<()> {
+    use anyhow::anyhow;
+    println!("=== C2PA X.509 ZK Proof Verifier (third-party mode) ===\n");
+    let trust = TrustList::from_file(&args.trust_list)?;
+    let tsa_trust = args.tsa_trust_list.as_ref().ok_or_else(|| anyhow!("third-party assets need --tsa-trust-list"))?;
+    let keys = args.keys.clone().ok_or_else(|| anyhow!("third-party assets need --keys (a directory from c2pa-zk-gnark setup)"))?;
+    let cli = match &args.gnark {
+        Some(cli) => cli.clone(),
+        None => std::env::current_exe()?.parent().and_then(|d| d.parent()).map(|d| d.join("c2pa-zk-gnark")).ok_or_else(|| anyhow!("cannot locate c2pa-zk-gnark; pass --gnark"))?,
+    };
+    let report = c2pa_x509_zk_demo::third_party::verify(&args.input, &trust, tsa_trust, &c2pa_x509_zk_demo::third_party::Prover { cli, keys })?;
+    println!("✅ Valid: the claim was signed by a certificate for C2PA claim signing,");
+    println!("   issued by {}, valid at the time-stamped time {} (Unix).", report.issuer, report.time);
+    println!("   Issuing path: {} certificate(s) to the trust list; time stamp trusted.", report.path.len());
+    println!("   Claim checks (c2pa): {}", report.c2pa_success.join(", "));
+    println!("   Visible: {} | assertions: {}", report.claim.claim_generator, report.claim.assertions.join(", "));
+    println!("   Not established: revocation of the signer certificate; the full certificate profile (H2).");
     Ok(())
 }

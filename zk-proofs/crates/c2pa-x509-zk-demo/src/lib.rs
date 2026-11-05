@@ -20,6 +20,7 @@ pub mod proving_key;
 pub mod third_party;
 pub mod trust;
 pub mod types;
+pub mod zk_signature;
 
 #[cfg(test)]
 pub(crate) mod test_pki;

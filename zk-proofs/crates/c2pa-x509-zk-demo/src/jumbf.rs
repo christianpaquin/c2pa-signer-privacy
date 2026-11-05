@@ -131,6 +131,45 @@ pub fn active_manifest(store: &[u8]) -> Result<ActiveManifest> {
     })
 }
 
+/// The number of manifests in a manifest store.
+pub fn manifest_count(store: &[u8]) -> Result<usize> {
+    let top = boxes(store, 0..store.len())?;
+    let root = top.first().filter(|b| &b.kind == b"jumb").ok_or_else(|| anyhow!("not a JUMBF manifest store"))?;
+    let (_, manifests) = superbox(store, root.content.clone())?;
+    Ok(manifests.iter().filter(|b| &b.kind == b"jumb").count())
+}
+
+/// An assertion of the active manifest: its label and its content box's type
+/// and bytes (CBOR or JSON, typically).
+#[derive(Debug, Clone)]
+pub struct Assertion {
+    pub label: String,
+    pub content_type: [u8; 4],
+    pub content: Vec<u8>,
+}
+
+/// The active manifest's assertions, in store order.
+pub fn active_assertions(store: &[u8]) -> Result<Vec<Assertion>> {
+    let top = boxes(store, 0..store.len())?;
+    let root = top.first().filter(|b| &b.kind == b"jumb").ok_or_else(|| anyhow!("not a JUMBF manifest store"))?;
+    let (_, manifests) = superbox(store, root.content.clone())?;
+    let last = manifests.iter().filter(|b| &b.kind == b"jumb").last().ok_or_else(|| anyhow!("manifest store has no manifests"))?;
+    let (_, parts) = superbox(store, last.content.clone())?;
+    let mut out = Vec::new();
+    for part in parts.iter().filter(|b| &b.kind == b"jumb") {
+        let (part_label, children) = superbox(store, part.content.clone())?;
+        if part_label != "c2pa.assertions" {
+            continue;
+        }
+        for assertion in children.iter().filter(|b| &b.kind == b"jumb") {
+            let (label, contents) = superbox(store, assertion.content.clone())?;
+            let content = contents.first().ok_or_else(|| anyhow!("assertion {label} has no content"))?;
+            out.push(Assertion { label, content_type: content.kind, content: store[content.content.clone()].to_vec() });
+        }
+    }
+    Ok(out)
+}
+
 /// The manifest store embedded in an asset.
 pub fn manifest_store(asset: &Path) -> Result<Vec<u8>> {
     c2pa::jumbf_io::load_jumbf_from_file(asset).map_err(|e| anyhow!("no C2PA manifest store in {}: {e}", asset.display()))

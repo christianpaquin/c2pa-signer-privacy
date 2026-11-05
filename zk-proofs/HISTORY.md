@@ -38,7 +38,7 @@ Recorded in [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIONS.md) (D1–D7) and
 - **Replace the signature in place** (Q1): the original claim and its hard binding stay valid, with nothing added to the asset.
 - **A trusted time stamp is required** (D7, Q6): validity at the time a TSA attested the signature, as C2PA defines it; the token is public, so the TSA operator can link the output to the original (Q7).
 - **gnark for E2b** (#22), after E1 measured ECDSA at a thirteenth of circom's constraints and P-384 available.
-- **V0 kept as a frozen baseline** rather than retired, so the comparison can be reproduced.
+- **V0 kept as a frozen baseline** rather than retired, so the comparison can be reproduced. Moving past it was a decision (Q2), not a dominance result: the two disclose different information and accept different inputs.
 
 ## Measurements over time
 

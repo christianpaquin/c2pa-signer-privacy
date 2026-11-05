@@ -48,7 +48,8 @@ proving, as separate steps; anonymization_witness_plus_prove = prove. verificati
 (loading the verifying key and verifying); verification_full = the verifier CLI on the anonymized asset. prove_warm \
 repeats prove with its files resident and is in no total. Each of prove and prove_warm is run three times; \
 the phase reports the median run by wall time (its steps) and the maximum peak memory, with every run and its \
-observed cache state in data.runs. test_fixture is in no total. Peak memory per category is \
+observed cache state in data.runs. The per-asset total's prove_cache is the prove phase's observed state: \
+the figure is a cold measurement only when it is cold (eviction-failed or mixed otherwise). test_fixture is in no total. Peak memory per category is \
 the maximum over its phases, each a separate process.";
 
 /// One phase run inside a subprocess (the Rust-side phases).
@@ -229,22 +230,30 @@ fn prove_runs(name: &str, category: &str, cold: bool, reps: usize, keys: &Path, 
         run["resident_before"] = residency;
         runs.push(run);
     }
+    Ok(aggregate_runs(name, category, runs))
+}
+
+/// One phase from repeated runs: the median run by wall time (its steps
+/// kept together, not medians of each step), the maximum peak memory, every
+/// run, and the observed cache state: the runs' common label, or "mixed".
+fn aggregate_runs(name: &str, category: &str, runs: Vec<Value>) -> Value {
     let mut by_wall: Vec<&Value> = runs.iter().collect();
     by_wall.sort_by(|a, b| a["wall_s"].as_f64().partial_cmp(&b["wall_s"].as_f64()).unwrap());
     let median = by_wall[by_wall.len() / 2];
-    let caches: Vec<&str> = runs.iter().filter_map(|r| r["cache"].as_str()).collect();
-    Ok(json!({
+    let caches: Vec<&str> = runs.iter().map(|r| r["cache"].as_str().unwrap_or("unknown")).collect();
+    let cache = if caches.iter().all(|c| *c == caches[0]) { caches[0] } else { "mixed" };
+    json!({
         "name": name,
         "category": category,
         "wall_s": median["wall_s"],
         "peak_rss_mib": runs.iter().filter_map(|r| r["peak_rss_mib"].as_f64()).fold(0.0, f64::max),
         "steps": median["steps"],
         "data": {
-            "statistic": format!("median of {reps} runs (wall time); peak memory is the maximum"),
-            "cache": if caches.iter().all(|c| *c == caches[0]) { caches[0] } else { "mixed" },
+            "statistic": format!("median of {} runs (wall time); peak memory is the maximum", runs.len()),
+            "cache": cache,
             "runs": runs,
         },
-    }))
+    })
 }
 
 fn cache_label(evicted: bool, residency: &Value) -> &'static str {
@@ -304,6 +313,10 @@ pub fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, gnark: &Path, enviro
 
     let data_of = |name: &str| phases.iter().find(|p| p["name"] == name).map(|p| p["data"].clone()).unwrap_or(Value::Null);
     let (prepare, package) = (data_of("prepare"), data_of("package"));
+    // The per-asset figure carries the prove phase's observed cache state: it
+    // is a cold measurement only when that says "cold".
+    let mut per_asset = total(&phases, &["prepare", "prove", "self_verify", "package"]);
+    per_asset["prove_cache"] = data_of("prove")["cache"].clone();
     let manifest = keys_manifest(&keys)?;
     let size = |f: &str| std::fs::metadata(keys.join(f)).map(|m| m.len()).unwrap_or(0);
 
@@ -341,7 +354,7 @@ pub fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, gnark: &Path, enviro
         },
         "totals": {
             "one_time": total(&phases, &["setup"]),
-            "anonymization_per_asset": total(&phases, &["prepare", "prove", "self_verify", "package"]),
+            "anonymization_per_asset": per_asset,
             "anonymization_witness_plus_prove": total(&phases, &["prove"]),
             "verification": total(&phases, &["verify"]),
             "verification_full": total(&phases, &["verify_cli"]),
@@ -367,6 +380,32 @@ pub fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, gnark: &Path, enviro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run(wall: f64, peak: f64, cache: &str, load: f64) -> Value {
+        json!({ "wall_s": wall, "peak_rss_mib": peak, "cache": cache, "steps": { "load_proving_key_s": load } })
+    }
+
+    #[test]
+    fn aggregation_keeps_the_median_run_whole_and_the_maximum_peak() {
+        // The median run by wall time is 79.4 s; its steps come with it, even
+        // though another run has the median load time.
+        let runs = vec![run(79.5, 7000.0, "cold", 58.0), run(78.6, 7700.0, "cold", 60.1), run(79.4, 7100.0, "cold", 59.0)];
+        let phase = aggregate_runs("prove", "anonymization", runs);
+        assert_eq!(phase["wall_s"], json!(79.4));
+        assert_eq!(phase["steps"]["load_proving_key_s"], json!(59.0));
+        assert_eq!(phase["peak_rss_mib"], json!(7700.0));
+        assert_eq!(phase["data"]["cache"], json!("cold"));
+        assert_eq!(phase["data"]["runs"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn aggregation_reports_the_observed_cache_state() {
+        let failed = aggregate_runs("prove", "anonymization", vec![run(70.0, 1.0, "eviction-failed", 1.0)]);
+        assert_eq!(failed["data"]["cache"], json!("eviction-failed"));
+        let mixed = aggregate_runs("prove", "anonymization", vec![run(70.0, 1.0, "cold", 1.0), run(71.0, 1.0, "eviction-failed", 1.0)]);
+        assert_eq!(mixed["data"]["cache"], json!("mixed"));
+        assert_eq!(mixed["data"]["runs"][1]["cache"], json!("eviction-failed"));
+    }
 
     #[test]
     fn parses_the_gnark_cli_timings() {

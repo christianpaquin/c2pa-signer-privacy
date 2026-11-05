@@ -9,9 +9,38 @@ This approach keeps standard X.509/ECDSA-P256 signing, then adds a post-processi
 - Generates a Groth16 ZK proof demonstrating valid CA issuance
 - Replaces the manifest signature with the proof
 
-The verifier can confirm the asset was anonymized from an asset signed by *someone* with a certificate from a trusted CA, without learning *who*. The anonymized asset's `x5chain` carries the issuing CA chain (never the signer's certificate), which the verifier validates against a trust list.
+The verifier can confirm the asset was anonymized from an asset signed by *someone* with a certificate from a trusted CA, without learning *who*.
 
-## Quick Start
+**Two modes.** [Third-party mode](#quick-start-third-party-mode) is the current one: it proves the asset's *original* signature (in gnark), needs no private key, and replaces the signature in place. The signer-side mode described in the rest of this overview and in [V0 Baseline Reproduction](#v0-baseline-reproduction-frozen) is the **V0 baseline, frozen**: kept so its results can be reproduced and compared, but no longer developed. The anonymizer still runs V0 unless given `--third-party`; the verifier detects the mode from the asset. [HISTORY.md](HISTORY.md) traces how the project moved from one to the other. The anonymized asset's `x5chain` carries the issuing CA chain (never the signer's certificate), which the verifier validates against a trust list.
+
+## Quick Start (Third-Party Mode)
+
+Third-party mode ([E2b](#e2b-third-party-anonymization)) anonymizes an asset without the signer's private key: it proves, in gnark, that the asset's **original** claim signature was made with a certificate a trusted CA issued for C2PA claim signing, valid at the time a trusted TSA attested the signature, then replaces that signature in place ([statement](THIRD-PARTY-STATEMENT.md)). The claim, its assertions, and its hard binding are kept byte for byte.
+
+```bash
+cargo build --release
+(cd gnark && go build -o ../target/c2pa-zk-gnark ./cmd/c2pa-zk-gnark)   # Go 1.27.3+
+./target/c2pa-zk-gnark setup --keys target/gnark-keys                  # one-time: ~8 min, ~11 GB
+
+# A signed asset that mirrors a real device deployment: P-384 CA, ES256, sigTst2 time stamp
+./generate-test-pki.sh --mirror fixtures/mirror
+./target/release/c2pa-x509-zk-sign --input fixtures/cards.png --output signed.png \
+    --cert fixtures/mirror/signer.pem --key fixtures/mirror/signer.key --ca fixtures/mirror/issuing-ca.pem \
+    --tsa-cert fixtures/mirror/tsa.pem --tsa-key fixtures/mirror/tsa.key
+
+./target/release/c2pa-x509-zk-anonymizer --third-party --keys target/gnark-keys \
+    --input signed.png --output anonymized.png --trust-list fixtures/mirror/trust-list.pem
+./target/release/c2pa-x509-zk-verify --input anonymized.png --keys target/gnark-keys \
+    --trust-list fixtures/mirror/trust-list.pem --tsa-trust-list fixtures/mirror/tsa-trust-list.pem
+```
+
+**The anonymizer** refuses, before proving: claim signatures other than ES256, assets without a `sigTst2` time stamp, signers not chaining to the trust list at the time stamp's time, claims with identity assertions or ingredients, multi-manifest assets, and assets whose ZK signature would not fit in the original signature's space. It then proves, checks its own proof, replaces the signature in place at the exact original size, and reports what stays visible (claim generator, assertions, and any data the hard binding excludes besides the manifest store, such as EXIF or XMP, which is neither authenticated nor anonymized).
+
+**The verifier** detects third-party assets and derives every public input from the asset. It decodes the ZK signature strictly (exactly the specified fields, all-zero padding, a fixed-length proof, nothing after it), checks `--issuer` if given, and validates the time-stamp token against the TSA trust list at its attested time (OpenSSL), the `x5chain` issuing chain against the trust list at that time, the claim's assertions and hard binding (c2pa; only the expected failures of the claim signature itself are ignored), and the proof. Not established: revocation of the signer certificate, and the full certificate profile ([shortcuts](THIRD-PARTY-STATEMENT.md#guarantees-and-shortcuts)). Standard C2PA validators reject the ZK signature (unknown critical algorithm).
+
+## V0 Baseline Reproduction (frozen)
+
+The signer-side V0 baseline, kept so its results can be reproduced; for current use, see [Quick Start](#quick-start-third-party-mode) above.
 
 > **Prerequisites**: Complete the [Building Circuits](#building-circuits) setup before running these commands — you need the compiled circuit and trusted setup keys. For testing without that setup, see [Placeholder Mode](#placeholder-mode).
 
@@ -46,31 +75,6 @@ cargo run --release --bin c2pa-x509-zk-verify -- \
   --input /tmp/anon.png \
   --trust-list fixtures/pki/trust-list.pem
 ```
-
-## Third-Party Mode
-
-Third-party mode ([E2b](#e2b-third-party-anonymization)) anonymizes an asset without the signer's private key: it proves, in gnark, that the asset's **original** claim signature was made with a certificate a trusted CA issued for C2PA claim signing, valid at the time a trusted TSA attested the signature, then replaces that signature in place ([statement](THIRD-PARTY-STATEMENT.md)). The claim, its assertions, and its hard binding are kept byte for byte.
-
-```bash
-cargo build --release
-(cd gnark && go build -o ../target/c2pa-zk-gnark ./cmd/c2pa-zk-gnark)   # Go 1.27.3+
-./target/c2pa-zk-gnark setup --keys target/gnark-keys                  # one-time: ~8 min, ~11 GB
-
-# A signed asset that mirrors a real device deployment: P-384 CA, ES256, sigTst2 time stamp
-./generate-test-pki.sh --mirror fixtures/mirror
-./target/release/c2pa-x509-zk-sign --input fixtures/cards.png --output signed.png \
-    --cert fixtures/mirror/signer.pem --key fixtures/mirror/signer.key --ca fixtures/mirror/issuing-ca.pem \
-    --tsa-cert fixtures/mirror/tsa.pem --tsa-key fixtures/mirror/tsa.key
-
-./target/release/c2pa-x509-zk-anonymizer --third-party --keys target/gnark-keys \
-    --input signed.png --output anonymized.png --trust-list fixtures/mirror/trust-list.pem
-./target/release/c2pa-x509-zk-verify --input anonymized.png --keys target/gnark-keys \
-    --trust-list fixtures/mirror/trust-list.pem --tsa-trust-list fixtures/mirror/tsa-trust-list.pem
-```
-
-**The anonymizer** refuses, before proving: claim signatures other than ES256, assets without a `sigTst2` time stamp, signers not chaining to the trust list at the time stamp's time, claims with identity assertions or ingredients, multi-manifest assets, and assets whose ZK signature would not fit in the original signature's space. It then proves, checks its own proof, replaces the signature in place at the exact original size, and reports what stays visible (claim generator, assertions, and any data the hard binding excludes besides the manifest store, such as EXIF or XMP, which is neither authenticated nor anonymized).
-
-**The verifier** detects third-party assets and derives every public input from the asset. It decodes the ZK signature strictly (exactly the specified fields, all-zero padding, a fixed-length proof, nothing after it), checks `--issuer` if given, and validates the time-stamp token against the TSA trust list at its attested time (OpenSSL), the `x5chain` issuing chain against the trust list at that time, the claim's assertions and hard binding (c2pa; only the expected failures of the claim signature itself are ignored), and the proof. Not established: revocation of the signer certificate, and the full certificate profile ([shortcuts](THIRD-PARTY-STATEMENT.md#guarantees-and-shortcuts)). Standard C2PA validators reject the ZK signature (unknown critical algorithm).
 
 ## CLI Tools
 
@@ -431,19 +435,20 @@ The record contains the variant and the exact statement proved, the accounting b
 
 ## Current Limitations
 
-What the current prototype does not establish. Every experiment states which of these still apply to its results.
+What the prototype does not establish, in third-party mode. Every experiment states which of these still apply to its results.
 
-- **Signer-side mode only.** The anonymizer re-signs with the signer's private key; existing content whose key is unavailable cannot be anonymized ([E2a](#e2a-third-party-proof-statement-and-privacy-design), [E2b](#e2b-third-party-anonymization)).
-- **Binding to the asset bytes only.** The proof binds to a digest of the asset with its manifest stripped, not to a claim, so the rest of the anonymized manifest is not authenticated.
-- **No historical validity.** The certificate-validity timestamp (`photoTimestamp`) is chosen by the prover and not checked by the verifier; no result claims the certificate was valid when the content was signed ([D7](ARCHITECTURE-DECISIONS.md#d7-time-policy)).
-- **Partial certificate validation in-circuit.** P-256 keys and ECDSA-SHA256 CA signatures only; the public key and validity are pinned inside the signed TBSCertificate by their encoding, without a full DER walk, and the signer certificate's version, key usage, `CA:FALSE`, and EKU are not checked in-circuit ([Certificate field binding](#certificate-field-binding), [H2](#h2-full-certificate-validation-in-the-circuit)).
-- **Off-circuit chain validation is not full RFC 5280 path validation.** It checks signatures, validity, `CA:TRUE`, `pathLen`, key usage, EKU, and rejects unrecognized critical extensions, but does not process name or policy constraints, and checks no revocation ([Test PKI and Trust Lists](#test-pki-and-trust-lists), [H3](#h3-revocation)).
+- **No revocation check** of the signer certificate ([H3](#h3-revocation)).
+- **Partial certificate validation in-circuit.** The structural walk checks the certificate's purpose (claim-signing EKU, not a CA) and validity, but not key usage, unknown critical extensions, name constraints, or policies ([H2](#h2-full-certificate-validation-in-the-circuit)). Off-circuit chain validation checks signatures, validity, `CA:TRUE`, `pathLen`, key usage, EKU, and unrecognized critical extensions, but is not full RFC 5280 path validation.
+- **Algorithms and encodings.** ES256 claim signatures, P-384 issuing CAs, and `sigTst2` time stamps only, and the protected-header encoding that real device assets and c2pa-rs use ([E1](#e1-cost-of-reality-p-384-sha-384-and-rsa-in-circuit), [Q10](THIRD-PARTY-STATEMENT.md#q10-first-algorithms)). Measured on a fixture that mirrors a real deployment, not yet on a real asset ([R2](#r2-anonymizing-real-signed-content)).
 - **Issuing CA disclosed.** The anonymity set is everyone that CA has certified ([H4](#h4-hiding-the-issuing-ca)).
+- **Time-stamp linkability.** The public time-stamp token lets the TSA operator link the anonymized asset to the original request ([Q7](THIRD-PARTY-STATEMENT.md#q7-time-stamp-threat-model)).
 - **Unauthenticated trust lists.** Trust lists are read from files; the C2PA lists are not signed.
 - **Proof system.** Groth16 on BN254 (~100-bit security) with a single-party local setup, whose operator could forge proofs ([H5](#h5-production-proving-setup), [E7](#e7-curve-bn254-vs-bls12-381)).
-- **Metadata not scrubbed.** Asset metadata (for example EXIF) and other manifest fields are not removed; privacy scans cover known signer identifiers only ([H6](#h6-metadata-privacy-beyond-the-signature)).
-- **Cost.** ~10 minutes and ~11 GiB of RAM per proof, mostly loading the proving key and generating the witness in WASM rather than proving ([Performance](#performance), [FEASIBILITY.md](FEASIBILITY.md#observations)).
-- **Tool display.** `c2patool` presents the issuing CA as the signer ([H8](#h8-c2patool-support)).
+- **Metadata.** Data outside the hard binding (for example EXIF) is reported, not scrubbed ([H6](#h6-metadata-privacy-beyond-the-signature)).
+- **Cost.** 79 s and 7.5 GiB per asset, three quarters of it loading the proving key ([FEASIBILITY.md](FEASIBILITY.md#v1-third-party-e2b-measured-detail)).
+- **Tool display.** Standard C2PA validators reject the ZK signature, an unknown critical algorithm ([H8](#h8-c2patool-support)).
+
+The frozen **V0 baseline** (signer-side) additionally binds only to the asset bytes rather than the claim, makes no historical-validity claim (its timestamp is chosen by the prover), pins certificate fields by byte pattern rather than structure, supports P-256 CAs only, and takes ~10 minutes and ~11 GiB per asset.
 
 ## Roadmap
 
@@ -519,7 +524,7 @@ Status:
 
 - **Fixtures (done).** The [mirror PKI profile](#test-pki-and-trust-lists) and a local test TSA produce standard, trusted, time-stamped assets with the structure of real device assets. `jumbf.rs` locates the active manifest's claim and claim signature (with its position, for the in-place replacement), and `original_signature.rs` rebuilds the exact bytes the circuit must hash, confirmed on a real device-signed asset.
 - **Statement and prover (done).** The statement is a gnark circuit ([`gnark/`](gnark/)): 4.7M constraints at the E2a size limits, with the structural certificate walk. `c2pa-x509-zk-statement-inputs` prepares its inputs from a signed asset, and the `c2pa-zk-gnark` CLI checks, proves, and verifies. A real c2pa-signed fixture is proved and verified at the default sizes. Forgery tests cover the claim, time, imprint, CA, signatures, and certificate purpose.
-- **Anonymizer and verifier (done).** [Third-party mode](#third-party-mode) end to end: the anonymizer refuses what the statement excludes before proving, checks its own proof, and replaces the claim signature in place at its exact size, keeping the claim and its hard binding; the verifier derives every public input from the asset and checks the time stamp (TSA trust list), the issuing chain, the claim's assertions and hard binding (c2pa), and the proof.
+- **Anonymizer and verifier (done).** [Third-party mode](#quick-start-third-party-mode) end to end: the anonymizer refuses what the statement excludes before proving, checks its own proof, and replaces the claim signature in place at its exact size, keeping the claim and its hard binding; the verifier derives every public input from the asset and checks the time stamp (TSA trust list), the issuing chain, the claim's assertions and hard binding (c2pa), and the proof.
 - **Benchmark (done).** `c2pa-x509-zk-bench run --variant third-party`, under V0's accounting: **79 s per asset** (V0: 611 s), 7.5 GiB, 30 ms verification; 74% of the time is loading the proving key, CPU-bound. Row V1 in [FEASIBILITY.md](FEASIBILITY.md#v1-third-party-e2b-measured-detail).
 
 #### E3. Trust model B: Merkle membership
@@ -533,6 +538,8 @@ Decision D1, option C: the registration entity issues a SNARK-friendly credentia
 #### E5. Key possession
 
 Decision D5: in-circuit ECDSA (today) against a P-256 commitment with a Schnorr-style proof outside the circuit. Applies only to signer-side mode; pursued only if that mode remains valuable after E2b.
+
+Status: **moot.** Both modes use the same statement, which verifies the original signature, so no separate proof of key possession arises ([Q2](THIRD-PARTY-STATEMENT.md#q2-one-statement-for-both-modes)).
 
 #### E6. Proof systems
 

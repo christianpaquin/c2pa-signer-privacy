@@ -40,10 +40,15 @@ Stretch goals, not pass/fail gates: today's baseline misses most of them, and ro
 | Variant | Mode | Trust model | Proves | Discloses | Assumptions | Deployment segments covered | Per-asset anonymization | Peak RAM | Verify | Proof container / manifest added | Security | Setup | Record |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | **V0 baseline** | Signer-side | A (X.509 in-circuit) | Issuing CA (P-256, ECDSA-SHA256) signed a certificate whose P-256 key signed the manifest-stripped asset digest; key and validity pinned inside the signed TBS | Issuing CA (`x5chain`), asset digest, a prover-chosen timestamp | Signer holds its key; trust list authentic; single-party setup | Test PKI only. Not the official list (P-384 CAs); interim P-256 camera roots only if their intermediates are also P-256 (unverified); not the interim allowed list | **611 s** (witness 231 s + prove 381 s; prepare and package < 0.1 s) | 11.1 GiB (prove phase) | 13 ms (19 ms full verifier) | 668 B / 11.4 KB | ~100 bits (BN254) | Per-circuit, single party | [2026-11-03-baseline](bench/results/2026-11-03-baseline.json) |
+| **V1 third-party** (E2b) | Third-party (also signer-side, Q2) | A (X.509 in-circuit) | The [E2a statement](THIRD-PARTY-STATEMENT.md#the-chain-of-trust): issuing CA (P-384, ECDSA-SHA384) signed a certificate that, by a structural DER walk, is for C2PA claim signing and not a CA, valid at `t`; its P-256 key made the original ES256 signature over the original claim; the `sigTst2` imprint is bound to that signature | Issuing CA (`x5chain`), the claim and its assertions, `t` and the time-stamp token (the TSA operator can link it) | Trust list and TSA trust list authentic; single-party setup; honest anonymizer | Mirror of an official-list device deployment (P-384 CA, ES256, `sigTst2`); not yet a real asset (R2); not RSA CAs or signers, `sigTst`, or the interim allowed list | **79.4 s** (prove 79.4 s: proving key load 58.5 s, solve 3.0 s, proof 16.5 s; prepare, self-verify, package < 0.1 s) | 7.5 GiB (prove phase) | 30 ms (50 ms full verifier) | 196 B proof in a same-size ZK signature / no change (replaced in place) | ~100 bits (BN254) | Per-circuit, single party | [2026-11-05-third-party](bench/results/2026-11-05-third-party.json) |
 
 **V0 shortcuts:** every item under [Current Limitations](README.md#current-limitations) applies, in particular no historical validity (the timestamp is unchecked), binding to the asset bytes rather than the claim, and partial in-circuit certificate validation.
 
-E1's P-384/SHA-384 primitives are measured [below](#e1-p-384-and-sha-384-primitives); they are components of future rows rather than a variant of their own. Planned rows: E1 (RSA primitives, standalone), E2b (third-party mode), E3/E4 (trust models B and C, on the same statement), E5 (key possession, signer-side only), E6/E7 (proof systems and curves).
+**V1 shortcuts** ([guarantees and shortcuts](THIRD-PARTY-STATEMENT.md#guarantees-and-shortcuts)): no revocation check; key usage, unknown critical extensions, name constraints, and policies not checked (H2); the issuing CA is disclosed (H4); metadata outside the hard binding is reported, not scrubbed (H6); one accepted encoding of the protected header (as both real assets and c2pa-rs produce it).
+
+**V0 and V1 are not an equal-guarantee comparison.** V1 proves strictly more (claim binding, historical validity backed by a trusted time stamp, certificate purpose, a P-384 CA) and also changes the proof stack (circom/arkworks to gnark), so the difference cannot be split between statement and stack. Still, V1 is at least as good as V0 on every axis except one-time setup (499 s against 255 s), verification time (30 ms against 13 ms), and verifying-key size (2.1 KB against 872 B), all one-time or small, and covers the official list's dominant CA algorithm, so V0 is kept only as the baseline record ([Q2](THIRD-PARTY-STATEMENT.md#q2-one-statement-for-both-modes) retires it from the tools).
+
+E1's P-384/SHA-384 primitives are measured [below](#e1-p-384-and-sha-384-primitives); they are components of future rows rather than a variant of their own. Planned rows: E1 (RSA primitives, standalone), R2 (V1 on a real asset), E3/E4 (trust models B and C, on the same statement), E5 (key possession, signer-side only), E6/E7 (proof systems and curves).
 
 ## V0 baseline: measured detail
 
@@ -74,6 +79,37 @@ An earlier run on the same machine measured 657 s per asset (witness 261 s, prov
 - **Memory peaks in the prove phase** (11.06 GiB), during proving rather than key loading: loading the key alone peaks at 2.1–3.2 GiB, and the prove phase still peaks at 11.2 GiB with a 5-second key load ([Proving-key loading](#proving-key-loading)). Witness generation peaks at 4.00 GiB.
 - **Verification is already within target** (13 ms, or 19 ms for the full verifier; 872-byte verifying key), and so is the proof container (668 B). The total manifest store (11.4 KB) is dominated by reserved padding.
 - **Against the third-party target** (≤ 5 min, ≤ 16 GB): about 2× over on time, within on memory, even before the two engineering fixes above. The signer-side device target (≤ 30 s, ≤ 2 GB) is about 20× off on time and 5× on memory. BN254 misses the security target.
+
+## V1 third-party (E2b): measured detail
+
+Measured with `c2pa-x509-zk-bench run --variant third-party` ([record](bench/results/2026-11-05-third-party.json)), under the same accounting as V0: every phase in its own process. 4,710,820 constraints and 50 public inputs at the E2a size limits (protected header 2 KB, claim 1 KB, TBS 1 KB). Inputs: the mirror fixture, signed by c2pa-rs with a local test TSA: a 486-byte claim, a 1,216-byte protected header, a 661-byte signer certificate (539-byte TBS), one issuing CA certificate in the validated path, and a 1.9 MB image.
+
+| Phase | Category | Wall time | Peak RSS | Steps |
+|---|---|---|---|---|
+| Fixtures | Test fixture (not counted) | 0.5 s | 0.02 GiB | Mirror PKI 0.44 s; sign with the local TSA 0.06 s |
+| Setup (gnark CLI) | One-time | 499 s | 11.26 GiB | Compile 17.7 s; Groth16 setup 436 s; proving key 1.15 GB, constraint system 0.30 GB, verifying key 2.1 KB |
+| Prepare | Anonymization | 0.01 s | 0.01 GiB | Read the manifest, check the claim (Q9), build the inputs (parse the original signature, check the imprint, validate the path at `t`), check that the ZK signature fits; each under 5 ms |
+| Prove, cold (median of 3) | Anonymization | 79.4 s | 7.47 GiB | Load constraint system 1.2 s; **load proving key 58.5 s**; prove 19.5 s, of which solving the witness 3.0 s |
+| Self-verify | Anonymization | 0.03 s | 0.01 GiB | The anonymizer's check of its own proof |
+| Package | Anonymization | 0.01 s | 0.01 GiB | Encode the ZK signature at the original's exact size; replace it in the manifest store |
+| Verify (gnark CLI) | Verification | 0.03 s | 0.02 GiB | Process start, loading the verifying key, verifying |
+| Verify (full CLI, anonymized asset) | Verification (full) | 0.05 s | 0.01 GiB | Time-stamp token against the TSA trust list (OpenSSL), issuing chain, c2pa claim checks, proof |
+| Prove, warm (median of 3; in no total) | Supplementary | 77.8 s | 7.47 GiB | Load proving key 58.3 s; prove 18.1 s |
+
+Totals: **79.4 s per-asset anonymization**, 499 s one-time, 30 ms verification (50 ms for the full verifier).
+
+**Cache state.** Before each cold run, the constraint system and the proving key were synced and evicted, and the measured residency was 0.0 for both in all three runs; before each warm run, 1.0. (A first run of this harness, without the sync, could not evict the files setup had just written; its residency check labelled the run `eviction-failed`, and it was discarded.) The three cold runs took 78.6–79.5 s, the warm ones 77.4–79.3 s.
+
+Output: a 196-byte proof (Groth16 with one commitment, compressed) in a ZK signature of exactly the original claim signature's size (16,324 bytes as c2pa-rs reserves it for this fixture; 14,251 bytes of padding left). The manifest store and the asset keep their sizes (17,529 and 1,905,087 bytes), and the claim is unchanged.
+
+### Observations
+
+- **Per-asset anonymization: 79 s against V0's 611 s (7.7× faster), for a stronger statement**, and within the third-party target (≤ 5 min, ≤ 16 GB). The device target (≤ 30 s, ≤ 2 GB) is 2.6× off on time and 3.7× on memory.
+- **Loading the proving key is again most of the time (74%), and it is CPU-bound, not I/O-bound:** cold and warm loads take the same ~58 s. gnark validates every point on load (decompression and subgroup checks), as arkworks did for V0 ([Proving-key loading](#proving-key-loading)). The proof itself takes 19.5 s, including 3 s of witness solving (native Go, against V0's 225 s in WASM).
+- **One-time setup is slower than V0's** (499 s against 255 s) and needs 11.3 GiB at its peak, comparable to V0.
+- **Verification stays within target**: 30 ms for the gnark CLI, most of it process start and loading the 2.1 KB verifying key; 50 ms for the full verifier, which adds the time-stamp, chain, and c2pa checks.
+- **Size is a non-issue in place**: the ZK signature fits in the space c2pa-rs reserves with 14 KB to spare; for the real device sample, the [computed fit](THIRD-PARTY-STATEMENT.md#the-zk-signatures-encoding) leaves 674 bytes with this proof size.
+- **Variance.** The six prove runs here agree within 3% (77.4–79.5 s). The first run of this harness, with one repetition each, measured key loads of 52 s and 102 s; the cause is unknown (nothing else was scheduled on the machine), hence the three repetitions and the median.
 
 ## E1: P-384 and SHA-384 primitives
 

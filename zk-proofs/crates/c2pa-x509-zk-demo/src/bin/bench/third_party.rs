@@ -20,7 +20,7 @@
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use c2pa_x509_zk_demo::jumbf::{active_manifest, manifest_store};
@@ -52,10 +52,69 @@ observed cache state in data.runs. The per-asset total's prove_cache is the prov
 the figure is a cold measurement only when it is cold (eviction-failed or mixed otherwise). test_fixture is in no total. Peak memory per category is \
 the maximum over its phases, each a separate process.";
 
+/// Where a run's inputs and outputs are: the generated fixture by default, or
+/// an external signed asset with given trust lists (roadmap R2). Written to
+/// the work directory so the phase subprocesses read the same paths.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Paths {
+    pub signed: PathBuf,
+    pub anonymized: PathBuf,
+    pub trust_list: PathBuf,
+    pub tsa_trust_list: PathBuf,
+    pub keys: PathBuf,
+}
+
+/// An external signed asset and the trust lists to anonymize and verify it against.
+#[derive(Debug, Clone)]
+pub struct External {
+    pub asset: PathBuf,
+    pub trust_list: PathBuf,
+    pub tsa_trust_list: PathBuf,
+}
+
+impl Paths {
+    fn new(work_dir: &Path, external: Option<&External>, keys: Option<&Path>) -> Result<Self> {
+        let keys = keys.map(Path::to_path_buf).unwrap_or_else(|| work_dir.join("keys"));
+        Ok(match external {
+            None => Paths {
+                signed: work_dir.join("signed.png"),
+                anonymized: work_dir.join("anon.png"),
+                trust_list: work_dir.join("pki/trust-list.pem"),
+                tsa_trust_list: work_dir.join("pki/tsa-trust-list.pem"),
+                keys,
+            },
+            Some(e) => {
+                let ext = e.asset.extension().and_then(|x| x.to_str()).ok_or_else(|| anyhow!("{} has no file extension", e.asset.display()))?;
+                Paths {
+                    signed: std::fs::canonicalize(&e.asset)?,
+                    anonymized: work_dir.join(format!("anon.{ext}")),
+                    trust_list: std::fs::canonicalize(&e.trust_list)?,
+                    tsa_trust_list: std::fs::canonicalize(&e.tsa_trust_list)?,
+                    keys,
+                }
+            }
+        })
+    }
+
+    fn file(work_dir: &Path) -> PathBuf {
+        work_dir.join("tp-paths.json")
+    }
+
+    fn load(work_dir: &Path) -> Result<Self> {
+        Ok(serde_json::from_slice(&std::fs::read(Self::file(work_dir))?)?)
+    }
+}
+
+/// A file's name and SHA-256, for the record.
+fn identify(path: &Path) -> Result<Value> {
+    Ok(json!({ "name": path.file_name().and_then(|n| n.to_str()).unwrap_or_default(), "sha256": file_sha256(path)?, "bytes": std::fs::metadata(path)?.len() }))
+}
+
 /// One phase run inside a subprocess (the Rust-side phases).
 pub fn phase(name: &str, work_dir: &Path, zk_root: &Path) -> Result<()> {
+    let paths = Paths::load(work_dir)?;
     let pki = work_dir.join("pki");
-    let signed = work_dir.join("signed.png");
+    let signed = paths.signed.clone();
     let mut steps = serde_json::Map::new();
     let mut data = serde_json::Map::new();
     match name {
@@ -78,7 +137,7 @@ pub fn phase(name: &str, work_dir: &Path, zk_root: &Path) -> Result<()> {
             })?;
         }
         "tp-prepare" => {
-            let trust = timed(&mut steps, "load_trust_list", || TrustList::from_file(&pki.join("trust-list.pem")))?;
+            let trust = timed(&mut steps, "load_trust_list", || TrustList::from_file(&paths.trust_list))?;
             let (store, manifest) = timed(&mut steps, "read_manifest", || {
                 let store = manifest_store(&signed)?;
                 let manifest = active_manifest(&store)?;
@@ -90,8 +149,7 @@ pub fn phase(name: &str, work_dir: &Path, zk_root: &Path) -> Result<()> {
             let inputs = timed(&mut steps, "build_inputs", || statement_inputs(&signed, &trust))?;
             let original = OriginalSignature::from_manifest(manifest.clone())?;
             let chain = issuing_path_for(original.signer_certificate()?, &original.x5chain[1..], &trust, inputs.public.time)?;
-            let keys = work_dir.join("keys");
-            let vk_sha256 = keys_manifest(&keys)?["sha256"]["statement.vk"].as_str().unwrap_or_default().to_string();
+            let vk_sha256 = keys_manifest(&paths.keys)?["sha256"]["statement.vk"].as_str().unwrap_or_default().to_string();
             let token = original.time_stamp.as_ref().ok_or_else(|| anyhow!("no time stamp"))?.token.clone();
             let size = manifest.cose_sign1.len();
             let spare = timed(&mut steps, "check_size", || {
@@ -132,7 +190,7 @@ pub fn phase(name: &str, work_dir: &Path, zk_root: &Path) -> Result<()> {
                 };
                 signature.encode_exact(manifest.cose_sign1.len())
             })?;
-            let anonymized = work_dir.join("anon.png");
+            let anonymized = paths.anonymized.clone();
             timed(&mut steps, "replace_signature", || replace_signature(&signed, &anonymized, &store, &manifest, &cose))?;
             data.insert("proof_bytes".into(), json!(proof.len()));
             data.insert("zk_signature_bytes".into(), json!(cose.len()));
@@ -264,9 +322,14 @@ fn cache_label(evicted: bool, residency: &Value) -> &'static str {
 /// Prove runs per cache state; the per-asset figure is the cold median.
 pub const PROVE_REPS: usize = 3;
 
-pub fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, gnark: &Path, environment: Value) -> Result<Value> {
+/// Measure the third-party variant: on the generated fixture, or on an
+/// external asset (`external`); with existing keys (`keys`, setup not
+/// measured) or new ones.
+pub fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, gnark: &Path, environment: Value, external: Option<&External>, keys: Option<&Path>) -> Result<Value> {
     let reps = PROVE_REPS;
-    let keys = work_dir.join("keys");
+    let paths = Paths::new(work_dir, external, keys)?;
+    std::fs::write(Paths::file(work_dir), serde_json::to_vec_pretty(&paths)?)?;
+    let keys = paths.keys.clone();
     let phase_cmd = |name: &str| {
         let mut cmd = Command::new(exe);
         cmd.args(["phase", name, "--work-dir"]).arg(work_dir).arg("--zk-root").arg(zk_root);
@@ -287,8 +350,16 @@ pub fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, gnark: &Path, enviro
     let prove_args = ["prove".as_ref(), "--keys".as_ref(), keys.as_os_str(), "--input".as_ref(), inputs.as_os_str(), "--proof".as_ref(), proof.as_os_str()];
     let verify_args = ["verify".as_ref(), "--keys".as_ref(), keys.as_os_str(), "--public".as_ref(), public.as_os_str(), "--proof".as_ref(), proof.as_os_str()];
 
-    run_phase(&mut phases, "fixtures", "test-fixture", &mut phase_cmd("tp-fixtures"))?;
-    phases.push(gnark_phase("setup", "one-time", &mut gnark_cmd(&["setup".as_ref(), "--keys".as_ref(), keys.as_os_str()]))?);
+    if external.is_none() {
+        run_phase(&mut phases, "fixtures", "test-fixture", &mut phase_cmd("tp-fixtures"))?;
+    } else {
+        phases.push(json!({ "name": "fixtures", "category": "test-fixture", "skipped": "external asset" }));
+    }
+    if keys_given(work_dir, &keys) {
+        phases.push(json!({ "name": "setup", "category": "one-time", "skipped": "reused existing keys" }));
+    } else {
+        phases.push(gnark_phase("setup", "one-time", &mut gnark_cmd(&["setup".as_ref(), "--keys".as_ref(), keys.as_os_str()]))?);
+    }
     run_phase(&mut phases, "prepare", "anonymization", &mut phase_cmd("tp-prepare"))?;
 
     phases.push(prove_runs("prove", "anonymization", true, reps, &keys, || gnark_cmd(&prove_args))?);
@@ -300,9 +371,9 @@ pub fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, gnark: &Path, enviro
         "verify_cli",
         "verification-full",
         Command::new(exe.with_file_name("c2pa-x509-zk-verify"))
-            .arg("--input").arg(work_dir.join("anon.png"))
-            .arg("--trust-list").arg(work_dir.join("pki/trust-list.pem"))
-            .arg("--tsa-trust-list").arg(work_dir.join("pki/tsa-trust-list.pem"))
+            .arg("--input").arg(&paths.anonymized)
+            .arg("--trust-list").arg(&paths.trust_list)
+            .arg("--tsa-trust-list").arg(&paths.tsa_trust_list)
             .arg("--keys").arg(&keys).arg("--gnark").arg(gnark),
     )?;
     // Warm runs: read the files once so they are resident, then prove.
@@ -350,7 +421,9 @@ pub fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, gnark: &Path, enviro
             "signer_certificate_bytes": prepare["signer_certificate_bytes"],
             "tbs_certificate_bytes": prepare["tbs_certificate_bytes"],
             "issuing_chain_certificates": prepare["issuing_chain_certificates"],
-            "asset_bytes": std::fs::metadata(zk_root.join("fixtures/cards.png"))?.len(),
+            "asset": if external.is_some() { json!({ "source": "external", "file": identify(&paths.signed)? }) } else { json!({ "source": "fixture (mirror PKI, local TSA)", "unsigned_bytes": std::fs::metadata(zk_root.join("fixtures/cards.png"))?.len() }) },
+            "trust_list": identify(&paths.trust_list)?,
+            "tsa_trust_list": identify(&paths.tsa_trust_list)?,
         },
         "totals": {
             "one_time": total(&phases, &["setup"]),
@@ -419,4 +492,9 @@ mod tests {
         assert_eq!(steps["solve_s"], json!(2.056566974));
         assert!(!steps.contains_key("error_s") && steps.len() == 4, "{steps:?}");
     }
+}
+
+/// Whether the keys directory was given (outside the work directory) rather than created by this run.
+fn keys_given(work_dir: &Path, keys: &Path) -> bool {
+    !keys.starts_with(work_dir)
 }

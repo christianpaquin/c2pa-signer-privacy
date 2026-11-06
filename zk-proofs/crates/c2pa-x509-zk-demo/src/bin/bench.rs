@@ -38,6 +38,7 @@
 //! Usage:
 //!   c2pa-x509-zk-bench run [--reuse-build] [--keep] [--work-dir NEW_DIR] [--out results.json] [--proving-key CONFIG]
 //!   c2pa-x509-zk-bench run --variant third-party [--gnark target/c2pa-zk-gnark] [--keep] [--work-dir NEW_DIR] [--out results.json]
+//!       [--asset signed.jpg --trust-list LIST --tsa-trust-list LIST] [--keys gnark-keys/]
 //!   c2pa-x509-zk-bench pk-load [--key KEY] [--reps N] [--only CONFIG]... [--keep] [--work-dir NEW_DIR] [--out results.json]
 //!
 //! Peak memory comes from the child's ru_maxrss, in KiB on Linux.
@@ -118,6 +119,18 @@ enum Cmd {
         /// The c2pa-zk-gnark CLI, for --variant third-party
         #[arg(long, default_value = "target/c2pa-zk-gnark")]
         gnark: PathBuf,
+        /// Third-party only: a signed asset to anonymize instead of the fixture (needs the two trust lists)
+        #[arg(long, requires_all = ["trust_list", "tsa_trust_list"])]
+        asset: Option<PathBuf>,
+        /// Third-party only: the trust list for --asset
+        #[arg(long)]
+        trust_list: Option<PathBuf>,
+        /// Third-party only: the TSA trust list for --asset
+        #[arg(long)]
+        tsa_trust_list: Option<PathBuf>,
+        /// Third-party only: existing keys from c2pa-zk-gnark setup (setup is then not measured)
+        #[arg(long)]
+        keys: Option<PathBuf>,
     },
     /// Measure loading the proving key in each encoding, loader, and level of checking
     PkLoad {
@@ -168,9 +181,18 @@ enum Cmd {
 
 fn main() -> Result<()> {
     match Args::parse().command {
-        Cmd::Run { work_dir, circuits_dir, reuse_build, keep, out, proving_key, variant, gnark } => {
-            let gnark = (variant == "third-party").then(|| std::fs::canonicalize(&gnark)).transpose()?;
-            run(work_dir, &circuits_dir, reuse_build, keep, out, pk_load::config(&proving_key)?, gnark)
+        Cmd::Run { work_dir, circuits_dir, reuse_build, keep, out, proving_key, variant, gnark, asset, trust_list, tsa_trust_list, keys } => {
+            if variant != "third-party" && (asset.is_some() || keys.is_some()) {
+                bail!("--asset and --keys apply to --variant third-party");
+            }
+            let third_party = if variant == "third-party" {
+                let external = asset.map(|asset| third_party::External { asset, trust_list: trust_list.unwrap(), tsa_trust_list: tsa_trust_list.unwrap() });
+                let keys = keys.map(|k| std::fs::canonicalize(&k)).transpose()?;
+                Some(ThirdParty { gnark: std::fs::canonicalize(&gnark)?, external, keys })
+            } else {
+                None
+            };
+            run(work_dir, &circuits_dir, reuse_build, keep, out, pk_load::config(&proving_key)?, third_party)
         }
         Cmd::PkLoad { key, work_dir, reps, only, keep, out } => pk_load::pk_load(&key, work_dir, reps, &only, keep, out),
         Cmd::Phase { name, work_dir, zk_root, proving_key } => {
@@ -545,7 +567,14 @@ fn environment(zk_root: &Path) -> Value {
 
 // ---- The run ----------------------------------------------------------------
 
-/// `gnark`: the c2pa-zk-gnark CLI, to measure the third-party variant instead of V0.
+/// The third-party variant's options: the gnark CLI, an external asset, existing keys.
+struct ThirdParty {
+    gnark: PathBuf,
+    external: Option<third_party::External>,
+    keys: Option<PathBuf>,
+}
+
+/// `third_party`: measure the third-party variant instead of V0.
 fn run(
     work_dir: Option<PathBuf>,
     circuits_dir: &Path,
@@ -553,7 +582,7 @@ fn run(
     keep: bool,
     out: Option<PathBuf>,
     proving_key: pk_load::PkConfig,
-    gnark: Option<PathBuf>,
+    third_party: Option<ThirdParty>,
 ) -> Result<()> {
     let zk_root = std::env::current_dir()?;
     let exe = std::env::current_exe()?;
@@ -568,8 +597,8 @@ fn run(
     eprintln!("Work directory: {}", work_dir.display());
     // Captured before any phase runs, so later edits to the tree are not attributed to this run.
     let environment = environment(&zk_root);
-    let record = match &gnark {
-        Some(gnark) => third_party::measure(&exe, &zk_root, &work_dir, gnark, environment)?,
+    let record = match &third_party {
+        Some(tp) => third_party::measure(&exe, &zk_root, &work_dir, &tp.gnark, environment, tp.external.as_ref(), tp.keys.as_deref())?,
         None => measure(&exe, &zk_root, &work_dir, &circuits_dir, reuse_build, environment, proving_key)?,
     };
 

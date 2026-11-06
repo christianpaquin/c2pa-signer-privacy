@@ -130,6 +130,34 @@ The first Pixel photo from [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md#r2-an
 
 Everything else matched the fixture: preparation, self-verification, and packaging under 0.1 s; proof verification 48 ms, and 76 ms for the full verifier against the official lists (the fixture: 50 and 85 ms in the same session); the ZK signature in place with 615 bytes to spare.
 
+## E6: proving-key loading in gnark
+
+The first E6 experiment ([roadmap](README.md#e6-proof-systems)): how the gnark prover stores and loads its 1.15 GB proving key, the step that took three quarters of V1's per-asset time. The statement, circuit, keys, and proof are unchanged; only the key's file format and whether its points are validated on load vary. `c2pa-zk-gnark convert-pk` writes the raw (uncompressed) and dump formats; every file's SHA-256 is checked against `keys.json` before parsing, in all configurations. Each configuration went through the harness in one session (mirror fixture, three cold and three warm proves, median reported); the baseline ran first and last, measuring 76.9 and 79.9 s, so drift was about 4%. Records: [`bench/results/2026-11-06-e6/`](bench/results/2026-11-06-e6/), clean commit `6469789`, every cold run confirmed cold.
+
+| Proving key | Points validated on load | Per-asset anonymization | Load key: read + hash + parse | Peak RAM | Key file |
+|---|---|---|---|---|---|
+| Compressed (V1 today) | Full | 76.9 s (79.9 s at the end) | 56.5 s (parse 53.6) | 7.4 GiB | 1.15 GB |
+| Compressed | None (subgroup) | 52.5 s | 32.5 s (parse 31.0) | 7.4 GiB | 1.15 GB |
+| Raw | Full | 52.1 s | 32.2 s (parse 28.7) | 9.2 GiB | 2.29 GB |
+| Raw | None (subgroup and on-curve) | 28.2 s | 8.7 s (parse 5.7) | 9.2 GiB | 2.29 GB |
+| Dump (gnark's binary dump) | None (nothing) | **24.6 s** | **5.2 s** (parse 1.5) | 9.2 GiB | 2.29 GB |
+
+The proof itself takes 17.8–18.7 s (solving the witness, about 3 s of it) in every configuration; warm runs are within a few seconds of cold ones, so loading is CPU-bound, not I/O-bound.
+
+### Observations
+
+- **Decompressing points and checking G2 subgroups each cost about 24 s**; skipping both brings per-asset anonymization from ~77 s to 25–28 s, **under the 30 s on-device target on time** (memory, at 9.2 GiB, remains far from its 2 GB target).
+- **What is skipped.** In gnark, validating a raw point is the subgroup check, which includes the on-curve check; with checks off, raw points are taken as written (only their coordinates must be canonical field elements). Compressed points are on the curve by construction, so with checks off only G2's subgroup check is skipped. A dump is not validated at all, and its format is gnark-internal: it is raw memory, starting with a marker that detects a dump written on a different architecture (byte order) but carrying no version, so a dump should be regenerated whenever gnark is upgraded.
+- **Peak memory rises with the larger files** (9.2 against 7.4 GiB) because the CLI reads the whole key into memory to hash it before parsing; hashing while streaming would remove most of that increase.
+- **The same trade-off as for V0's key** ([Proving-key loading](#proving-key-loading)): for a key written by local setup whose hash matches `keys.json`, the point checks add nothing; the hash, stored next to the key, detects corruption and mix-ups, not replacement by someone who can write to the key directory; and no point check would stop a malicious but well-formed key, which could weaken zero-knowledge.
+
+### Proposal (for decision)
+
+- **Recommended: raw keys loaded without point checks, behind the hash recorded at setup** (28.2 s per asset). It uses gnark's documented serialization, so keys survive gnark upgrades, and costs 3.6 s more than a dump.
+- **Fastest: the dump** (24.6 s), if the gnark version is pinned with the keys.
+- **Either way**, with the guardrails already set for the V0 key: record the format (and for a dump, the gnark version) in `keys.json`; keep full validation (compressed or raw, checks on) whenever a key's provenance is not a local setup with a recorded hash; leave verifying-key loading unchanged; and hash while streaming, to keep peak memory at 7.4 GiB.
+- **Not adopted yet**: `prove` still defaults to the compressed key with full checks.
+
 ## E1: P-384 and SHA-384 primitives
 
 What the algorithms of the official trust list's CAs cost in a circuit, next to the P-256 and SHA-256 the current circuit uses ([E1](README.md#e1-cost-of-reality-p-384-sha-384-and-rsa-in-circuit); code and how to run it in [`experiments/e1-p384`](experiments/e1-p384/)). Both curves are measured in the same stack, gnark v0.16.4 with Groth16 on BN254, because the current circom ECDSA library is specific to P-256 and the project has no circom SHA-384: porting both would have been a substantial job, and gnark is the leading second-stack candidate for E6 anyway. Records: [2026-11-04-e1-p384-gnark](bench/results/2026-11-04-e1-p384-gnark.json) (all circuits) and [its repeat](bench/results/2026-11-04-e1-p384-gnark-repeat.json) (the two 1,500-byte CA circuits, measured twice more).

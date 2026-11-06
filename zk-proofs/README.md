@@ -543,6 +543,8 @@ Status: **moot.** Both modes use the same statement, which verifies the original
 
 #### E6. Proof systems
 
+Status: **first experiment done: proving-key loading in gnark.** Loading the 1.15 GB key without point checks, behind the hash recorded at setup, brings per-asset anonymization from ~77 s to 25–28 s, under the on-device time target; a decision on adopting it is pending ([FEASIBILITY.md](FEASIBILITY.md#e6-proving-key-loading-in-gnark)).
+
 Decision D2, guided by the measurements from F2, E1, and E2b, cheapest first: native (C++) witness generation for the current circuit; a PLONK-family prover on the same R1CS; then a rewrite in a second stack (gnark is the leading candidate, since it could also cover P-384 CAs; Halo2 and Longfellow ZK are alternatives). Stacks are compared on equivalent full statements under the same accounting as the [benchmark harness](#benchmarks), reporting loading of keys and other artifacts from disk separately from operation with resident keys; primitive timings such as E1's are not comparable with per-asset figures.
 
 #### E7. Curve: BN254 vs BLS12-381

@@ -217,7 +217,7 @@ fn gnark_steps(stderr: &str) -> serde_json::Map<String, Value> {
         let plain = strip_ansi(line);
         if let Some((name, rest)) = plain.split_once(": ") {
             if let Some(seconds) = rest.strip_suffix(" s").and_then(|v| v.trim().parse::<f64>().ok()) {
-                if !name.contains(' ') || name.starts_with("load ") {
+                if name.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '_') {
                     steps.insert(format!("{}_s", name.replace(' ', "_")), json!(seconds));
                 }
             }
@@ -258,14 +258,45 @@ fn gnark_phase(name: &str, category: &str, cmd: &mut Command) -> Result<Value> {
     Ok(record)
 }
 
-const PROVER_FILES: [&str; 2] = ["statement.ccs", "statement.pk"];
+/// How the prover stores and loads its proving key (roadmap E6): the file
+/// format (compressed, raw, or dump; `c2pa-zk-gnark convert-pk` writes the
+/// last two) and whether points are validated on load (full or none).
+#[derive(Debug, Clone, Copy)]
+pub struct KeyLoading {
+    pub format: &'static str,
+    pub check: &'static str,
+}
+
+impl KeyLoading {
+    pub fn parse(format: &str, check: &str) -> Result<Self> {
+        let format = ["compressed", "raw", "dump"].into_iter().find(|f| *f == format).ok_or_else(|| anyhow!("unknown key format {format}"))?;
+        let check = ["full", "none"].into_iter().find(|c| *c == check).ok_or_else(|| anyhow!("unknown key check {check}"))?;
+        if format == "dump" && check == "full" {
+            bail!("a dumped proving key cannot be validated on load");
+        }
+        Ok(KeyLoading { format, check })
+    }
+
+    fn proving_key_file(self) -> &'static str {
+        match self.format {
+            "raw" => "statement.pk.raw",
+            "dump" => "statement.pk.dump",
+            _ => "statement.pk",
+        }
+    }
+
+    /// The files the prover reads: the constraint system and the proving key.
+    fn prover_files(self) -> [&'static str; 2] {
+        ["statement.ccs", self.proving_key_file()]
+    }
+}
 
 /// The prover files' residency in the page cache, after evicting them if
 /// `evict_first`. Files just written by setup have dirty pages, which cannot
 /// be evicted until written back, so each is synced first.
-fn prover_files_residency(keys: &Path, evict_first: bool) -> Result<Value> {
+fn prover_files_residency(keys: &Path, files: [&str; 2], evict_first: bool) -> Result<Value> {
     let mut residency = serde_json::Map::new();
-    for file in PROVER_FILES {
+    for file in files {
         let path = keys.join(file);
         if evict_first {
             std::fs::File::open(&path)?.sync_all()?;
@@ -279,10 +310,10 @@ fn prover_files_residency(keys: &Path, evict_first: bool) -> Result<Value> {
 /// `reps` prove runs, cold (files evicted first) or warm, each in its own
 /// process. The phase reports the median run (by wall time) with its steps,
 /// the maximum peak memory, and every run with its observed cache state.
-fn prove_runs(name: &str, category: &str, cold: bool, reps: usize, keys: &Path, cmd: impl Fn() -> Command) -> Result<Value> {
+fn prove_runs(name: &str, category: &str, cold: bool, reps: usize, keys: &Path, files: [&str; 2], cmd: impl Fn() -> Command) -> Result<Value> {
     let mut runs = Vec::new();
     for rep in 0..reps {
-        let residency = prover_files_residency(keys, cold)?;
+        let residency = prover_files_residency(keys, files, cold)?;
         let mut run = gnark_phase(&format!("{name} ({}/{reps})", rep + 1), category, &mut cmd())?;
         run["cache"] = json!(cache_label(cold, &residency));
         run["resident_before"] = residency;
@@ -325,7 +356,17 @@ pub const PROVE_REPS: usize = 3;
 /// Measure the third-party variant: on the generated fixture, or on an
 /// external asset (`external`); with existing keys (`keys`, setup not
 /// measured) or new ones.
-pub fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, gnark: &Path, environment: Value, external: Option<&External>, keys: Option<&Path>) -> Result<Value> {
+pub fn measure(
+    exe: &Path,
+    zk_root: &Path,
+    work_dir: &Path,
+    gnark: &Path,
+    environment: Value,
+    external: Option<&External>,
+    keys: Option<&Path>,
+    key_loading: KeyLoading,
+) -> Result<Value> {
+    let files = key_loading.prover_files();
     let reps = PROVE_REPS;
     let paths = Paths::new(work_dir, external, keys)?;
     std::fs::write(Paths::file(work_dir), serde_json::to_vec_pretty(&paths)?)?;
@@ -347,7 +388,10 @@ pub fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, gnark: &Path, enviro
         Ok(())
     };
     let (inputs, public, proof) = (work_dir.join("inputs.json"), work_dir.join("public.json"), work_dir.join("proof.bin"));
-    let prove_args = ["prove".as_ref(), "--keys".as_ref(), keys.as_os_str(), "--input".as_ref(), inputs.as_os_str(), "--proof".as_ref(), proof.as_os_str()];
+    let prove_args = [
+        "prove".as_ref(), "--keys".as_ref(), keys.as_os_str(), "--input".as_ref(), inputs.as_os_str(), "--proof".as_ref(), proof.as_os_str(),
+        "--pk-format".as_ref(), key_loading.format.as_ref(), "--pk-check".as_ref(), key_loading.check.as_ref(),
+    ];
     let verify_args = ["verify".as_ref(), "--keys".as_ref(), keys.as_os_str(), "--public".as_ref(), public.as_os_str(), "--proof".as_ref(), proof.as_os_str()];
 
     if external.is_none() {
@@ -362,7 +406,7 @@ pub fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, gnark: &Path, enviro
     }
     run_phase(&mut phases, "prepare", "anonymization", &mut phase_cmd("tp-prepare"))?;
 
-    phases.push(prove_runs("prove", "anonymization", true, reps, &keys, || gnark_cmd(&prove_args))?);
+    phases.push(prove_runs("prove", "anonymization", true, reps, &keys, files, || gnark_cmd(&prove_args))?);
     phases.push(gnark_phase("self_verify", "anonymization", &mut gnark_cmd(&verify_args))?);
     run_phase(&mut phases, "package", "anonymization", &mut phase_cmd("tp-package"))?;
     phases.push(gnark_phase("verify", "verification", &mut gnark_cmd(&verify_args))?);
@@ -377,10 +421,10 @@ pub fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, gnark: &Path, enviro
             .arg("--keys").arg(&keys).arg("--gnark").arg(gnark),
     )?;
     // Warm runs: read the files once so they are resident, then prove.
-    for file in PROVER_FILES {
+    for file in files {
         std::io::copy(&mut std::fs::File::open(keys.join(file))?, &mut std::io::sink())?;
     }
-    phases.push(prove_runs("prove_warm", "supplementary", false, reps, &keys, || gnark_cmd(&prove_args))?);
+    phases.push(prove_runs("prove_warm", "supplementary", false, reps, &keys, files, || gnark_cmd(&prove_args))?);
 
     let data_of = |name: &str| phases.iter().find(|p| p["name"] == name).map(|p| p["data"].clone()).unwrap_or(Value::Null);
     let (prepare, package) = (data_of("prepare"), data_of("package"));
@@ -400,6 +444,7 @@ pub fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, gnark: &Path, enviro
             "ca_signature": "ECDSA P-384 with SHA-384",
             "time_stamp": "sigTst2, imprint bound in the circuit, token verified off-circuit",
             "proof_system": "Groth16 (gnark v0.16.4, native Go witness solving, one BSB22 commitment)",
+            "proving_key": { "format": key_loading.format, "point_checks": key_loading.check, "file_sha256_checked": true },
             "curve": "BN254",
             "circuit": "gnark/statement (third-party/1)",
         },
@@ -411,7 +456,7 @@ pub fn measure(exe: &Path, zk_root: &Path, work_dir: &Path, gnark: &Path, enviro
             "sizes": manifest["sizes"],
             "verifying_key_sha256": manifest["sha256"]["statement.vk"],
             "constraint_system_bytes": size("statement.ccs"),
-            "proving_key_bytes": size("statement.pk"),
+            "proving_key_bytes": size(key_loading.proving_key_file()),
             "verifying_key_bytes": size("statement.vk"),
             "gnark_cli_sha256": file_sha256(gnark)?,
         },
@@ -482,7 +527,7 @@ mod tests {
 
     #[test]
     fn parses_the_gnark_cli_timings() {
-        let stderr = "load constraint system: 1.27 s\nload proving key: 60.71 s\n\
+        let stderr = "load constraint system: 1.27 s\nread proving key: 0.9 s\nhash proving key: 2.1 s\nparse proving key: 57.6 s\nload proving key: 60.71 s\n\
                       \u{1b}[90m15:44:08\u{1b}[0m DBG constraint system solver done \u{1b}[36mnbConstraints=\u{1b}[0m4710762 \u{1b}[36mtook=\u{1b}[0m2056.566974\n\
                       prove: 18.49 s\nerror: something: 3 s\n";
         let steps = gnark_steps(stderr);
@@ -490,7 +535,8 @@ mod tests {
         assert_eq!(steps["load_proving_key_s"], json!(60.71));
         assert_eq!(steps["prove_s"], json!(18.49));
         assert_eq!(steps["solve_s"], json!(2.056566974));
-        assert!(!steps.contains_key("error_s") && steps.len() == 4, "{steps:?}");
+        assert_eq!((steps["read_proving_key_s"].clone(), steps["hash_proving_key_s"].clone(), steps["parse_proving_key_s"].clone()), (json!(0.9), json!(2.1), json!(57.6)));
+        assert!(!steps.contains_key("error_s") && steps.len() == 7, "{steps:?}");
     }
 }
 

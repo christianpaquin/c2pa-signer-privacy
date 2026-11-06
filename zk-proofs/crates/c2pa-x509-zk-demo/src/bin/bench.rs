@@ -131,6 +131,12 @@ enum Cmd {
         /// Third-party only: existing keys from c2pa-zk-gnark setup (setup is then not measured)
         #[arg(long)]
         keys: Option<PathBuf>,
+        /// Third-party only: the proving key's format (compressed, raw, dump; the last two need convert-pk)
+        #[arg(long, default_value = "compressed")]
+        pk_format: String,
+        /// Third-party only: validate the proving key's points on load (full, none)
+        #[arg(long, default_value = "full")]
+        pk_check: String,
     },
     /// Measure loading the proving key in each encoding, loader, and level of checking
     PkLoad {
@@ -181,14 +187,18 @@ enum Cmd {
 
 fn main() -> Result<()> {
     match Args::parse().command {
-        Cmd::Run { work_dir, circuits_dir, reuse_build, keep, out, proving_key, variant, gnark, asset, trust_list, tsa_trust_list, keys } => {
+        Cmd::Run { work_dir, circuits_dir, reuse_build, keep, out, proving_key, variant, gnark, asset, trust_list, tsa_trust_list, keys, pk_format, pk_check } => {
             if variant != "third-party" && (asset.is_some() || keys.is_some()) {
                 bail!("--asset and --keys apply to --variant third-party");
             }
             let third_party = if variant == "third-party" {
                 let external = asset.map(|asset| third_party::External { asset, trust_list: trust_list.unwrap(), tsa_trust_list: tsa_trust_list.unwrap() });
                 let keys = keys.map(|k| std::fs::canonicalize(&k)).transpose()?;
-                Some(ThirdParty { gnark: std::fs::canonicalize(&gnark)?, external, keys })
+                let key_loading = third_party::KeyLoading::parse(&pk_format, &pk_check)?;
+                if keys.is_none() && key_loading.format != "compressed" {
+                    bail!("--pk-format {} needs --keys with converted keys (c2pa-zk-gnark convert-pk)", key_loading.format);
+                }
+                Some(ThirdParty { gnark: std::fs::canonicalize(&gnark)?, external, keys, key_loading })
             } else {
                 None
             };
@@ -572,6 +582,7 @@ struct ThirdParty {
     gnark: PathBuf,
     external: Option<third_party::External>,
     keys: Option<PathBuf>,
+    key_loading: third_party::KeyLoading,
 }
 
 /// `third_party`: measure the third-party variant instead of V0.
@@ -598,7 +609,7 @@ fn run(
     // Captured before any phase runs, so later edits to the tree are not attributed to this run.
     let environment = environment(&zk_root);
     let record = match &third_party {
-        Some(tp) => third_party::measure(&exe, &zk_root, &work_dir, &tp.gnark, environment, tp.external.as_ref(), tp.keys.as_deref())?,
+        Some(tp) => third_party::measure(&exe, &zk_root, &work_dir, &tp.gnark, environment, tp.external.as_ref(), tp.keys.as_deref(), tp.key_loading)?,
         None => measure(&exe, &zk_root, &work_dir, &circuits_dir, reuse_build, environment, proving_key)?,
     };
 

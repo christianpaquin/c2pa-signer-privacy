@@ -53,7 +53,7 @@ All on the same laptop ([reference machine](FEASIBILITY.md#reference-machine)); 
 | [E1 primitives](bench/results/2026-11-04-e1-p384-gnark.json) (#19) | A P-384 CA signature over a 1.5 KB TBS, in gnark | 5 s (key resident; not comparable) | 3.7 GiB | P-384 and SHA-384 cost 1.3–1.5× P-256 and SHA-256 |
 | [Proving-key loading](bench/results/2026-11-04-proving-key-load.json) (#21) | V0's key, loading only | 345 s → 7 s possible | — | Uncompressed key with a recorded hash; not adopted |
 | [V1 third-party](bench/results/2026-11-05-third-party.json) (#24) | The E2a statement, P-384 CA, `sigTst2`, in gnark | **79 s** | 7.5 GiB | 74% loading the proving key (CPU-bound); the proof 19.5 s |
-| [V1 on a real photo](bench/results/2026-11-06-r2-device-photo.json) (#26) | Same, on a real asset under the official lists | 133 s | 7.4 GiB | The fixture took 110 s in the same session: same cost; the machine ran 40% slower that day |
+| [V1 on a real photo](bench/results/2026-11-06-r2-device-photo.json) (#26) | Same, on a real asset under the official lists | 133 s | 7.4 GiB | The fixture took 110 s in the same session: consistent with similar cost; the machine ran 40% slower that day |
 
 ## Lessons
 

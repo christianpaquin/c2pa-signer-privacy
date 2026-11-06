@@ -1,0 +1,104 @@
+{
+  "schema": "c2pa-x509-zk-paired-proves/1",
+  "date": "2026-11-06",
+  "purpose": "Whether the real device photo (R2) costs more to prove than the mirror fixture: eight proves alternating the two inputs in one session, so that drift in the machine's speed affects both alike.",
+  "method": "One shell loop running c2pa-zk-gnark prove (one process each, in order real, fixture, real, ...) with the same keys; wall time from /usr/bin/time, load_proving_key_s and prove_s from the CLI's own timings. Not run through the benchmark harness: the cache state was not controlled (no eviction; the key files were read by the run before, so likely resident) and not recorded, and peak memory was not measured. Ran right after the harness runs of 2026-11-06-r2-device-photo.json and 2026-11-06-r2-control-fixture.json, on the same machine.",
+  "software": {
+    "git_commit": "e87ef17",
+    "note": "binaries built from e87ef17; the working tree had uncommitted changes to a document and a test only",
+    "gnark_cli_sha256": "53f56938bf508bd0d5aeae1ff1082bde9200f52d55c5944e23906f23bae4b383",
+    "verifying_key_sha256": "7cca78a12e1a62a5e72477c492a9081e5e1438ad35bc1ab66e9f5a46a258704d",
+    "constraints": 4710820
+  },
+  "inputs": {
+    "real": {
+      "description": "statement inputs prepared from the R2 device photo (pixel10.jpg, sha256 9416d3ea7d2cd815ffdac171d42c254f2dec7cde2c63e9e38d1e9953586b5012) against the official trust list",
+      "inputs_json_sha256": "e9767d67dfcf888c81ac05364debcaa647ccebc0ccc748be82c729ab765084f4"
+    },
+    "fixture": {
+      "description": "statement inputs prepared from a mirror-profile fixture (generate-test-pki.sh --mirror, signed with the local TSA)",
+      "inputs_json_sha256": "c6052161a6ed0e98eba04bb56f00623d8b3f08347b3b5002bda368f861350f94"
+    }
+  },
+  "runs": [
+    {
+      "order": 1,
+      "pair": 1,
+      "input": "real",
+      "wall_s": 97.92,
+      "load_proving_key_s": 71.53,
+      "prove_s": 24.35
+    },
+    {
+      "order": 2,
+      "pair": 1,
+      "input": "fixture",
+      "wall_s": 523.4,
+      "load_proving_key_s": 73.23,
+      "prove_s": 41.29,
+      "excluded": "wall time 523.4 s against 114.5 s of measured work (load + prove): about 409 s in which the process did not run, a pause of the machine"
+    },
+    {
+      "order": 3,
+      "pair": 2,
+      "input": "real",
+      "wall_s": 119.74,
+      "load_proving_key_s": 88.66,
+      "prove_s": 29.02
+    },
+    {
+      "order": 4,
+      "pair": 2,
+      "input": "fixture",
+      "wall_s": 101.18,
+      "load_proving_key_s": 75.47,
+      "prove_s": 23.71
+    },
+    {
+      "order": 5,
+      "pair": 3,
+      "input": "real",
+      "wall_s": 96.15,
+      "load_proving_key_s": 72.43,
+      "prove_s": 22.08
+    },
+    {
+      "order": 6,
+      "pair": 3,
+      "input": "fixture",
+      "wall_s": 91.57,
+      "load_proving_key_s": 67.01,
+      "prove_s": 22.75
+    },
+    {
+      "order": 7,
+      "pair": 4,
+      "input": "real",
+      "wall_s": 90.62,
+      "load_proving_key_s": 66.05,
+      "prove_s": 22.94
+    },
+    {
+      "order": 8,
+      "pair": 4,
+      "input": "fixture",
+      "wall_s": 87.8,
+      "load_proving_key_s": 65.22,
+      "prove_s": 20.6
+    }
+  ],
+  "summary": {
+    "real_wall_s": [
+      97.92,
+      119.74,
+      96.15,
+      90.62
+    ],
+    "fixture_wall_s_included": [
+      101.18,
+      91.57,
+      87.8
+    ],
+    "conclusion": "Consistent with similar cost under substantial machine variation: within pairs 2-4 the real input took 3-18% longer, decreasing as the machine's speed settled (pairs 3-4: 5% and 3%). The circuit is fixed-size, so the constraint work is the same; equal wall-clock cost is not demonstrated."
+  }
+}

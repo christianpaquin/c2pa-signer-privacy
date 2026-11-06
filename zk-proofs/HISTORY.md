@@ -18,6 +18,7 @@ How the X.509 + ZK prototype evolved, for reporting. Details live in the pull re
 | Goals and plan | Oct 29 – Nov 3 | #9, #12, #15 | Two goals (prove and compare the options; find what works on today's deployments); decisions D1–D7; an analysis of real trust lists and signed assets ([DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md)); a roadmap ordered by guarantees first |
 | Foundation | Nov 3–4 | #14, #16, #17 | A C2PA-like test PKI and trust lists, with off-circuit chain validation (F1); witness checking and forgery tests (F3); a benchmark harness and the feasibility matrix with the measured baseline (F2) |
 | Third-party anonymization | Nov 4–5 | #18–#24 | The statement and time policy (E2a); the cost of P-384 and SHA-384 (E1); proving-key loading options; the statement in gnark, the anonymizer and verifier, and its benchmark (E2b) |
+| Real content | Nov 6 | #26 | A real device-signed photo under the official trust list anonymized and verified with the unchanged tools ([R2](DEPLOYMENT-FINDINGS.md#r2-anonymizing-a-real-asset)) |
 
 ## Defects found in the original prototype
 
@@ -52,6 +53,7 @@ All on the same laptop ([reference machine](FEASIBILITY.md#reference-machine)); 
 | [E1 primitives](bench/results/2026-11-04-e1-p384-gnark.json) (#19) | A P-384 CA signature over a 1.5 KB TBS, in gnark | 5 s (key resident; not comparable) | 3.7 GiB | P-384 and SHA-384 cost 1.3–1.5× P-256 and SHA-256 |
 | [Proving-key loading](bench/results/2026-11-04-proving-key-load.json) (#21) | V0's key, loading only | 345 s → 7 s possible | — | Uncompressed key with a recorded hash; not adopted |
 | [V1 third-party](bench/results/2026-11-05-third-party.json) (#24) | The E2a statement, P-384 CA, `sigTst2`, in gnark | **79 s** | 7.5 GiB | 74% loading the proving key (CPU-bound); the proof 19.5 s |
+| [V1 on a real photo](bench/results/2026-11-06-r2-device-photo.json) (#26) | Same, on a real asset under the official lists | 133 s | 7.4 GiB | The fixture took 110 s in the same session: same cost; the machine ran 40% slower that day |
 
 ## Lessons
 
@@ -61,4 +63,4 @@ All on the same laptop ([reference machine](FEASIBILITY.md#reference-machine)); 
 - **Formats should leave no room for other data.** Strict decoding (exact fields, zero padding, fixed-length proof) closed places where identifying data could ride along (#23).
 - **Measure the conditions, not just the time.** Record the cache state rather than assume it, repeat runs on a noisy machine (single runs here varied by 2×), compare only under the same accounting, and keep primitive timings apart from per-asset ones (#17, #19, #21, #24).
 - **The proving key, not the proof, dominates.** In both stacks, loading and validating the 1 GB key costs more than proving; the cheapest remaining gain is there.
-- **Real deployments decide feasibility.** P-384 CAs, `sigTst2` time stamps, and unauthenticated EXIF were found by examining real trust lists and signed assets, not from the specification alone.
+- **Real deployments decide feasibility.** P-384 CAs, `sigTst2` time stamps, and unauthenticated EXIF were found by examining real trust lists and signed assets, not from the specification alone; designing against a real sample made the first real asset work unchanged.

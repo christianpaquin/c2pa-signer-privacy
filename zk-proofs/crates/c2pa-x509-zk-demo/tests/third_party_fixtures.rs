@@ -501,3 +501,69 @@ fn third_party_anonymization_end_to_end() {
     third_party::replace_signature(&output, &extended, &store, &manifest, &signature.encode_exact(manifest.cose_sign1.len()).unwrap()).unwrap();
     verify(&extended).failure().stderr(predicates::str::contains("the proof is"));
 }
+
+/// R2: a real signed asset, end to end. Not committed (third-party content):
+/// point C2PA_R2_ASSET at it, and C2PA_R2_TRUST_LIST / C2PA_R2_TSA_TRUST_LIST
+/// at the trust lists it is signed under (for example the official C2PA
+/// lists). Needs keys and the gnark CLI as for the end-to-end test. Checks
+/// that the asset anonymizes and verifies, that no identifier of the signer
+/// remains, and that a changed claim is rejected by the proof.
+#[test]
+#[ignore = "needs a real signed asset (C2PA_R2_ASSET, C2PA_R2_TRUST_LIST, C2PA_R2_TSA_TRUST_LIST), gnark keys, and the CLI"]
+fn real_asset_end_to_end() {
+    let var = |name: &str| PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("set {name}")));
+    let (asset, trust_list, tsa_trust_list) = (var("C2PA_R2_ASSET"), var("C2PA_R2_TRUST_LIST"), var("C2PA_R2_TSA_TRUST_LIST"));
+    let keys = std::env::var_os("C2PA_ZK_KEYS").map(PathBuf::from).unwrap_or_else(|| zk_root().join("target/gnark-keys"));
+    let gnark = zk_root().join("target/c2pa-zk-gnark");
+    let dir = tempdir().unwrap();
+    let ext = asset.extension().unwrap().to_str().unwrap();
+    let output = dir.path().join(format!("anonymized.{ext}"));
+
+    Command::cargo_bin("c2pa-x509-zk-anonymizer")
+        .unwrap()
+        .arg("--third-party").arg("--keys").arg(&keys).arg("--gnark").arg(&gnark)
+        .arg("--input").arg(&asset).arg("--output").arg(&output).arg("--trust-list").arg(&trust_list)
+        .assert()
+        .success();
+    let verify = |path: &Path| {
+        let mut cmd = Command::cargo_bin("c2pa-x509-zk-verify").unwrap();
+        cmd.arg("--input").arg(path).arg("--trust-list").arg(&trust_list).arg("--tsa-trust-list").arg(&tsa_trust_list)
+            .arg("--keys").arg(&keys).arg("--gnark").arg(&gnark);
+        cmd.assert()
+    };
+    verify(&output).success().stdout(predicates::str::contains("Valid"));
+    assert_eq!(std::fs::metadata(&asset).unwrap().len(), std::fs::metadata(&output).unwrap().len());
+
+    // No identifier of the signer remains (the original has them all).
+    let original = OriginalSignature::from_asset(&asset).unwrap();
+    let signer = x509_cert::Certificate::from_der(original.signer_certificate().unwrap()).unwrap();
+    let after = std::fs::read(&output).unwrap();
+    let before = std::fs::read(&asset).unwrap();
+    for (what, needle) in [
+        ("signer certificate", original.signer_certificate().unwrap()),
+        ("signer key", signer.tbs_certificate.subject_public_key_info.subject_public_key.raw_bytes()),
+        ("serial number", signer.tbs_certificate.serial_number.as_bytes()),
+        ("original protected header", original.protected.as_slice()),
+        ("original signature", original.signature.as_slice()),
+    ] {
+        assert!(before.windows(needle.len()).any(|w| w == needle), "control: {what} not in the original");
+        assert!(!after.windows(needle.len()).any(|w| w == needle), "{what} found in the output");
+    }
+
+    // A changed claim byte (inside the claim's bytes in the file) is rejected by the proof.
+    let claim = &original.manifest.claim;
+    let at = after.windows(claim.len()).position(|w| w == claim.as_slice()).expect("claim in the output");
+    // The claim generator's name: the text value after the CBOR key "name"
+    // (64 6E 61 6D 65), so the claim stays well-formed for c2pa.
+    let key = claim.windows(5).position(|w| w == b"\x64name").expect("a name field in the claim");
+    let value = match claim[key + 5] {
+        0x60..=0x77 => key + 6,
+        0x78 => key + 7,
+        other => panic!("unexpected CBOR header {other:#x} for the name"),
+    };
+    let mut changed = after.clone();
+    changed[at + value] ^= 0x20; // flip a letter's case
+    let tampered = dir.path().join(format!("tampered.{ext}"));
+    std::fs::write(&tampered, changed).unwrap();
+    verify(&tampered).failure().stderr(predicates::str::contains("proof does not verify"));
+}

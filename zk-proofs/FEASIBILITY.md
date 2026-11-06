@@ -41,6 +41,7 @@ Stretch goals, not pass/fail gates: today's baseline misses most of them, and ro
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | **V0 baseline** | Signer-side | A (X.509 in-circuit) | Issuing CA (P-256, ECDSA-SHA256) signed a certificate whose P-256 key signed the manifest-stripped asset digest; key and validity pinned inside the signed TBS | Issuing CA (`x5chain`), asset digest, a prover-chosen timestamp | Signer holds its key; trust list authentic; single-party setup | Test PKI only. Not the official list (P-384 CAs); interim P-256 camera roots only if their intermediates are also P-256 (unverified); not the interim allowed list | **611 s** (witness 231 s + prove 381 s; prepare and package < 0.1 s) | 11.1 GiB (prove phase) | 13 ms (19 ms full verifier) | 668 B / 11.4 KB | ~100 bits (BN254) | Per-circuit, single party | [2026-11-03-baseline](bench/results/2026-11-03-baseline.json) |
 | **V1 third-party** (E2b) | Third-party (also signer-side, Q2) | A (X.509 in-circuit) | The [E2a statement](THIRD-PARTY-STATEMENT.md#the-chain-of-trust): issuing CA (P-384, ECDSA-SHA384) signed a certificate that, by a structural DER walk, is for C2PA claim signing and not a CA, valid at `t`; its P-256 key made the original ES256 signature over the original claim; the `sigTst2` imprint is bound to that signature | Issuing CA (`x5chain`), the claim and its assertions, `t` and the time-stamp token (the TSA operator can link it) | Trust list and TSA trust list authentic; single-party setup; honest anonymizer | Mirror of an official-list device deployment (P-384 CA, ES256, `sigTst2`); not yet a real asset (R2); not RSA CAs or signers, `sigTst`, or the interim allowed list | **79.4 s** (prove 79.4 s: proving key load 58.5 s, solve 3.0 s, proof 16.5 s; prepare, self-verify, package < 0.1 s) | 7.5 GiB (prove phase) | 30 ms (50 ms full verifier) | 196 B proof in a same-size ZK signature / no change (replaced in place) | ~100 bits (BN254) | Per-circuit, single party | [2026-11-05-third-party](bench/results/2026-11-05-third-party.json) |
+| **V1 on a real asset** (R2) | Third-party | A | As V1 | As V1; for this photo, the claim generator and actions ("Created by Pixel Camera.") and, outside the hard binding, EXIF and XMP | As V1 | **The official list, one real device photo** (P-384 issuing CA on the list, ES256, `sigTst2` from a TSA on the TSA list); [details](DEPLOYMENT-FINDINGS.md#r2-anonymizing-a-real-asset) | 133 s; the fixture measured 110 s in the same session (79 s the day before): the same cost within the machine's variation ([below](#r2-a-real-device-photo)) | 7.4 GiB | 50 ms (full verifier, official lists) | 196 B proof in a same-size ZK signature (615 bytes to spare) / no change | ~100 bits (BN254) | Per-circuit, single party | [2026-11-06-r2-device-photo](bench/results/2026-11-06-r2-device-photo.json) |
 
 **V0 shortcuts:** every item under [Current Limitations](README.md#current-limitations) applies, in particular no historical validity (the timestamp is unchecked), binding to the asset bytes rather than the claim, and partial in-circuit certificate validation.
 
@@ -48,7 +49,7 @@ Stretch goals, not pass/fail gates: today's baseline misses most of them, and ro
 
 **V0 and V1 are not an equal-guarantee comparison.** V1 proves strictly more (claim binding, historical validity backed by a trusted time stamp, certificate purpose, a P-384 CA) and also changes the proof stack (circom/arkworks to gnark), so the difference cannot be split between statement and stack. Nor does V1 dominate V0: the two **disclose different information** (V1 the claim and its assertions, and a time-stamp token the TSA operator can link; V0 only an asset digest and a time the prover chose), **accept different inputs** (V1 needs a `sigTst2` time stamp and a P-384 CA; V0 takes a P-256 CA and no time stamp), and V1 costs more one-time setup (499 s against 255 s), verification time (30 ms against 13 ms), and verifying-key size (2.1 KB against 872 B). V0 is frozen by decision ([Q2](THIRD-PARTY-STATEMENT.md#q2-one-statement-for-both-modes): one, stronger statement for both modes, covering the official list's dominant CA algorithm), not by a dominance result; it stays reproducible but is no longer developed.
 
-E1's P-384/SHA-384 primitives are measured [below](#e1-p-384-and-sha-384-primitives); they are components of future rows rather than a variant of their own. Planned rows: E1 (RSA primitives, standalone), R2 (V1 on a real asset), E3/E4 (trust models B and C, on the same statement), E5 (key possession, signer-side only), E6/E7 (proof systems and curves).
+E1's P-384/SHA-384 primitives are measured [below](#e1-p-384-and-sha-384-primitives); they are components of future rows rather than a variant of their own. Planned rows: E1 (RSA primitives, standalone), E3/E4 (trust models B and C, on the same statement), E5 (key possession, signer-side only), E6/E7 (proof systems and curves).
 
 ## V0 baseline: measured detail
 
@@ -110,6 +111,24 @@ Output: a 196-byte proof (Groth16 with one commitment, compressed) in a ZK signa
 - **Verification stays within target**: 30 ms for the gnark CLI, most of it process start and loading the 2.1 KB verifying key; 50 ms for the full verifier, which adds the time-stamp, chain, and c2pa checks.
 - **Size is a non-issue in place**: the ZK signature fits in the space c2pa-rs reserves with 14 KB to spare; for the real device sample, the [computed fit](THIRD-PARTY-STATEMENT.md#the-zk-signatures-encoding) leaves 674 bytes with this proof size.
 - **Variance.** The six prove runs here agree within 3% (77.4–79.5 s). The first run of this harness, with one repetition each, measured key loads of 52 s and 102 s; the cause is unknown (nothing else was scheduled on the machine), hence the three repetitions and the median.
+
+## R2: a real device photo
+
+The first Pixel photo from [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md#r2-anonymizing-a-real-asset), anonymized and verified against the official trust list and TSA trust list with the unchanged tools, measured with `c2pa-x509-zk-bench run --variant third-party --asset … --trust-list … --tsa-trust-list … --keys …` ([record](bench/results/2026-11-06-r2-device-photo.json); the asset and lists identified by SHA-256, the photo not committed). Inputs: a 377-byte claim, a 1,528-byte protected header, a 783-byte signer certificate (661-byte TBS, 8 extensions), a 1.49 MB JPEG.
+
+| | Real photo | Fixture, same session ([control](bench/results/2026-11-06-r2-control-fixture.json)) | Fixture, previous day |
+|---|---|---|---|
+| Per-asset anonymization (cold prove, median of 3) | 133.2 s | 110.6 s | 79.4 s |
+| Cold prove runs | 112–134 s | 102–113 s | 79–80 s |
+| Load proving key (median run) | 101 s | 81 s | 58 s |
+| Prove (incl. solving) | 29.4 s | 27.3 s | 19.5 s |
+| Peak memory | 7.4 GiB | 7.5 GiB | 7.5 GiB |
+
+**The real asset costs what the fixture costs; the machine's speed varied.** The circuit has a fixed size, so its work does not depend on the asset. Eight further proves alternating the two inputs in one session took 90.6–119.7 s for the photo and 87.8–101.2 s for the fixture, pair by pair within a few percent once the machine settled (one fixture run was excluded: 523 s of wall time against 114 s of measured work, a pause of the machine). The same unchanged fixture ran 40% slower on this day than the day before, for reasons outside the harness (power or thermal state are likely; neither is recorded). Per-asset figures on this laptop should therefore be read as 80–130 s, and compared only within a session.
+
+(The control record lists two locally changed files, a document and a test, neither part of the measured binaries, which were built from commit `e87ef17`.)
+
+Everything else matched the fixture: preparation, self-verification, and packaging under 0.1 s; verification 50 ms with the full verifier against the official lists; the ZK signature in place with 615 bytes to spare.
 
 ## E1: P-384 and SHA-384 primitives
 

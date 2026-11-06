@@ -565,6 +565,8 @@ Each entry is labelled with the guarantees it establishes and its experimental s
 
 #### R2. Anonymizing real signed content
 
+Status: **done for one real asset.** A real device-signed photo under the official trust list (P-384 issuing CA, ES256, `sigTst2`) anonymizes and verifies against the official trust list and TSA trust list with the unchanged tools, in place in its JPEG; nothing identifying the signer remains, and a changed claim is rejected by the proof ([findings](DEPLOYMENT-FINDINGS.md#r2-anonymizing-a-real-asset), [measurements](FEASIBILITY.md#r2-a-real-device-photo)). More assets, from the C2PA conformance program, can run through the same test (`real_asset_end_to_end`) and harness (`--asset`).
+
 One complete vertical slice of third-party anonymization (E2b) with explicit guarantees and limitations: first on a test PKI that mirrors a real chain (P-384 issuing CA, TSA time-stamp token), then on a real asset signed under the official trust list. The real asset adds unknowns (exact encodings, timestamp tokens) that are easier to isolate once the pipeline works on the mirror. Requires E1's P-384/SHA-384 results and E2a's time policy. A result that claims historical validity (the certificate was valid when the content was signed) must already enforce the minimum time policy, validate the time evidence against the C2PA TSA trust list, and check its binding to the original signature; a result that does not perform these checks must explicitly decline to claim historical validity.
 
 #### R3. Interim-list allowed signers via Merkle membership

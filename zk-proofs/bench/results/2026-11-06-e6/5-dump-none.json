@@ -1,0 +1,378 @@
+{
+  "schema": "c2pa-x509-zk-bench/2",
+  "variant": {
+    "mode": "third-party",
+    "trust_model": "A",
+    "signer_key": "P-256 (ES256 claim signature)",
+    "ca_signature": "ECDSA P-384 with SHA-384",
+    "time_stamp": "sigTst2, imprint bound in the circuit, token verified off-circuit",
+    "proof_system": "Groth16 (gnark v0.16.4, native Go witness solving, one BSB22 commitment)",
+    "proving_key": {
+      "format": "dump",
+      "point_checks": "none",
+      "file_sha256_checked": true
+    },
+    "curve": "BN254",
+    "circuit": "gnark/statement (third-party/1)"
+  },
+  "statement": "Third-party anonymization, trust model A (THIRD-PARTY-STATEMENT.md): the issuing CA's P-384 key (a public input) signed, with ECDSA-SHA384, a certificate whose DER structure shows a P-256 subject key, validity containing t, exactly one extended key usage including C2PA claim signing, and not a CA; that certificate is the first x5chain entry of the original protected header, and its key signed (ES256) the Sig_structure of the public claim; and the public sigTst2 imprint is the SHA-256 of the countersignature over that signature. Off-circuit: the time-stamp token against the TSA trust list at its time t, the issuing chain against the trust list at t, and the claim's assertions and hard binding with c2pa.",
+  "accounting": "As V0: one_time = setup (here one process compiling the circuit and running the Groth16 setup). anonymization_per_asset = prepare + prove + self_verify + package: the complete latency from a signed asset to an anonymized one; prove is measured cold (the constraint system and proving key evicted from the Linux page cache before it, the observed residency recorded) and includes loading both files, solving the witness, and proving, as separate steps; anonymization_witness_plus_prove = prove. verification = the gnark verify process (loading the verifying key and verifying); verification_full = the verifier CLI on the anonymized asset. prove_warm repeats prove with its files resident and is in no total. Each of prove and prove_warm is run three times; the phase reports the median run by wall time (its steps) and the maximum peak memory, with every run and its observed cache state in data.runs. The per-asset total's prove_cache is the prove phase's observed state: the figure is a cold measurement only when it is cold (eviction-failed or mixed otherwise). test_fixture is in no total. Peak memory per category is the maximum over its phases, each a separate process.",
+  "environment": {
+    "cpu": "13th Gen Intel(R) Core(TM) i7-13800H",
+    "logical_cpus": 20,
+    "memory": "32774804 kB",
+    "os": "Ubuntu 24.04.2 LTS",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "wsl": true,
+    "rustc": "rustc 1.93.0 (254b59607 2026-01-19)",
+    "circom": "circom compiler 2.1.6",
+    "git_commit": "646978928dddb642aa1282f8bf04c9f81e4f7557",
+    "git_changed_files": [],
+    "build_profile": "release"
+  },
+  "artifacts": {
+    "constraints": 4710820,
+    "sizes": {
+      "MaxProtected": 2048,
+      "MaxClaim": 1024,
+      "MaxTBS": 1024,
+      "MaxExtensions": 16,
+      "MaxEKUs": 8
+    },
+    "verifying_key_sha256": "7cca78a12e1a62a5e72477c492a9081e5e1438ad35bc1ab66e9f5a46a258704d",
+    "constraint_system_bytes": 304666604,
+    "proving_key_bytes": 2288599845,
+    "verifying_key_bytes": 2112,
+    "gnark_cli_sha256": "8786d484349db13e4af03dcb6cd9dcde27c2c8debbb48226a109bba1da5c2951"
+  },
+  "inputs": {
+    "claim_bytes": 486,
+    "protected_header_bytes": 1215,
+    "signer_certificate_bytes": 661,
+    "tbs_certificate_bytes": 539,
+    "issuing_chain_certificates": 1,
+    "asset": {
+      "source": "fixture (mirror PKI, local TSA)",
+      "unsigned_bytes": 1887546
+    },
+    "trust_list": {
+      "name": "trust-list.pem",
+      "sha256": "a7fc676a756fc9f388bfdb24fee62a3368ae68e9f864567d54537ea88ec543c3",
+      "bytes": 1531
+    },
+    "tsa_trust_list": {
+      "name": "tsa-trust-list.pem",
+      "sha256": "2b0989b7347f4cf14bd430c2ea541f6f005a4d0131cbd855b0898afebafd7098",
+      "bytes": 753
+    }
+  },
+  "totals": {
+    "one_time": {
+      "phases": [
+        "setup"
+      ],
+      "measured": false
+    },
+    "anonymization_per_asset": {
+      "phases": [
+        "prepare",
+        "prove",
+        "self_verify",
+        "package"
+      ],
+      "wall_s": 24.629195834999997,
+      "peak_rss_mib": 9387.796875,
+      "prove_cache": "cold"
+    },
+    "anonymization_witness_plus_prove": {
+      "phases": [
+        "prove"
+      ],
+      "wall_s": 24.575507226,
+      "peak_rss_mib": 9387.796875
+    },
+    "verification": {
+      "phases": [
+        "verify"
+      ],
+      "wall_s": 0.029939059,
+      "peak_rss_mib": 14.67578125
+    },
+    "verification_full": {
+      "phases": [
+        "verify_cli"
+      ],
+      "wall_s": 0.04663979,
+      "peak_rss_mib": 15.50390625
+    }
+  },
+  "phases": [
+    {
+      "name": "fixtures",
+      "category": "test-fixture",
+      "wall_s": 0.345350575,
+      "peak_rss_mib": 23.16015625,
+      "steps": {
+        "generate_pki_s": 0.295665451,
+        "sign_asset_s": 0.043193912
+      },
+      "data": {}
+    },
+    {
+      "name": "setup",
+      "category": "one-time",
+      "skipped": "reused existing keys"
+    },
+    {
+      "name": "prepare",
+      "category": "anonymization",
+      "wall_s": 0.012323984,
+      "peak_rss_mib": 10.57421875,
+      "steps": {
+        "load_trust_list_s": 0.000122205,
+        "read_manifest_s": 0.000234721,
+        "check_claim_s": 0.000043955,
+        "build_inputs_s": 0.003063152,
+        "check_size_s": 0.000054106,
+        "write_inputs_s": 0.000155523
+      },
+      "data": {
+        "claim_bytes": 486,
+        "protected_header_bytes": 1215,
+        "signer_certificate_bytes": 661,
+        "tbs_certificate_bytes": 539,
+        "issuing_chain_certificates": 1,
+        "claim_signature_bytes": 16323,
+        "spare_bytes": 14250
+      }
+    },
+    {
+      "name": "prove",
+      "category": "anonymization",
+      "wall_s": 24.575507226,
+      "peak_rss_mib": 9387.796875,
+      "steps": {
+        "load_constraint_system_s": 1.23,
+        "read_proving_key_s": 2.11,
+        "hash_proving_key_s": 1.53,
+        "parse_proving_key_s": 1.52,
+        "load_proving_key_s": 5.17,
+        "prove_s": 17.81,
+        "solve_s": 3.093945159
+      },
+      "data": {
+        "statistic": "median of 3 runs (wall time); peak memory is the maximum",
+        "cache": "cold",
+        "runs": [
+          {
+            "name": "prove (1/3)",
+            "category": "anonymization",
+            "wall_s": 24.575507226,
+            "peak_rss_mib": 9387.796875,
+            "steps": {
+              "load_constraint_system_s": 1.23,
+              "read_proving_key_s": 2.11,
+              "hash_proving_key_s": 1.53,
+              "parse_proving_key_s": 1.52,
+              "load_proving_key_s": 5.17,
+              "prove_s": 17.81,
+              "solve_s": 3.093945159
+            },
+            "data": null,
+            "cache": "cold",
+            "resident_before": {
+              "statement.ccs": 0.0,
+              "statement.pk.dump": 0.0
+            }
+          },
+          {
+            "name": "prove (2/3)",
+            "category": "anonymization",
+            "wall_s": 24.806837559,
+            "peak_rss_mib": 9387.7109375,
+            "steps": {
+              "load_constraint_system_s": 1.22,
+              "read_proving_key_s": 1.64,
+              "hash_proving_key_s": 1.51,
+              "parse_proving_key_s": 1.49,
+              "load_proving_key_s": 4.64,
+              "prove_s": 18.57,
+              "solve_s": 3.1828542229999996
+            },
+            "data": null,
+            "cache": "cold",
+            "resident_before": {
+              "statement.ccs": 0.0,
+              "statement.pk.dump": 0.0
+            }
+          },
+          {
+            "name": "prove (3/3)",
+            "category": "anonymization",
+            "wall_s": 24.507051114,
+            "peak_rss_mib": 9387.30078125,
+            "steps": {
+              "load_constraint_system_s": 1.35,
+              "read_proving_key_s": 1.7,
+              "hash_proving_key_s": 1.52,
+              "parse_proving_key_s": 1.48,
+              "load_proving_key_s": 4.71,
+              "prove_s": 18.07,
+              "solve_s": 3.2753854889999996
+            },
+            "data": null,
+            "cache": "cold",
+            "resident_before": {
+              "statement.ccs": 0.0,
+              "statement.pk.dump": 0.0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "self_verify",
+      "category": "anonymization",
+      "wall_s": 0.031307574,
+      "peak_rss_mib": 14.8671875,
+      "steps": {
+        "verify_s": 0.0
+      },
+      "data": null
+    },
+    {
+      "name": "package",
+      "category": "anonymization",
+      "wall_s": 0.010057051,
+      "peak_rss_mib": 14.9375,
+      "steps": {
+        "read_context_s": 0.000018485,
+        "read_manifest_s": 0.000198989,
+        "encode_signature_s": 0.000049046,
+        "replace_signature_s": 0.003918066
+      },
+      "data": {
+        "proof_bytes": 196,
+        "zk_signature_bytes": 16323,
+        "x5chain_bytes": 542,
+        "manifest_store_bytes": 17528,
+        "asset_bytes_signed": 1905086,
+        "asset_bytes_anonymized": 1905086
+      }
+    },
+    {
+      "name": "verify",
+      "category": "verification",
+      "wall_s": 0.029939059,
+      "peak_rss_mib": 14.67578125,
+      "steps": {
+        "verify_s": 0.0
+      },
+      "data": null
+    },
+    {
+      "name": "verify_cli",
+      "category": "verification-full",
+      "wall_s": 0.04663979,
+      "peak_rss_mib": 15.50390625,
+      "steps": null,
+      "data": null
+    },
+    {
+      "name": "prove_warm",
+      "category": "supplementary",
+      "wall_s": 22.993195364,
+      "peak_rss_mib": 9386.6796875,
+      "steps": {
+        "load_constraint_system_s": 1.17,
+        "read_proving_key_s": 0.89,
+        "hash_proving_key_s": 1.57,
+        "parse_proving_key_s": 1.51,
+        "load_proving_key_s": 3.97,
+        "prove_s": 17.43,
+        "solve_s": 3.014381716
+      },
+      "data": {
+        "statistic": "median of 3 runs (wall time); peak memory is the maximum",
+        "cache": "warm",
+        "runs": [
+          {
+            "name": "prove_warm (1/3)",
+            "category": "supplementary",
+            "wall_s": 22.930667053,
+            "peak_rss_mib": 9386.6796875,
+            "steps": {
+              "load_constraint_system_s": 1.17,
+              "read_proving_key_s": 0.89,
+              "hash_proving_key_s": 1.53,
+              "parse_proving_key_s": 1.55,
+              "load_proving_key_s": 3.97,
+              "prove_s": 17.38,
+              "solve_s": 3.209109084
+            },
+            "data": null,
+            "cache": "warm",
+            "resident_before": {
+              "statement.ccs": 1.0,
+              "statement.pk.dump": 1.0
+            }
+          },
+          {
+            "name": "prove_warm (2/3)",
+            "category": "supplementary",
+            "wall_s": 22.993195364,
+            "peak_rss_mib": 9386.6484375,
+            "steps": {
+              "load_constraint_system_s": 1.17,
+              "read_proving_key_s": 0.89,
+              "hash_proving_key_s": 1.57,
+              "parse_proving_key_s": 1.51,
+              "load_proving_key_s": 3.97,
+              "prove_s": 17.43,
+              "solve_s": 3.014381716
+            },
+            "data": null,
+            "cache": "warm",
+            "resident_before": {
+              "statement.ccs": 1.0,
+              "statement.pk.dump": 1.0
+            }
+          },
+          {
+            "name": "prove_warm (3/3)",
+            "category": "supplementary",
+            "wall_s": 23.968802902,
+            "peak_rss_mib": 9386.17578125,
+            "steps": {
+              "load_constraint_system_s": 1.16,
+              "read_proving_key_s": 0.9,
+              "hash_proving_key_s": 1.52,
+              "parse_proving_key_s": 1.54,
+              "load_proving_key_s": 3.95,
+              "prove_s": 18.39,
+              "solve_s": 3.3645743830000003
+            },
+            "data": null,
+            "cache": "warm",
+            "resident_before": {
+              "statement.ccs": 1.0,
+              "statement.pk.dump": 1.0
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "output": {
+    "proof_bytes": 196,
+    "public_inputs": 50,
+    "zk_signature_bytes": 16323,
+    "claim_signature_bytes_original": 16323,
+    "spare_bytes": 14250,
+    "x5chain_bytes": 542,
+    "manifest_store_bytes": 17528,
+    "asset_bytes_signed": 1905086,
+    "asset_bytes_anonymized": 1905086,
+    "note": "The ZK signature replaces the original claim signature in place at the same size, so the manifest store and the asset keep their sizes; spare_bytes is the padding left. The proof is embedded as raw bytes; its public inputs are derived by the verifier."
+  }
+}

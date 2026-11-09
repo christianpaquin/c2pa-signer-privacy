@@ -24,7 +24,7 @@ func TestReadProofRejectsTrailingAndTruncatedData(t *testing.T) {
 		t.Fatal(err)
 	}
 	proof := buf.Bytes()
-	if _, err := readProof(proof); err != nil {
+	if _, err := readProof(proof, ecc.BN254); err != nil {
 		t.Fatalf("a well-formed proof was rejected: %v", err)
 	}
 	for name, data := range map[string][]byte{
@@ -33,7 +33,7 @@ func TestReadProofRejectsTrailingAndTruncatedData(t *testing.T) {
 		"truncated":            proof[:len(proof)-1],
 		"empty":                nil,
 	} {
-		if _, err := readProof(data); err == nil {
+		if _, err := readProof(data, ecc.BN254); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
@@ -110,10 +110,17 @@ func TestProvingKeyFormatsLoadTheSameKey(t *testing.T) {
 	}
 }
 
-// convertedKeys sets up a small circuit's keys directory with converted keys.
-func convertedKeys(t *testing.T) (string, manifest) {
+// convertedKeys sets up a small circuit's keys directory with converted keys (BN254).
+func convertedKeys(t *testing.T) (string, manifest) { t.Helper(); return convertedKeysOn(t, "bn254") }
+
+// convertedKeysOn sets up a small circuit's keys directory on a curve, with converted keys.
+func convertedKeysOn(t *testing.T, curveName string) (string, manifest) {
 	t.Helper()
-	ccs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &squareCircuit{})
+	curve, err := curveID(curveName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ccs, err := frontend.Compile(curve.ScalarField(), r1cs.NewBuilder, &squareCircuit{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +129,7 @@ func convertedKeys(t *testing.T) (string, manifest) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	m := manifest{SHA256: map[string]string{}}
+	m := manifest{Curve: curveName, SHA256: map[string]string{}}
 	if m.SHA256[pkFile], err = writeFile(filepath.Join(dir, pkFile), pk); err != nil {
 		t.Fatal(err)
 	}
@@ -214,5 +221,49 @@ func TestStreamedLoadingRejectsChangesAndTrailingBytes(t *testing.T) {
 	m.ProvingKeys["raw"] = r
 	if _, err := loadProvingKey(dir, m, "raw", "none"); err == nil || !strings.Contains(err.Error(), "bytes after its contents") {
 		t.Errorf("trailing bytes were not rejected: %v", err)
+	}
+}
+
+// A BLS12-381 key set (roadmap E7): every format loads, a proof made with it
+// verifies, and keys or proofs of the other curve are refused.
+func TestBLS12381KeySets(t *testing.T) {
+	dir, m := convertedKeysOn(t, "bls12-381")
+	if m.curve() != ecc.BLS12_381 {
+		t.Fatalf("curve %v", m.curve())
+	}
+	for _, mode := range [][2]string{{"compressed", "full"}, {"raw", "none"}, {"dump", "none"}} {
+		if _, err := loadProvingKey(dir, m, mode[0], mode[1]); err != nil {
+			t.Errorf("%v: %v", mode, err)
+		}
+	}
+	// The same file read as the other curve's key is refused.
+	bn := m
+	bn.Curve = "bn254"
+	if _, err := loadProvingKey(dir, bn, "compressed", "full"); err == nil {
+		t.Error("a BLS12-381 proving key was loaded as a BN254 key")
+	}
+	// A proof on one curve is not a proof on the other.
+	ccs, _ := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &squareCircuit{})
+	pk, _, _ := groth16.Setup(ccs)
+	w, _ := frontend.NewWitness(&squareCircuit{X: 3, Y: 9}, ecc.BN254.ScalarField())
+	proof, err := groth16.Prove(ccs, pk, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if _, err := proof.WriteTo(&buf); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readProof(buf.Bytes(), ecc.BLS12_381); err == nil {
+		t.Error("a BN254 proof was read as a BLS12-381 proof")
+	}
+	if _, err := readProof(buf.Bytes(), ecc.BN254); err != nil {
+		t.Errorf("the BN254 proof itself was rejected: %v", err)
+	}
+	// An unknown curve in keys.json is refused when the keys are read.
+	m.Curve = "secp256k1"
+	writeManifest(t, dir, m)
+	if _, err := readManifest(dir); err == nil {
+		t.Error("an unknown curve was accepted")
 	}
 }

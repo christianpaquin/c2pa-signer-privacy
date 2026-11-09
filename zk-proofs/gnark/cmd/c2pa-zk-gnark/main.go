@@ -1,8 +1,8 @@
 // c2pa-zk-gnark proves and verifies the third-party anonymization statement
-// (package statement) with Groth16 on BN254.
+// (package statement) with Groth16, on BN254 (the default) or BLS12-381.
 //
-//	c2pa-zk-gnark setup  --keys DIR
-//	c2pa-zk-gnark check  --input inputs.json
+//	c2pa-zk-gnark setup  --keys DIR [--curve bn254|bls12-381]
+//	c2pa-zk-gnark check  --input inputs.json [--curve bn254|bls12-381]
 //	c2pa-zk-gnark prove  --keys DIR --input inputs.json --proof proof.bin [--pk-format F --pk-check C]
 //	c2pa-zk-gnark convert-pk --keys DIR
 //	c2pa-zk-gnark verify --keys DIR --public public.json --proof proof.bin
@@ -10,7 +10,9 @@
 // inputs.json holds statement.Inputs (byte fields in base64); public.json
 // holds statement.Public. Both are produced from a signed asset by the Rust
 // tools (c2pa-x509-zk-statement-inputs). setup writes the constraint system,
-// both keys, and keys.json (the sizes and each file's SHA-256) into DIR.
+// both keys, and keys.json (the curve, the sizes, and each file's SHA-256)
+// into DIR. The curve belongs to the key set (roadmap E7): prove, verify,
+// and convert-pk take it from keys.json.
 //
 // Proving-key formats (roadmap E6): setup writes the key compressed;
 // convert-pk adds it raw (uncompressed points) and as a binary dump, with
@@ -62,7 +64,10 @@ const (
 
 // manifest identifies the keys: the circuit's sizes and the files' hashes.
 type manifest struct {
-	Statement   string            `json:"statement"`
+	Statement string `json:"statement"`
+	// The proof system's curve: "bn254" (also when absent, for key sets
+	// from before E7) or "bls12-381".
+	Curve       string            `json:"curve,omitempty"`
 	Sizes       statement.Sizes   `json:"sizes"`
 	Constraints int               `json:"constraints"`
 	SHA256      map[string]string `json:"sha256"`
@@ -83,6 +88,20 @@ type keyFile struct {
 	// a key loaded with full point checks.
 	Source       string `json:"source"`
 	SourceSHA256 string `json:"source_sha256,omitempty"`
+}
+
+// curves are the supported curves, by the names used in keys.json and --curve.
+var curves = map[string]ecc.ID{"bn254": ecc.BN254, "bls12-381": ecc.BLS12_381}
+
+func curveID(name string) (ecc.ID, error) {
+	if name == "" {
+		name = "bn254"
+	}
+	id, ok := curves[name]
+	if !ok {
+		return ecc.UNKNOWN, fmt.Errorf("unknown curve %q (bn254 or bls12-381)", name)
+	}
+	return id, nil
 }
 
 // gnarkVersion is the version of gnark this binary was built with.
@@ -111,14 +130,15 @@ func main() {
 	proofPath := fs.String("proof", "", "proof file")
 	pkFormat := fs.String("pk-format", "compressed", "proving-key file: compressed, raw, or dump")
 	pkCheck := fs.String("pk-check", "full", "validate proving-key points on load: full or none")
+	curve := fs.String("curve", "bn254", "setup and check: the curve, bn254 or bls12-381")
 	_ = fs.Parse(os.Args[2:])
 
 	var err error
 	switch os.Args[1] {
 	case "setup":
-		err = setup(require(*keys, "--keys"))
+		err = setup(require(*keys, "--keys"), *curve)
 	case "check":
-		err = check(require(*input, "--input"))
+		err = check(require(*input, "--input"), *curve)
 	case "prove":
 		err = prove(require(*keys, "--keys"), require(*input, "--input"), require(*proofPath, "--proof"), *pkFormat, *pkCheck)
 	case "convert-pk":
@@ -161,21 +181,25 @@ func timed(what string, f func() error) error {
 	return err
 }
 
-func compile(s statement.Sizes) (constraint.ConstraintSystem, error) {
+func compile(s statement.Sizes, curve ecc.ID) (constraint.ConstraintSystem, error) {
 	var ccs constraint.ConstraintSystem
 	err := timed("compile", func() (err error) {
-		ccs, err = frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, statement.NewCircuit(s))
+		ccs, err = frontend.Compile(curve.ScalarField(), r1cs.NewBuilder, statement.NewCircuit(s))
 		return
 	})
 	return ccs, err
 }
 
-func setup(dir string) error {
+func setup(dir, curveName string) error {
+	curve, err := curveID(curveName)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	s := statement.DefaultSizes
-	ccs, err := compile(s)
+	ccs, err := compile(s, curve)
 	if err != nil {
 		return err
 	}
@@ -184,7 +208,7 @@ func setup(dir string) error {
 	if err := timed("setup", func() (err error) { pk, vk, err = groth16.Setup(ccs); return }); err != nil {
 		return err
 	}
-	m := manifest{Statement: "c2pa-x509-zk third-party (E2b)", Sizes: s, Constraints: ccs.GetNbConstraints(), SHA256: map[string]string{}}
+	m := manifest{Statement: "c2pa-x509-zk third-party (E2b)", Curve: curveName, Sizes: s, Constraints: ccs.GetNbConstraints(), SHA256: map[string]string{}}
 	for name, w := range map[string]io.WriterTo{ccsFile: ccs, pkFile: pk, vkFile: vk} {
 		sum, err := writeFile(filepath.Join(dir, name), w)
 		if err != nil {
@@ -198,12 +222,16 @@ func setup(dir string) error {
 	return os.WriteFile(filepath.Join(dir, manifestFile), append(data, '\n'), 0o644)
 }
 
-func check(inputPath string) error {
+func check(inputPath, curveName string) error {
+	curve, err := curveID(curveName)
+	if err != nil {
+		return err
+	}
 	var in statement.Inputs
 	if err := readJSON(inputPath, &in); err != nil {
 		return err
 	}
-	ccs, err := compile(statement.DefaultSizes)
+	ccs, err := compile(statement.DefaultSizes, curve)
 	if err != nil {
 		return err
 	}
@@ -211,7 +239,7 @@ func check(inputPath string) error {
 	if err != nil {
 		return err
 	}
-	w, err := frontend.NewWitness(assignment, ecc.BN254.ScalarField())
+	w, err := frontend.NewWitness(assignment, curve.ScalarField())
 	if err != nil {
 		return err
 	}
@@ -278,7 +306,7 @@ func loadProvingKey(dir string, m manifest, format, check string) (groth16.Provi
 			return nil, fmt.Errorf("refusing to load the proving key without point checks: %w", err)
 		}
 	}
-	pk := groth16.NewProvingKey(ecc.BN254)
+	pk := groth16.NewProvingKey(m.curve())
 	err := timed("load proving key", func() error {
 		return loadChecked(dir, name, m, "proving key", func(r io.Reader) error {
 			switch {
@@ -355,7 +383,7 @@ func prove(dir, inputPath, proofPath, pkFormat, pkCheck string) error {
 	if err != nil {
 		return err
 	}
-	ccs := groth16.NewCS(ecc.BN254)
+	ccs := groth16.NewCS(m.curve())
 	if err := timed("load constraint system", func() error { return readFile(dir, ccsFile, m, ccs) }); err != nil {
 		return err
 	}
@@ -363,7 +391,7 @@ func prove(dir, inputPath, proofPath, pkFormat, pkCheck string) error {
 	if err != nil {
 		return err
 	}
-	w, err := frontend.NewWitness(assignment, ecc.BN254.ScalarField())
+	w, err := frontend.NewWitness(assignment, m.curve().ScalarField())
 	if err != nil {
 		return err
 	}
@@ -388,7 +416,7 @@ func verify(dir, publicPath, proofPath string) error {
 	if err != nil {
 		return err
 	}
-	vk := groth16.NewVerifyingKey(ecc.BN254)
+	vk := groth16.NewVerifyingKey(m.curve())
 	if err := readFile(dir, vkFile, m, vk); err != nil {
 		return err
 	}
@@ -396,11 +424,11 @@ func verify(dir, publicPath, proofPath string) error {
 	if err != nil {
 		return err
 	}
-	proof, err := readProof(data)
+	proof, err := readProof(data, m.curve())
 	if err != nil {
 		return err
 	}
-	w, err := frontend.NewWitness(assignment, ecc.BN254.ScalarField(), frontend.PublicOnly())
+	w, err := frontend.NewWitness(assignment, m.curve().ScalarField(), frontend.PublicOnly())
 	if err != nil {
 		return err
 	}
@@ -416,7 +444,16 @@ func readManifest(dir string) (manifest, error) {
 	if err := readJSON(filepath.Join(dir, manifestFile), &m); err != nil {
 		return m, fmt.Errorf("no keys in %s (run setup): %w", dir, err)
 	}
+	if _, err := curveID(m.Curve); err != nil {
+		return m, fmt.Errorf("%s: %w", manifestFile, err)
+	}
 	return m, nil
+}
+
+// curve is the key set's curve (validated by readManifest).
+func (m manifest) curve() ecc.ID {
+	id, _ := curveID(m.Curve)
+	return id
 }
 
 // readFile loads a key-directory file after checking its hash against keys.json.
@@ -519,8 +556,8 @@ func readJSON(path string, v any) error {
 
 // readProof decodes a proof that must be exactly the input: trailing bytes
 // (data appended to a valid proof) are rejected.
-func readProof(data []byte) (groth16.Proof, error) {
-	proof := groth16.NewProof(ecc.BN254)
+func readProof(data []byte, curve ecc.ID) (groth16.Proof, error) {
+	proof := groth16.NewProof(curve)
 	n, err := proof.ReadFrom(bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("malformed proof: %w", err)

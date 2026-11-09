@@ -10,7 +10,7 @@
 use crate::jumbf::{active_assertions, active_manifest, manifest_count, manifest_store, ActiveManifest};
 use crate::original_signature::{tst_info, OriginalSignature, TimeStampVersion, COSE_ALG_ES256, SHA256_OID};
 use crate::trust::{issuing_path_for, validate_issuing_chain, TrustList};
-use crate::zk_signature::{ZkSignature, PROOF_LEN};
+use crate::zk_signature::{proof_len, ZkSignature, DEFAULT_CURVE};
 use anyhow::{anyhow, bail, Context, Result};
 use ciborium::Value;
 use std::path::PathBuf;
@@ -196,12 +196,22 @@ pub struct Prover {
 }
 
 impl Prover {
+    fn manifest(&self) -> Result<serde_json::Value> {
+        Ok(serde_json::from_slice(
+            &std::fs::read(self.keys.join("keys.json")).with_context(|| format!("no keys.json in {} (run c2pa-zk-gnark setup)", self.keys.display()))?,
+        )?)
+    }
+
     /// SHA-256 (hex) of the verifying key, from the key directory's keys.json.
     pub fn vk_sha256(&self) -> Result<String> {
-        let manifest: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(self.keys.join("keys.json")).with_context(|| format!("no keys.json in {} (run c2pa-zk-gnark setup)", self.keys.display()))?,
-        )?;
-        manifest["sha256"]["statement.vk"].as_str().map(str::to_string).ok_or_else(|| anyhow!("keys.json has no verifying-key hash"))
+        self.manifest()?["sha256"]["statement.vk"].as_str().map(str::to_string).ok_or_else(|| anyhow!("keys.json has no verifying-key hash"))
+    }
+
+    /// The key set's curve, from keys.json (BN254 when absent).
+    pub fn curve(&self) -> Result<String> {
+        let curve = self.manifest()?["curve"].as_str().unwrap_or(DEFAULT_CURVE).to_string();
+        proof_len(&curve)?;
+        Ok(curve)
     }
 
     fn run(&self, args: &[&std::ffi::OsStr]) -> Result<std::process::Output> {
@@ -280,13 +290,15 @@ pub fn anonymize(input: &Path, output: &Path, trust: &TrustList, prover: &Prover
 
     // The ZK signature must fit the original's space: check before proving.
     let size = manifest.cose_sign1.len();
-    let mut signature = ZkSignature { issuing_chain: issuing_chain.clone(), vk_sha256: prover.vk_sha256()?, time_stamp_token: token, proof: vec![0; PROOF_LEN] };
+    let curve = prover.curve()?;
+    let expected_len = proof_len(&curve)?;
+    let mut signature = ZkSignature { issuing_chain: issuing_chain.clone(), vk_sha256: prover.vk_sha256()?, curve, time_stamp_token: token, proof: vec![0; expected_len] };
     signature.encode_exact(size)?;
     let spare_bytes = size - signature.encode(0, 0).len();
 
     signature.proof = prover.prove(&inputs)?;
-    if signature.proof.len() != PROOF_LEN {
-        bail!("the proof is {} bytes, not {PROOF_LEN}", signature.proof.len());
+    if signature.proof.len() != expected_len {
+        bail!("the proof is {} bytes, not {expected_len}", signature.proof.len());
     }
     // Check the proof before embedding it.
     if !prover.verify(&inputs.public, &signature.proof)? {
@@ -372,6 +384,10 @@ pub fn verify(asset: &Path, trust: &TrustList, tsa_trust: &Path, prover: &Prover
     let store = manifest_store(asset)?;
     let manifest = active_manifest(&store)?;
     let signature = ZkSignature::decode(&manifest.cose_sign1)?;
+    let keys_curve = prover.curve()?;
+    if signature.curve != keys_curve {
+        bail!("the proof is on {}, but the keys in {} are for {keys_curve}", signature.curve, prover.keys.display());
+    }
     if signature.vk_sha256 != prover.vk_sha256()? {
         bail!("the proof was made with other keys (verifying key {}), not those in {}", signature.vk_sha256, prover.keys.display());
     }

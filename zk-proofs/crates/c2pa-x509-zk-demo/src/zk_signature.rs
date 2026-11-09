@@ -5,7 +5,7 @@
 //! - Protected header: `alg` -65538 (private use), `crit` ["c2pa-x509-zk"],
 //!   `x5chain` with the issuing CA chain (never the signer's certificate), and
 //!   "c2pa-x509-zk": {"statement": "third-party/1", "vk": SHA-256 of the
-//!   verifying key}.
+//!   verifying key, and "curve" unless BN254 (roadmap E7)}.
 //! - Unprotected header: "c2pa-x509-zk-tst" with the original time stamp,
 //!   unchanged (a private label: the token covers the original signature, not
 //!   this one), then `pad` and `pad2` to reach the original's exact size.
@@ -14,7 +14,7 @@
 //!
 //! Decoding is strict, so the format leaves no room for other data (a signer
 //! certificate, say): exactly one CBOR item, exactly these header fields,
-//! all-zero padding, and a proof of exactly `PROOF_LEN` bytes.
+//! all-zero padding, and a proof of exactly its curve's length (`proof_len`).
 
 use anyhow::{anyhow, bail, Result};
 use ciborium::Value;
@@ -24,8 +24,19 @@ pub const CRIT_LABEL: &str = "c2pa-x509-zk";
 pub const STATEMENT: &str = "third-party/1";
 pub const TIME_STAMP_LABEL: &str = "c2pa-x509-zk-tst";
 pub const FORMAT_VERSION: u8 = 1;
-/// A gnark Groth16 proof over BN254 with one commitment, compressed.
-pub const PROOF_LEN: usize = 196;
+/// The default curve; signatures without a "curve" field use it.
+pub const DEFAULT_CURVE: &str = "bn254";
+
+/// The length of a gnark Groth16 proof with one commitment, compressed, on
+/// each supported curve: A, B, C, the commitment and its proof of knowledge
+/// (G1, G2, G1, G1, G1), plus a 4-byte count.
+pub fn proof_len(curve: &str) -> Result<usize> {
+    match curve {
+        "bn254" => Ok(32 + 64 + 32 + 4 + 32 + 32),
+        "bls12-381" => Ok(48 + 96 + 48 + 4 + 48 + 48),
+        other => bail!("unsupported curve {other:?} (bn254 or bls12-381)"),
+    }
+}
 const COSE_SIGN1_TAG: u64 = 18;
 
 /// The third-party ZK signature's contents.
@@ -35,6 +46,8 @@ pub struct ZkSignature {
     pub issuing_chain: Vec<Vec<u8>>,
     /// SHA-256 of the verifying key (hex), identifying the circuit and keys.
     pub vk_sha256: String,
+    /// The proof system's curve ("bn254" or "bls12-381"; roadmap E7).
+    pub curve: String,
     /// The original RFC 3161 time-stamp token (`sigTst2`).
     pub time_stamp_token: Vec<u8>,
     pub proof: Vec<u8>,
@@ -86,7 +99,14 @@ impl ZkSignature {
             (Value::Integer(33.into()), Value::Array(self.issuing_chain.iter().cloned().map(Value::Bytes).collect())),
             (
                 text(CRIT_LABEL),
-                Value::Map(vec![(text("statement"), text(STATEMENT)), (text("vk"), text(&self.vk_sha256))]),
+                {
+                    let mut ext = vec![(text("statement"), text(STATEMENT)), (text("vk"), text(&self.vk_sha256))];
+                    // Written only for other curves, so BN254 signatures are unchanged.
+                    if self.curve != DEFAULT_CURVE {
+                        ext.push((text("curve"), text(&self.curve)));
+                    }
+                    Value::Map(ext)
+                },
             ),
         ]);
         let time_stamp = Value::Map(vec![(
@@ -174,7 +194,12 @@ impl ZkSignature {
             bail!("the ZK extension is not marked critical");
         }
         let ext = map_get(&header, &text(CRIT_LABEL)).and_then(Value::as_map).ok_or_else(|| anyhow!("no ZK extension"))?;
-        only_keys(ext, &[text("statement"), text("vk")], "ZK extension")?;
+        only_keys(ext, &[text("statement"), text("vk"), text("curve")], "ZK extension")?;
+        let curve = match map_get(ext, &text("curve")) {
+            None => DEFAULT_CURVE.to_string(),
+            Some(Value::Text(c)) if c != DEFAULT_CURVE => c.clone(),
+            Some(_) => bail!("malformed curve field (BN254 is written by omission)"),
+        };
         if map_get(ext, &text("statement")) != Some(&text(STATEMENT)) {
             bail!("not a third-party ZK signature (statement is not {STATEMENT})");
         }
@@ -206,10 +231,11 @@ impl ZkSignature {
         if version != FORMAT_VERSION {
             bail!("unsupported ZK signature format version {version}");
         }
-        if proof.len() != PROOF_LEN {
-            bail!("the proof is {} bytes; format version {FORMAT_VERSION} has {PROOF_LEN}", proof.len());
+        let expected = proof_len(&curve)?;
+        if proof.len() != expected {
+            bail!("the proof is {} bytes; format version {FORMAT_VERSION} on {curve} has {expected}", proof.len());
         }
-        Ok(Self { issuing_chain, vk_sha256, time_stamp_token, proof: proof.to_vec() })
+        Ok(Self { issuing_chain, vk_sha256, curve, time_stamp_token, proof: proof.to_vec() })
     }
 }
 
@@ -221,8 +247,9 @@ mod tests {
         ZkSignature {
             issuing_chain: vec![vec![0x30; 733]],
             vk_sha256: "ab".repeat(32),
+            curve: DEFAULT_CURVE.into(),
             time_stamp_token: vec![0x30; 2000],
-            proof: vec![7; PROOF_LEN],
+            proof: vec![7; proof_len(DEFAULT_CURVE).unwrap()],
         }
     }
 
@@ -262,7 +289,8 @@ mod tests {
     fn decode_is_strict() {
         let z = sample();
         let certificate = vec![0x30, 0x82, 0x02, 0x00];
-        for proof in [vec![7; PROOF_LEN - 1], [vec![7; PROOF_LEN], certificate.clone()].concat(), vec![]] {
+        let len = proof_len(DEFAULT_CURVE).unwrap();
+        for proof in [vec![7; len - 1], [vec![7; len], certificate.clone()].concat(), vec![]] {
             let other = ZkSignature { proof, ..z.clone() };
             assert!(ZkSignature::decode(&other.encode(0, 0)).is_err());
         }
@@ -289,6 +317,35 @@ mod tests {
         }
         // The untouched re-encoding still decodes.
         assert!(ZkSignature::decode(&tweak(&z, |_| {})).is_ok());
+    }
+
+    /// BLS12-381 signatures (roadmap E7) carry their curve and its proof
+    /// length; BN254 ones are encoded exactly as before, without the field.
+    #[test]
+    fn curve_field() {
+        let bn = sample();
+        assert!(!bn.encode(0, 0).windows(5).any(|w| w == b"curve"), "BN254 encodings must not change");
+        let bls = ZkSignature { curve: "bls12-381".into(), proof: vec![7; proof_len("bls12-381").unwrap()], ..sample() };
+        assert_eq!(proof_len("bls12-381").unwrap(), 292);
+        assert_eq!(ZkSignature::decode(&bls.encode(3, 1)).unwrap(), bls);
+        // A BLS12-381 signature with a BN254-sized proof, and the reverse, are rejected.
+        assert!(ZkSignature::decode(&ZkSignature { proof: vec![7; 196], ..bls.clone() }.encode(0, 0)).is_err());
+        assert!(ZkSignature::decode(&ZkSignature { proof: vec![7; 292], ..bn.clone() }.encode(0, 0)).is_err());
+        // BN254 is written by omission only; an explicit "bn254", or an unknown curve, is rejected.
+        for curve in ["bn254", "secp256k1"] {
+            let with = tweak(&bn, |fields| {
+                let Value::Bytes(p) = &fields[0] else { unreachable!() };
+                let Value::Map(mut m) = ciborium::from_reader::<Value, _>(p.as_slice()).unwrap() else { unreachable!() };
+                for (k, v) in m.iter_mut() {
+                    if k == &text(CRIT_LABEL) {
+                        let Value::Map(ext) = v else { unreachable!() };
+                        ext.push((text("curve"), text(curve)));
+                    }
+                }
+                fields[0] = Value::Bytes(cbor(&Value::Map(m)));
+            });
+            assert!(ZkSignature::decode(&with).is_err(), "{curve} accepted");
+        }
     }
 
     #[test]

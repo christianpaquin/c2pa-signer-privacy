@@ -291,7 +291,7 @@ fn statement_inputs_hold_the_signed_parts_and_the_attested_time() {
 // ---- Third-party anonymization and verification (E2b) --------------------
 
 use c2pa_x509_zk_demo::third_party::{self, Prover};
-use c2pa_x509_zk_demo::zk_signature::{ZkSignature, PROOF_LEN};
+use c2pa_x509_zk_demo::zk_signature::{proof_len, ZkSignature, DEFAULT_CURVE};
 
 /// A stand-in for the gnark CLI that reports every proof invalid (exit 1),
 /// and a key directory naming a verifying-key hash: reaching the proof check
@@ -315,8 +315,9 @@ fn replaced_with_placeholder(fixture: &Fixture) -> PathBuf {
     let signature = ZkSignature {
         issuing_chain: vec![std::fs::read(fixture.pki("issuing-ca.der")).unwrap(), std::fs::read(fixture.pki("root.der")).unwrap()],
         vk_sha256: "00".repeat(32),
+        curve: DEFAULT_CURVE.into(),
         time_stamp_token: original.time_stamp.unwrap().token,
-        proof: vec![0x5a; PROOF_LEN],
+        proof: vec![0x5a; proof_len(DEFAULT_CURVE).unwrap()],
     };
     let cose = signature.encode_exact(manifest.cose_sign1.len()).unwrap();
     let output = fixture.dir.path().join("anonymized.png");
@@ -384,6 +385,12 @@ fn verifier_checks_trust_time_stamp_and_binding_before_the_proof() {
     assert!(!err.contains("proof does not verify"), "an untrusted chain reached the proof: {err}");
     let err = verify(&output, &trust, &tsa, &stand_in_prover(&fixture.dir.path().join("other"), &"11".repeat(32)));
     assert!(err.contains("other keys"), "{err}");
+
+    // Keys for the other curve (here BLS12-381, for a BN254 signature) are refused.
+    let bls = stand_in_prover(&fixture.dir.path().join("bls"), &"00".repeat(32));
+    std::fs::write(bls.keys.join("keys.json"), serde_json::json!({ "curve": "bls12-381", "sha256": { "statement.vk": "00".repeat(32) } }).to_string()).unwrap();
+    let err = verify(&output, &trust, &tsa, &bls);
+    assert!(err.contains("keys in") && err.contains("bls12-381"), "{err}");
 
     // An expected issuer: a mismatch is rejected before the proof, a match reaches it.
     let issuer = c2pa_x509_zk_demo::extract_subject_dn(&std::fs::read(fixture.pki("issuing-ca.der")).unwrap()).unwrap();

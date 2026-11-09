@@ -47,7 +47,7 @@ c2pa-x509-zk-statement-inputs --input signed.png --trust-list trust-list.pem --o
 
 ### Curves (E7)
 
-BN254 is the default. `c2pa-zk-gnark setup --keys DIR --curve bls12-381` creates a BLS12-381 key set (about 120 bits of security instead of about 100); the curve is recorded in `keys.json`, and `prove`, `verify`, and `convert-pk` take it from there (`check` takes `--curve`). The anonymizer uses whichever key set it is given; the ZK signature records the curve when it is not BN254, and the verifier refuses keys for another curve. Costs: [FEASIBILITY.md](../FEASIBILITY.md#e7-bls12-381-as-an-option).
+BN254 is the default. `c2pa-zk-gnark setup --keys DIR --curve bls12-381` creates a BLS12-381 key set (about 120 bits of security instead of about 100, as curve-level estimates); the curve is recorded in `keys.json`, and `prove`, `verify`, and `convert-pk` take it from there (`check` takes `--curve`). The anonymizer uses whichever key set it is given; the ZK signature records the curve when it is not BN254, and the verifier refuses keys for another curve. Costs: [FEASIBILITY.md](../FEASIBILITY.md#e7-bls12-381-as-an-option).
 
 ### Proving-key formats (E6)
 
@@ -63,10 +63,11 @@ Loading without point checks is refused unless the key's provenance record match
 ## Tests
 
 ```bash
-go test ./...                       # ~35 s: compiles at test sizes and solves
+go test ./...                       # ~2 min: compiles at test sizes on both curves and solves
 C2PA_ZK_GROTH16=1 go test ./...     # adds a real setup, proof, and verification (~6 min, ~8 GB)
 ```
 
+- Every statement test below runs on BN254 and on BLS12-381 (one compiled constraint system per curve).
 - Valid statements are accepted, with both claim header forms.
 - Rejected: a changed claim byte or length, imprint, a time just outside validity (the boundaries are inclusive), another CA, a changed claim signature, signer certificate byte, protected header byte, protected length, or CA signature.
 - Basic constraints: accepted when absent, empty, with `cA` FALSE written out, or with only a path length; rejected for `cA` TRUE in short and long-form sequences (a valid DER sequence with a 123-byte path length), with a path length, as a BOOLEAN of length 2, with an unexpected first element, or when the sequence does not fill the extension value or the BOOLEAN runs past it.

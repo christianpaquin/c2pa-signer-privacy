@@ -56,38 +56,15 @@ func solvedOn(t *testing.T, curve ecc.ID, c *Circuit) bool {
 	return testCircuitOn(t, curve).IsSolved(w) == nil
 }
 
-// solved reports whether the compiled constraint system (BN254) accepts the assignment.
-func solved(t *testing.T, c *Circuit) bool { t.Helper(); return solvedOn(t, ecc.BN254, c) }
-
-// The statement over BLS12-381 (roadmap E7): the circuit is the same, compiled
-// for another scalar field; valid statements are accepted and forgeries
-// rejected as on BN254.
-func TestStatementOnBLS12381(t *testing.T) {
-	for _, claimLen := range []int{377, 200} {
-		if !solvedOn(t, ecc.BLS12_381, assign(t, newFixture(t, fixtureOptions{claimLen: claimLen}).in)) {
-			t.Fatalf("valid statement rejected (claim %d bytes)", claimLen)
-		}
-	}
-	t.Logf("%d constraints at test sizes", testCircuitOn(t, ecc.BLS12_381).GetNbConstraints())
-	f := newFixture(t, fixtureOptions{})
-	for name, tamper := range map[string]func(in *Inputs){
-		"claim byte": func(in *Inputs) { in.Claim[100] ^= 1 },
-		"imprint":    func(in *Inputs) { in.Imprint[0] ^= 1 },
-		"time":       func(in *Inputs) { in.Time = f.notAfter.Unix() + 1 },
-		"another CA": func(in *Inputs) { in.IssuerCert = newFixture(t, fixtureOptions{}).in.IssuerCert },
-	} {
-		in := f.in
-		in.Claim = append([]byte{}, f.in.Claim...)
-		in.Imprint = append([]byte{}, f.in.Imprint...)
-		tamper(&in)
-		if solvedOn(t, ecc.BLS12_381, assign(t, in)) {
-			t.Errorf("%s: accepted", name)
-		}
-	}
-	for name, opt := range map[string]fixtureOptions{"a CA certificate": {isCA: true}, "EKU hidden in another extension": {hiddenEKU: true}} {
-		if solvedOn(t, ecc.BLS12_381, assign(t, newFixture(t, opt).in)) {
-			t.Errorf("%s: accepted", name)
-		}
+// forEachCurve runs a statement test on BN254 and on BLS12-381 (roadmap E7):
+// the circuit is the same, compiled for each curve's scalar field, so every
+// rejection guarantee is checked on both.
+func forEachCurve(t *testing.T, test func(t *testing.T, curve ecc.ID)) {
+	for _, c := range []struct {
+		name  string
+		curve ecc.ID
+	}{{"bn254", ecc.BN254}, {"bls12-381", ecc.BLS12_381}} {
+		t.Run(c.name, func(t *testing.T) { test(t, c.curve) })
 	}
 }
 
@@ -101,131 +78,141 @@ func assign(t *testing.T, in Inputs) *Circuit {
 }
 
 func TestValidStatementIsAccepted(t *testing.T) {
-	for _, claimLen := range []int{377, 200} { // both claim header forms (59 / 58)
-		f := newFixture(t, fixtureOptions{claimLen: claimLen})
-		if !solved(t, assign(t, f.in)) {
-			t.Fatalf("valid statement rejected (claim %d bytes)", claimLen)
+	forEachCurve(t, func(t *testing.T, curve ecc.ID) {
+		for _, claimLen := range []int{377, 200} { // both claim header forms (59 / 58)
+			f := newFixture(t, fixtureOptions{claimLen: claimLen})
+			if !solvedOn(t, curve, assign(t, f.in)) {
+				t.Fatalf("valid statement rejected (claim %d bytes)", claimLen)
+			}
 		}
-	}
-	t.Logf("%d constraints at test sizes", testCircuit(t).GetNbConstraints())
+		t.Logf("%d constraints at test sizes", testCircuitOn(t, curve).GetNbConstraints())
+	})
 }
 
 func TestTamperedPublicInputsAreRejected(t *testing.T) {
-	f := newFixture(t, fixtureOptions{})
-	cases := map[string]func(in *Inputs){
-		"claim byte":            func(in *Inputs) { in.Claim[100] ^= 1 },
-		"claim truncated":       func(in *Inputs) { in.Claim = in.Claim[:len(in.Claim)-1] },
-		"imprint":               func(in *Inputs) { in.Imprint[31] ^= 1 },
-		"time before notBefore": func(in *Inputs) { in.Time = f.notBefore.Unix() - 1 },
-		"time after notAfter":   func(in *Inputs) { in.Time = f.notAfter.Unix() + 1 },
-		"another CA": func(in *Inputs) {
-			other := newFixture(t, fixtureOptions{})
-			in.IssuerCert = other.in.IssuerCert
-		},
-	}
-	for name, tamper := range cases {
-		in := f.in
-		in.Claim = append([]byte{}, f.in.Claim...)
-		in.Imprint = append([]byte{}, f.in.Imprint...)
-		tamper(&in)
-		if solved(t, assign(t, in)) {
-			t.Errorf("%s: accepted", name)
+	forEachCurve(t, func(t *testing.T, curve ecc.ID) {
+		f := newFixture(t, fixtureOptions{})
+		cases := map[string]func(in *Inputs){
+			"claim byte":            func(in *Inputs) { in.Claim[100] ^= 1 },
+			"claim truncated":       func(in *Inputs) { in.Claim = in.Claim[:len(in.Claim)-1] },
+			"imprint":               func(in *Inputs) { in.Imprint[31] ^= 1 },
+			"time before notBefore": func(in *Inputs) { in.Time = f.notBefore.Unix() - 1 },
+			"time after notAfter":   func(in *Inputs) { in.Time = f.notAfter.Unix() + 1 },
+			"another CA": func(in *Inputs) {
+				other := newFixture(t, fixtureOptions{})
+				in.IssuerCert = other.in.IssuerCert
+			},
 		}
-	}
-	// The boundaries of validity are inclusive.
-	for _, at := range []time.Time{f.notBefore, f.notAfter} {
-		in := f.in
-		in.Time = at.Unix()
-		if !solved(t, assign(t, in)) {
-			t.Errorf("time %v at the validity boundary rejected", at)
+		for name, tamper := range cases {
+			in := f.in
+			in.Claim = append([]byte{}, f.in.Claim...)
+			in.Imprint = append([]byte{}, f.in.Imprint...)
+			tamper(&in)
+			if solvedOn(t, curve, assign(t, in)) {
+				t.Errorf("%s: accepted", name)
+			}
 		}
-	}
+		// The boundaries of validity are inclusive.
+		for _, at := range []time.Time{f.notBefore, f.notAfter} {
+			in := f.in
+			in.Time = at.Unix()
+			if !solvedOn(t, curve, assign(t, in)) {
+				t.Errorf("time %v at the validity boundary rejected", at)
+			}
+		}
+	})
 }
 
 func TestTamperedPrivateInputsAreRejected(t *testing.T) {
-	f := newFixture(t, fixtureOptions{})
-	cases := map[string]func(c *Circuit){
-		"claim signature": func(c *Circuit) { c.ClaimSig[40] = (c.ClaimSig[40].(byte) ^ 1) },
-		"signer certificate": func(c *Circuit) {
-			c.SigStructure[tbsContentOffset+60] = (c.SigStructure[tbsContentOffset+60].(byte) ^ 1)
-		},
-		"protected header": func(c *Circuit) {
-			c.SigStructure[protectedOffset+700] = (c.SigStructure[protectedOffset+700].(byte) ^ 1)
-		},
-		"protected length": func(c *Circuit) { c.ProtectedLen = len(f.in.Protected) - 1 },
-		"CA signature":     func(c *Circuit) { c.CASig = assign(t, newFixture(t, fixtureOptions{}).in).CASig },
-	}
-	for name, tamper := range cases {
-		c := assign(t, f.in)
-		tamper(c)
-		if solved(t, c) {
-			t.Errorf("%s: accepted", name)
+	forEachCurve(t, func(t *testing.T, curve ecc.ID) {
+		f := newFixture(t, fixtureOptions{})
+		cases := map[string]func(c *Circuit){
+			"claim signature": func(c *Circuit) { c.ClaimSig[40] = (c.ClaimSig[40].(byte) ^ 1) },
+			"signer certificate": func(c *Circuit) {
+				c.SigStructure[tbsContentOffset+60] = (c.SigStructure[tbsContentOffset+60].(byte) ^ 1)
+			},
+			"protected header": func(c *Circuit) {
+				c.SigStructure[protectedOffset+700] = (c.SigStructure[protectedOffset+700].(byte) ^ 1)
+			},
+			"protected length": func(c *Circuit) { c.ProtectedLen = len(f.in.Protected) - 1 },
+			"CA signature":     func(c *Circuit) { c.CASig = assign(t, newFixture(t, fixtureOptions{}).in).CASig },
 		}
-	}
+		for name, tamper := range cases {
+			c := assign(t, f.in)
+			tamper(c)
+			if solvedOn(t, curve, c) {
+				t.Errorf("%s: accepted", name)
+			}
+		}
+	})
 }
 
 // Certificate purpose comes from the parsed extensions, not byte patterns
 // (THIRD-PARTY-STATEMENT.md, Q5).
 func TestCertificatePurposeIsEnforced(t *testing.T) {
-	cases := map[string]fixtureOptions{
-		"no claim-signing purpose":          {purposes: []asn1.ObjectIdentifier{oidEmailProtection}},
-		"no extended key usage":             {noEKU: true},
-		"EKU hidden in another extension":   {hiddenEKU: true},
-		"two extended key usage extensions": {duplicateEKU: true},
-		"a CA certificate":                  {isCA: true},
-	}
-	for name, opt := range cases {
-		f := newFixture(t, opt)
-		if solved(t, assign(t, f.in)) {
-			t.Errorf("%s: accepted", name)
+	forEachCurve(t, func(t *testing.T, curve ecc.ID) {
+		cases := map[string]fixtureOptions{
+			"no claim-signing purpose":          {purposes: []asn1.ObjectIdentifier{oidEmailProtection}},
+			"no extended key usage":             {noEKU: true},
+			"EKU hidden in another extension":   {hiddenEKU: true},
+			"two extended key usage extensions": {duplicateEKU: true},
+			"a CA certificate":                  {isCA: true},
 		}
-	}
-	// Claim signing alone, or among several purposes, is accepted.
-	for _, purposes := range [][]asn1.ObjectIdentifier{{oidC2PAClaimSign}, {oidEmailProtection, oidPrivate, oidC2PAClaimSign}} {
-		if !solved(t, assign(t, newFixture(t, fixtureOptions{purposes: purposes}).in)) {
-			t.Errorf("purposes %v rejected", purposes)
+		for name, opt := range cases {
+			f := newFixture(t, opt)
+			if solvedOn(t, curve, assign(t, f.in)) {
+				t.Errorf("%s: accepted", name)
+			}
 		}
-	}
+		// Claim signing alone, or among several purposes, is accepted.
+		for _, purposes := range [][]asn1.ObjectIdentifier{{oidC2PAClaimSign}, {oidEmailProtection, oidPrivate, oidC2PAClaimSign}} {
+			if !solvedOn(t, curve, assign(t, newFixture(t, fixtureOptions{purposes: purposes}).in)) {
+				t.Errorf("purposes %v rejected", purposes)
+			}
+		}
+	})
 }
 
 // Basic constraints is decoded structurally: a CA is rejected however its
 // sequence is encoded, and unrecognized content is rejected, not ignored.
 func TestBasicConstraintsIsDecodedStructurally(t *testing.T) {
-	// The review's reproduction: cA TRUE in a sequence long enough to need a
-	// long-form length (a 123-byte pathLenConstraint).
-	longForm := append([]byte{0x30, 0x81, 0x80, 0x01, 0x01, 0xff, 0x02, 0x7b, 0x01}, make([]byte, 122)...)
-	var parsed struct {
-		IsCA    bool `asn1:"optional"`
-		PathLen *big.Int
-	}
-	if rest, err := asn1.Unmarshal(longForm, &parsed); err != nil || len(rest) != 0 || !parsed.IsCA {
-		t.Fatalf("the long-form value should be valid DER with cA TRUE: %v", err)
-	}
-	accepted := map[string]fixtureOptions{
-		"absent":           {noBasicConstraints: true},
-		"empty sequence":   {basicConstraints: []byte{0x30, 0x00}},
-		"cA FALSE written": {basicConstraints: []byte{0x30, 0x03, 0x01, 0x01, 0x00}},
-		"pathLen only":     {basicConstraints: []byte{0x30, 0x03, 0x02, 0x01, 0x05}},
-	}
-	rejected := map[string]fixtureOptions{
-		"cA TRUE":                       {basicConstraints: []byte{0x30, 0x03, 0x01, 0x01, 0xff}},
-		"cA TRUE, long-form length":     {basicConstraints: longForm},
-		"cA TRUE with pathLen":          {basicConstraints: []byte{0x30, 0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x00}},
-		"BOOLEAN of length 2":           {basicConstraints: []byte{0x30, 0x04, 0x01, 0x02, 0x00, 0xff}},
-		"unexpected first element":      {basicConstraints: []byte{0x30, 0x03, 0x04, 0x01, 0x00}},
-		"sequence shorter than value":   {basicConstraints: []byte{0x30, 0x00, 0x00}},
-		"BOOLEAN past the sequence end": {basicConstraints: []byte{0x30, 0x02, 0x01, 0x01, 0xff}},
-	}
-	for name, opt := range accepted {
-		if !solved(t, assign(t, newFixture(t, opt).in)) {
-			t.Errorf("%s: rejected", name)
+	forEachCurve(t, func(t *testing.T, curve ecc.ID) {
+		// The review's reproduction: cA TRUE in a sequence long enough to need a
+		// long-form length (a 123-byte pathLenConstraint).
+		longForm := append([]byte{0x30, 0x81, 0x80, 0x01, 0x01, 0xff, 0x02, 0x7b, 0x01}, make([]byte, 122)...)
+		var parsed struct {
+			IsCA    bool `asn1:"optional"`
+			PathLen *big.Int
 		}
-	}
-	for name, opt := range rejected {
-		if solved(t, assign(t, newFixture(t, opt).in)) {
-			t.Errorf("%s: accepted", name)
+		if rest, err := asn1.Unmarshal(longForm, &parsed); err != nil || len(rest) != 0 || !parsed.IsCA {
+			t.Fatalf("the long-form value should be valid DER with cA TRUE: %v", err)
 		}
-	}
+		accepted := map[string]fixtureOptions{
+			"absent":           {noBasicConstraints: true},
+			"empty sequence":   {basicConstraints: []byte{0x30, 0x00}},
+			"cA FALSE written": {basicConstraints: []byte{0x30, 0x03, 0x01, 0x01, 0x00}},
+			"pathLen only":     {basicConstraints: []byte{0x30, 0x03, 0x02, 0x01, 0x05}},
+		}
+		rejected := map[string]fixtureOptions{
+			"cA TRUE":                       {basicConstraints: []byte{0x30, 0x03, 0x01, 0x01, 0xff}},
+			"cA TRUE, long-form length":     {basicConstraints: longForm},
+			"cA TRUE with pathLen":          {basicConstraints: []byte{0x30, 0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x00}},
+			"BOOLEAN of length 2":           {basicConstraints: []byte{0x30, 0x04, 0x01, 0x02, 0x00, 0xff}},
+			"unexpected first element":      {basicConstraints: []byte{0x30, 0x03, 0x04, 0x01, 0x00}},
+			"sequence shorter than value":   {basicConstraints: []byte{0x30, 0x00, 0x00}},
+			"BOOLEAN past the sequence end": {basicConstraints: []byte{0x30, 0x02, 0x01, 0x01, 0xff}},
+		}
+		for name, opt := range accepted {
+			if !solvedOn(t, curve, assign(t, newFixture(t, opt).in)) {
+				t.Errorf("%s: rejected", name)
+			}
+		}
+		for name, opt := range rejected {
+			if solvedOn(t, curve, assign(t, newFixture(t, opt).in)) {
+				t.Errorf("%s: accepted", name)
+			}
+		}
+	})
 }
 
 // Assign refuses inputs the circuit cannot represent.

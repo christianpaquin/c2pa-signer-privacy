@@ -55,7 +55,7 @@ All on the same laptop ([reference machine](FEASIBILITY.md#reference-machine)); 
 | [V1 third-party](bench/results/2026-11-05-third-party.json) (#24) | The E2a statement, P-384 CA, `sigTst2`, in gnark | **79 s** | 7.5 GiB | 74% loading the proving key (CPU-bound); the proof 19.5 s |
 | [V1 on a real photo](bench/results/2026-11-06-r2-device-photo.json) (#26) | Same, on a real asset under the official lists | 133 s | 7.4 GiB | The fixture took 110 s in the same session: consistent with similar cost; the machine ran 40% slower that day |
 | [V1, key loading variants](bench/results/2026-11-06-e6/) (E6) | Same as V1 | 77 s → **25–28 s** | 7.4 → 9.2 GiB | Raw or dumped proving key, points not validated on load, behind its setup hash. Adopted as an opt-in raw path with provenance records and streamed loading: 49 s against 97 s in a slower session, 6.7 GiB |
-| [V1 on BLS12-381](bench/results/2026-11-09-e7/) (E7) | Same, ~120-bit curve (option; BN254 stays default) | 302 s; **88 s** with the raw key path | 8.5 GiB | BN254 in the same session: 72 s and 33 s; raw BLS12-381 keys parse slowly even unchecked |
+| [V1 on BLS12-381](bench/results/2026-11-09-e7/) (E7) | Same, on a ~120-bit curve (curve-level estimate; option, BN254 stays default) | 302 s; **88 s** with the raw key path | 8.5 GiB | BN254 in the same session: 72 s and 33 s; raw BLS12-381 keys parse slowly even unchecked |
 
 ## Lessons
 

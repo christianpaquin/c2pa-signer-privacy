@@ -1,0 +1,41 @@
+{
+  "schema": "c2pa-x509-zk-paired-proves/1",
+  "date": "2026-11-09",
+  "purpose": "Why BLS12-381's raw proving key parses slowly without point checks: raw against gnark's binary dump, back to back.",
+  "method": "Three c2pa-zk-gnark prove processes on the BLS12-381 key set, --pk-check none, alternating raw and dump, right after the 2026-11-09-e7 harness session; files warm from that session, cache state not otherwise controlled or recorded; timings from the CLI. Not run through the harness.",
+  "software": {
+    "git_commit": "fae4f80",
+    "curve": "bls12-381",
+    "verifying_key_sha256": "ee949443a73256b41454488ff845d9dedb1274999aece767623416f8d5bd0a37",
+    "proving_key_raw_sha256": "371bc4346206fb27a1c539f6dfaecc7b7608617c25ac5f8939464517cb083e6a",
+    "proving_key_dump_sha256": "d8f7bda85bdf2193bfcd7a29f1b033d8f72196555f884a61ee68a6b237d54026",
+    "gnark_cli_sha256": "ee9f53e04cb87d396d9be134b214f39da0f6e3c4e9f84ee10dbbcae983df067e"
+  },
+  "runs": [
+    {
+      "order": 1,
+      "format": "raw",
+      "hash_proving_key_s": 3.4,
+      "parse_proving_key_s": 43.42,
+      "load_proving_key_s": 46.82,
+      "prove_s": 29.64
+    },
+    {
+      "order": 2,
+      "format": "dump",
+      "hash_proving_key_s": 11.29,
+      "parse_proving_key_s": 4.65,
+      "load_proving_key_s": 15.94,
+      "prove_s": 27.72
+    },
+    {
+      "order": 3,
+      "format": "raw",
+      "hash_proving_key_s": 2.97,
+      "parse_proving_key_s": 42.35,
+      "load_proving_key_s": 45.32,
+      "prove_s": 27.97
+    }
+  ],
+  "summary": "Parsing the raw BLS12-381 key without point checks takes 42-43 s against 4.7 s for the dump, so the cost is in gnark's decoding of raw BLS12-381 points itself, not in validation (on BN254, the same raw parse took about 6-10 s). The cause was not established; converting coordinates to gnark's internal form (6 limbs on BLS12-381, 4 on BN254) is a plausible one."
+}

@@ -45,6 +45,10 @@ c2pa-x509-zk-statement-inputs --input signed.png --trust-list trust-list.pem --o
 
 `setup` writes the constraint system, the keys, and `keys.json` (sizes and each file's SHA-256, checked before loading). `check` draws the lookup challenge at random instead of computing it from the proof's commitment, so it tests satisfiability without a proof.
 
+### Curves (E7)
+
+BN254 is the default. `c2pa-zk-gnark setup --keys DIR --curve bls12-381` creates a BLS12-381 key set (about 120 bits of security instead of about 100); the curve is recorded in `keys.json`, and `prove`, `verify`, and `convert-pk` take it from there (`check` takes `--curve`). The anonymizer uses whichever key set it is given; the ZK signature records the curve when it is not BN254, and the verifier refuses keys for another curve. Costs: [FEASIBILITY.md](../FEASIBILITY.md#e7-bls12-381-as-an-option).
+
 ### Proving-key formats (E6)
 
 `setup` writes the proving key compressed; `c2pa-zk-gnark convert-pk --keys DIR` also writes it raw (uncompressed points) and as gnark's binary dump, after loading the compressed key with full point checks. `keys.json` records each file's hash, the gnark version that wrote it, and its source.

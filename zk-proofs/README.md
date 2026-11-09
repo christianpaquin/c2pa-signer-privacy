@@ -551,6 +551,8 @@ Decision D2, guided by the measurements from F2, E1, and E2b, cheapest first: na
 
 Decision D3: the same circuit and prover on both curves, comparing proving time, memory, and proof size against the security margin (~100 vs ~120 bits).
 
+Status: **BLS12-381 available as an option** (`c2pa-zk-gnark setup --curve bls12-381`); BN254 stays the default. Same statement and constraint count; per asset, 88 s with the raw key path (BN254: 33 s) and 302 s with full point checks (BN254: 72 s), in one session; proof 292 B, verifying key 3.2 KB, 8.5 GiB ([FEASIBILITY.md](FEASIBILITY.md#e7-bls12-381-as-an-option)).
+
 ### Goal 2: what works today
 
 #### R1. Feasibility matrix

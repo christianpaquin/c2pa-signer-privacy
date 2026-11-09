@@ -178,6 +178,11 @@ func TestUncheckedLoadingNeedsProvenance(t *testing.T) {
 		m.ProvingKeys["raw"] = r
 	})
 	refused("unknown source", func(m *manifest) { r := m.ProvingKeys["raw"]; r.Source = "downloaded"; m.ProvingKeys["raw"] = r })
+	// Valid records, but for another key: the record must describe the file loaded.
+	refused("the compressed key's record", func(m *manifest) { m.ProvingKeys["raw"] = m.ProvingKeys["compressed"] })
+	refused("the dump's record", func(m *manifest) { m.ProvingKeys["raw"] = m.ProvingKeys["dump"] })
+	refused("only the format label changed", func(m *manifest) { r := m.ProvingKeys["raw"]; r.Format = "dump"; m.ProvingKeys["raw"] = r })
+	refused("only the file name changed", func(m *manifest) { r := m.ProvingKeys["raw"]; r.File = pkFile; m.ProvingKeys["raw"] = r })
 }
 
 // A file that changes between the hashing and parsing passes is rejected,

@@ -242,7 +242,13 @@ func uncheckedAllowed(m manifest, format string) error {
 	if !ok {
 		return fmt.Errorf("keys.json has no provenance record for the %s proving key (run convert-pk, or load with --pk-check full)", format)
 	}
-	if rec.SHA256 == "" || rec.SHA256 != m.SHA256[rec.File] {
+	// The record must describe the file that will be loaded: its name,
+	// format, and hash, not those of another key.
+	file := pkFiles[format]
+	if rec.File != file || rec.Format != format {
+		return fmt.Errorf("the %s proving key's provenance record describes %s (%s), not %s", format, rec.File, rec.Format, file)
+	}
+	if rec.SHA256 == "" || rec.SHA256 != m.SHA256[file] {
 		return fmt.Errorf("the %s proving key's provenance record does not match its recorded hash", format)
 	}
 	if v := gnarkVersion(); rec.GnarkVersion != v || v == "unknown" {

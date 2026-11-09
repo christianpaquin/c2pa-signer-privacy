@@ -165,6 +165,22 @@ The proof itself takes 17.8–18.7 s (solving the witness, about 3 s of it) in e
 - **What the hash does not establish.** Stored next to the key, it detects corruption and mix-ups, not replacement by someone who can write to the key directory; and neither point checks nor a successful verification show that an attacker-supplied, well-formed key preserves zero-knowledge.
 - **Not adopted here**: `prove` still defaults to the compressed key with full checks.
 
+### The opt-in fast path (adopted)
+
+Following the review of the proposal, the raw path is available as an **opt-in** (`prove --pk-format raw --pk-check none`); the default stays the compressed key with full checks.
+
+- **Provenance.** `keys.json` records each proving-key file's format, hash, the gnark version that wrote it, and its source: local setup, or `convert-pk` from the compressed key loaded with full point checks. Loading without point checks is refused unless that record exists, matches the file, comes from such a source, and names the running gnark version; there is no silent fallback, and full checks need no record.
+- **Streaming.** Every key-directory file is read in two buffered passes: its SHA-256 is checked before any parsing, then it is parsed while the same bytes are hashed again, and the result is used only if that hash matches too and no bytes remain. A file changed between the passes, or with trailing bytes, is rejected, and no file is held whole in memory.
+
+Measured on 2026-11-09 ([records](bench/results/2026-11-09-e6-streamed/), clean commit `5ac12b2`; the machine was slower than on 2026-11-06, and drifted 9% during the session):
+
+| | Per-asset anonymization (cold prove, median of 3) | Peak RAM |
+|---|---|---|
+| Compressed, full checks (first / last) | 97.2 / 105.6 s | 6.7 GiB (7.4 GiB before streaming) |
+| **Raw, no point checks, streamed** | **49.1 s** | **6.7 GiB** (9.2 GiB before streaming) |
+
+Streaming's own cost, isolated by alternating the previous (in-memory) CLI and the streamed one on the same raw key in one session ([paired record](bench/results/2026-11-09-e6-streamed/paired-loads.json)): about 2.5 s more to load the key (one more SHA-256 pass over 2.29 GB), whole-process times within the machine's noise, and about 2.5 GiB less peak memory. Raw without checks thus halves per-asset time against the default, in the same session, at no memory cost; on 2026-11-06's faster machine state, that was 28 s against 77 s.
+
 ## E1: P-384 and SHA-384 primitives
 
 What the algorithms of the official trust list's CAs cost in a circuit, next to the P-256 and SHA-256 the current circuit uses ([E1](README.md#e1-cost-of-reality-p-384-sha-384-and-rsa-in-circuit); code and how to run it in [`experiments/e1-p384`](experiments/e1-p384/)). Both curves are measured in the same stack, gnark v0.16.4 with Groth16 on BN254, because the current circom ECDSA library is specific to P-256 and the project has no circom SHA-384: porting both would have been a substantial job, and gnark is the leading second-stack candidate for E6 anyway. Records: [2026-11-04-e1-p384-gnark](bench/results/2026-11-04-e1-p384-gnark.json) (all circuits) and [its repeat](bench/results/2026-11-04-e1-p384-gnark-repeat.json) (the two 1,500-byte CA circuits, measured twice more).

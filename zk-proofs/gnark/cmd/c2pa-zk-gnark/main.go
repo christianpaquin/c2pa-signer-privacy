@@ -17,10 +17,15 @@
 // their hashes. prove --pk-format compressed|raw|dump picks the file, and
 // --pk-check full|none whether points are validated on load (subgroup
 // checks; a dump is never validated). Every file's SHA-256 is checked
-// against keys.json before it is parsed.
+// against keys.json before it is parsed, and again as it is parsed (files
+// are streamed, never held whole in memory). Loading without point checks
+// needs the key's provenance record in keys.json (written by setup and
+// convert-pk), matching its hash and this gnark version; otherwise it is
+// refused, never silently downgraded.
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
@@ -33,6 +38,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"time"
 
 	"github.com/consensys/gnark-crypto/ecc"
@@ -60,6 +66,38 @@ type manifest struct {
 	Sizes       statement.Sizes   `json:"sizes"`
 	Constraints int               `json:"constraints"`
 	SHA256      map[string]string `json:"sha256"`
+	// How each proving-key file was produced, by format (roadmap E6).
+	// Loading a key without point checks requires its record.
+	ProvingKeys map[string]keyFile `json:"proving_keys,omitempty"`
+}
+
+// keyFile records a proving-key file's provenance: its format, hash, the
+// gnark version that wrote it (gnark does not guarantee its serialized
+// formats across versions), and its source.
+type keyFile struct {
+	File         string `json:"file"`
+	Format       string `json:"format"`
+	SHA256       string `json:"sha256"`
+	GnarkVersion string `json:"gnark_version"`
+	// "setup" (written by local setup), or "converted" from SourceSHA256,
+	// a key loaded with full point checks.
+	Source       string `json:"source"`
+	SourceSHA256 string `json:"source_sha256,omitempty"`
+}
+
+// gnarkVersion is the version of gnark this binary was built with.
+func gnarkVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, dep := range info.Deps {
+			if dep.Path == "github.com/consensys/gnark" {
+				if dep.Replace != nil {
+					return dep.Replace.Version
+				}
+				return dep.Version
+			}
+		}
+	}
+	return "unknown"
 }
 
 func main() {
@@ -154,6 +192,7 @@ func setup(dir string) error {
 		}
 		m.SHA256[name] = sum
 	}
+	m.ProvingKeys = map[string]keyFile{"compressed": {File: pkFile, Format: "compressed", SHA256: m.SHA256[pkFile], GnarkVersion: gnarkVersion(), Source: "setup"}}
 	data, _ := json.MarshalIndent(m, "", "  ")
 	fmt.Fprintf(os.Stderr, "%d constraints\n", m.Constraints)
 	return os.WriteFile(filepath.Join(dir, manifestFile), append(data, '\n'), 0o644)
@@ -194,8 +233,35 @@ func check(inputPath string) error {
 // pkFiles maps a proving-key format to its file in the key directory.
 var pkFiles = map[string]string{"compressed": pkFile, "raw": pkFile + ".raw", "dump": pkFile + ".dump"}
 
+// uncheckedAllowed reports why loading the key in this format without point
+// checks is refused, or nil: it needs a provenance record in keys.json that
+// matches the file's hash, comes from local setup or a fully checked
+// conversion, and was written by this gnark version. There is no fallback.
+func uncheckedAllowed(m manifest, format string) error {
+	rec, ok := m.ProvingKeys[format]
+	if !ok {
+		return fmt.Errorf("keys.json has no provenance record for the %s proving key (run convert-pk, or load with --pk-check full)", format)
+	}
+	// The record must describe the file that will be loaded: its name,
+	// format, and hash, not those of another key.
+	file := pkFiles[format]
+	if rec.File != file || rec.Format != format {
+		return fmt.Errorf("the %s proving key's provenance record describes %s (%s), not %s", format, rec.File, rec.Format, file)
+	}
+	if rec.SHA256 == "" || rec.SHA256 != m.SHA256[file] {
+		return fmt.Errorf("the %s proving key's provenance record does not match its recorded hash", format)
+	}
+	if v := gnarkVersion(); rec.GnarkVersion != v || v == "unknown" {
+		return fmt.Errorf("the %s proving key was written by gnark %s, this is gnark %s: convert it again, or load with --pk-check full", format, rec.GnarkVersion, v)
+	}
+	if rec.Source != "setup" && (rec.Source != "converted" || rec.SourceSHA256 == "") {
+		return fmt.Errorf("the %s proving key's source (%q) is neither local setup nor a fully checked conversion", format, rec.Source)
+	}
+	return nil
+}
+
 // loadProvingKey reads the proving key in the given format and checking
-// mode, reporting reading, hashing, and parsing separately.
+// mode. Unchecked loading needs the key's provenance record (uncheckedAllowed).
 func loadProvingKey(dir string, m manifest, format, check string) (groth16.ProvingKey, error) {
 	name, ok := pkFiles[format]
 	if !ok {
@@ -207,21 +273,22 @@ func loadProvingKey(dir string, m manifest, format, check string) (groth16.Provi
 	if format == "dump" && check == "full" {
 		return nil, fmt.Errorf("a dumped proving key cannot be validated on load: use --pk-check none")
 	}
+	if check == "none" {
+		if err := uncheckedAllowed(m, format); err != nil {
+			return nil, fmt.Errorf("refusing to load the proving key without point checks: %w", err)
+		}
+	}
 	pk := groth16.NewProvingKey(ecc.BN254)
 	err := timed("load proving key", func() error {
-		data, err := readChecked(dir, name, m, "proving key")
-		if err != nil {
-			return err
-		}
-		return timed("parse proving key", func() error {
+		return loadChecked(dir, name, m, "proving key", func(r io.Reader) error {
 			switch {
 			case format == "dump":
-				return pk.(gnarkio.BinaryDumper).ReadDump(bytes.NewReader(data))
+				return pk.(gnarkio.BinaryDumper).ReadDump(r)
 			case check == "none":
-				_, err := pk.(gnarkio.UnsafeReaderFrom).UnsafeReadFrom(bytes.NewReader(data))
+				_, err := pk.(gnarkio.UnsafeReaderFrom).UnsafeReadFrom(r)
 				return err
 			default:
-				_, err := pk.ReadFrom(bytes.NewReader(data))
+				_, err := pk.ReadFrom(r)
 				return err
 			}
 		})
@@ -230,24 +297,38 @@ func loadProvingKey(dir string, m manifest, format, check string) (groth16.Provi
 }
 
 // convertPK writes the proving key raw and as a binary dump, next to the
-// compressed key setup wrote, and records their hashes in keys.json.
+// compressed key setup wrote, after loading that key with full point
+// checks, and records each file's provenance in keys.json.
 func convertPK(dir string) error {
 	m, err := readManifest(dir)
 	if err != nil {
 		return err
 	}
+	source, ok := m.SHA256[pkFile]
+	if !ok {
+		return fmt.Errorf("keys.json has no hash for %s", pkFile)
+	}
 	pk, err := loadProvingKey(dir, m, "compressed", "full")
 	if err != nil {
 		return err
 	}
-	writers := map[string]io.WriterTo{
-		pkFiles["raw"]:  writerFunc(func(w io.Writer) (int64, error) { return pk.WriteRawTo(w) }),
-		pkFiles["dump"]: writerFunc(func(w io.Writer) (int64, error) { return 0, pk.(gnarkio.BinaryDumper).WriteDump(w) }),
+	if m.ProvingKeys == nil {
+		m.ProvingKeys = map[string]keyFile{}
 	}
-	for name, w := range writers {
+	if _, ok := m.ProvingKeys["compressed"]; !ok {
+		// Keys from a setup that predates provenance records: setup recorded the hash.
+		m.ProvingKeys["compressed"] = keyFile{File: pkFile, Format: "compressed", SHA256: source, GnarkVersion: gnarkVersion(), Source: "setup"}
+	}
+	writers := map[string]io.WriterTo{
+		"raw":  writerFunc(func(w io.Writer) (int64, error) { return pk.WriteRawTo(w) }),
+		"dump": writerFunc(func(w io.Writer) (int64, error) { return 0, pk.(gnarkio.BinaryDumper).WriteDump(w) }),
+	}
+	for format, w := range writers {
+		name := pkFiles[format]
 		if err := timed("write "+name, func() error {
 			sum, err := writeFile(filepath.Join(dir, name), w)
 			m.SHA256[name] = sum
+			m.ProvingKeys[format] = keyFile{File: name, Format: format, SHA256: sum, GnarkVersion: gnarkVersion(), Source: "converted", SourceSHA256: source}
 			return err
 		}); err != nil {
 			return err
@@ -340,40 +421,76 @@ func readManifest(dir string) (manifest, error) {
 
 // readFile loads a key-directory file after checking its hash against keys.json.
 func readFile(dir, name string, m manifest, into io.ReaderFrom) error {
-	data, err := readChecked(dir, name, m, "")
+	return loadChecked(dir, name, m, "", func(r io.Reader) error {
+		_, err := into.ReadFrom(r)
+		return err
+	})
+}
+
+// streamBuffer bounds the memory used to read key-directory files.
+const streamBuffer = 4 << 20
+
+// betweenPasses is called between the hashing and parsing passes (tests).
+var betweenPasses = func(path string) {}
+
+// loadChecked streams a key-directory file twice, so it is never held whole
+// in memory: first through SHA-256, checked against keys.json before any
+// parsing; then through the parser, buffered, while the same bytes are hashed
+// again. The result is used only if that second hash matches too and the
+// parser consumed the whole file, so a file that changed between the passes,
+// or carries bytes the parser did not read, is rejected. With a label, the
+// two passes are timed as "hash <label>" and "parse <label>".
+func loadChecked(dir, name string, m manifest, label string, parse func(io.Reader) error) error {
+	expected, ok := m.SHA256[name]
+	if !ok {
+		return fmt.Errorf("keys.json has no hash for %s (run convert-pk?)", name)
+	}
+	path := filepath.Join(dir, name)
+	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
-	_, err = into.ReadFrom(bytes.NewReader(data))
-	return err
-}
-
-// readChecked reads a key-directory file and checks its SHA-256 against
-// keys.json; with a label, it reports reading and hashing times.
-func readChecked(dir, name string, m manifest, label string) ([]byte, error) {
-	expected, ok := m.SHA256[name]
-	if !ok {
-		return nil, fmt.Errorf("keys.json has no hash for %s (run convert-pk?)", name)
+	defer f.Close()
+	step := func(what string, fn func() error) error {
+		if label == "" {
+			return fn()
+		}
+		return timed(what+" "+label, fn)
 	}
-	var data []byte
-	read := func() (err error) { data, err = os.ReadFile(filepath.Join(dir, name)); return }
-	hash := func() error {
-		sum := sha256.Sum256(data)
-		if hex.EncodeToString(sum[:]) != expected {
+	if err := step("hash", func() error {
+		h := sha256.New()
+		if _, err := io.Copy(h, bufio.NewReaderSize(f, streamBuffer)); err != nil {
+			return err
+		}
+		if hex.EncodeToString(h.Sum(nil)) != expected {
 			return fmt.Errorf("%s does not match keys.json", name)
 		}
 		return nil
+	}); err != nil {
+		return err
 	}
-	if label == "" {
-		if err := read(); err != nil {
-			return nil, err
+	betweenPasses(path)
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	return step("parse", func() error {
+		h := sha256.New()
+		r := io.TeeReader(bufio.NewReaderSize(f, streamBuffer), h)
+		if err := parse(r); err != nil {
+			return err
 		}
-		return data, hash()
-	}
-	if err := timed("read "+label, read); err != nil {
-		return nil, err
-	}
-	return data, timed("hash "+label, hash)
+		trailing, err := io.Copy(io.Discard, r)
+		if err != nil {
+			return err
+		}
+		if hex.EncodeToString(h.Sum(nil)) != expected {
+			return fmt.Errorf("%s changed while it was being loaded", name)
+		}
+		if trailing != 0 {
+			return fmt.Errorf("%s has %d bytes after its contents", name, trailing)
+		}
+		return nil
+	})
 }
 
 func writeFile(path string, w io.WriterTo) (string, error) {

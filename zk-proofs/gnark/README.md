@@ -45,6 +45,17 @@ c2pa-x509-zk-statement-inputs --input signed.png --trust-list trust-list.pem --o
 
 `setup` writes the constraint system, the keys, and `keys.json` (sizes and each file's SHA-256, checked before loading). `check` draws the lookup challenge at random instead of computing it from the proof's commitment, so it tests satisfiability without a proof.
 
+### Proving-key formats (E6)
+
+`setup` writes the proving key compressed; `c2pa-zk-gnark convert-pk --keys DIR` also writes it raw (uncompressed points) and as gnark's binary dump, after loading the compressed key with full point checks. `keys.json` records each file's hash, the gnark version that wrote it, and its source.
+
+```bash
+../target/c2pa-zk-gnark prove --keys keys/ --input inputs.json --proof proof.bin                                # default: compressed, full checks
+../target/c2pa-zk-gnark prove --keys keys/ --input inputs.json --proof proof.bin --pk-format raw --pk-check none   # opt-in fast path
+```
+
+Loading without point checks is refused unless the key's provenance record matches the file and the running gnark version. Every file is streamed twice through a bounded buffer, hashed before parsing and again while parsing; a file that changes in between, or has trailing bytes, is rejected. Measurements and the trade-off: [FEASIBILITY.md](../FEASIBILITY.md#e6-proving-key-loading-in-gnark). The dump is not recommended beyond a disposable local cache.
+
 ## Tests
 
 ```bash

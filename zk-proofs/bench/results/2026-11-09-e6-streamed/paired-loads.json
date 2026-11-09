@@ -1,0 +1,99 @@
+{
+  "schema": "c2pa-x509-zk-paired-proves/1",
+  "date": "2026-11-09",
+  "purpose": "The cost of streaming the proving key (two buffered passes: hash, then parse while hashing again) against reading it whole into memory, for the raw key loaded without point checks, isolated from the machine's drift between days.",
+  "method": "Eight prove processes alternating two CLIs on the same raw key, keys.json, and inputs (mirror fixture): 'inmemory', built from commit 55fd869 (reads the whole file, hashes it, parses it), and 'streamed', built from 5ac12b2. Both files were read once beforehand (warm); the cache state was not otherwise controlled or recorded. Wall time and peak RSS from /usr/bin/time; steps from the CLIs' own timings. Not run through the harness.",
+  "software": {
+    "inmemory_cli_sha256": "62a7c10298bace28237e78e40291061c7374bef75fbc7c08af4165cf06632b57",
+    "streamed_cli_sha256": "d474f4dc49905c96dcc5691bdb4d62a567ad3d2fe4f0c031dcf60d58cd0b994e",
+    "proving_key_raw_sha256": "218d1aff9352d97c3aa19a21240367d431c77e39fda4992a291d7f205bede80f",
+    "inputs_json_sha256": "3dc6beb6c9d4ac275db72790e16ab90646d7951444a04cc7581a12679af52771"
+  },
+  "runs": [
+    {
+      "pair": 1,
+      "loader": "inmemory",
+      "wall_s": 42.87,
+      "peak_rss_gib": 8.73,
+      "load_proving_key_s": 13.22,
+      "hash_proving_key_s": 2.14,
+      "parse_proving_key_s": 9.04,
+      "prove_s": 25.78,
+      "read_proving_key_s": 2.04
+    },
+    {
+      "pair": 1,
+      "loader": "streamed",
+      "wall_s": 40.66,
+      "peak_rss_gib": 6.57,
+      "load_proving_key_s": 14.38,
+      "hash_proving_key_s": 2.74,
+      "parse_proving_key_s": 11.63,
+      "prove_s": 23.46
+    },
+    {
+      "pair": 2,
+      "loader": "inmemory",
+      "wall_s": 41.33,
+      "peak_rss_gib": 9.18,
+      "load_proving_key_s": 11.85,
+      "hash_proving_key_s": 2.25,
+      "parse_proving_key_s": 8.11,
+      "prove_s": 26.74,
+      "read_proving_key_s": 1.48
+    },
+    {
+      "pair": 2,
+      "loader": "streamed",
+      "wall_s": 42.88,
+      "peak_rss_gib": 6.71,
+      "load_proving_key_s": 14.77,
+      "hash_proving_key_s": 3.05,
+      "parse_proving_key_s": 11.72,
+      "prove_s": 25.25
+    },
+    {
+      "pair": 3,
+      "loader": "inmemory",
+      "wall_s": 43.19,
+      "peak_rss_gib": 9.17,
+      "load_proving_key_s": 12.07,
+      "hash_proving_key_s": 1.96,
+      "parse_proving_key_s": 8.84,
+      "prove_s": 27.38,
+      "read_proving_key_s": 1.27
+    },
+    {
+      "pair": 3,
+      "loader": "streamed",
+      "wall_s": 42.64,
+      "peak_rss_gib": 6.54,
+      "load_proving_key_s": 15.39,
+      "hash_proving_key_s": 2.3,
+      "parse_proving_key_s": 13.09,
+      "prove_s": 24.1
+    },
+    {
+      "pair": 4,
+      "loader": "inmemory",
+      "wall_s": 36.16,
+      "peak_rss_gib": 9.17,
+      "load_proving_key_s": 11.01,
+      "hash_proving_key_s": 1.99,
+      "parse_proving_key_s": 7.78,
+      "prove_s": 22.08,
+      "read_proving_key_s": 1.23
+    },
+    {
+      "pair": 4,
+      "loader": "streamed",
+      "wall_s": 40.01,
+      "peak_rss_gib": 6.59,
+      "load_proving_key_s": 13.49,
+      "hash_proving_key_s": 2.38,
+      "parse_proving_key_s": 11.11,
+      "prove_s": 23.61
+    }
+  ],
+  "summary": "Streaming adds about 2.5 s to loading the raw key (11.0-13.2 s against 13.5-15.4 s; about one more SHA-256 pass over 2.29 GB) and lowers peak memory by about 2.5 GiB (8.7-9.2 GiB against 6.5-6.7 GiB); whole-process times overlap within the machine's noise (36.2-43.2 s against 40.0-42.9 s)."
+}

@@ -3,13 +3,21 @@
 //
 //	c2pa-zk-gnark setup  --keys DIR
 //	c2pa-zk-gnark check  --input inputs.json
-//	c2pa-zk-gnark prove  --keys DIR --input inputs.json --proof proof.bin
+//	c2pa-zk-gnark prove  --keys DIR --input inputs.json --proof proof.bin [--pk-format F --pk-check C]
+//	c2pa-zk-gnark convert-pk --keys DIR
 //	c2pa-zk-gnark verify --keys DIR --public public.json --proof proof.bin
 //
 // inputs.json holds statement.Inputs (byte fields in base64); public.json
 // holds statement.Public. Both are produced from a signed asset by the Rust
 // tools (c2pa-x509-zk-statement-inputs). setup writes the constraint system,
 // both keys, and keys.json (the sizes and each file's SHA-256) into DIR.
+//
+// Proving-key formats (roadmap E6): setup writes the key compressed;
+// convert-pk adds it raw (uncompressed points) and as a binary dump, with
+// their hashes. prove --pk-format compressed|raw|dump picks the file, and
+// --pk-check full|none whether points are validated on load (subgroup
+// checks; a dump is never validated). Every file's SHA-256 is checked
+// against keys.json before it is parsed.
 package main
 
 import (
@@ -34,6 +42,7 @@ import (
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs"
 	"github.com/consensys/gnark/frontend/cs/r1cs"
+	gnarkio "github.com/consensys/gnark/io"
 
 	"c2pa-zk-gnark/statement"
 )
@@ -62,6 +71,8 @@ func main() {
 	input := fs.String("input", "", "prover inputs (JSON)")
 	public := fs.String("public", "", "public inputs (JSON)")
 	proofPath := fs.String("proof", "", "proof file")
+	pkFormat := fs.String("pk-format", "compressed", "proving-key file: compressed, raw, or dump")
+	pkCheck := fs.String("pk-check", "full", "validate proving-key points on load: full or none")
 	_ = fs.Parse(os.Args[2:])
 
 	var err error
@@ -71,7 +82,9 @@ func main() {
 	case "check":
 		err = check(require(*input, "--input"))
 	case "prove":
-		err = prove(require(*keys, "--keys"), require(*input, "--input"), require(*proofPath, "--proof"))
+		err = prove(require(*keys, "--keys"), require(*input, "--input"), require(*proofPath, "--proof"), *pkFormat, *pkCheck)
+	case "convert-pk":
+		err = convertPK(require(*keys, "--keys"))
 	case "verify":
 		err = verify(require(*keys, "--keys"), require(*public, "--public"), require(*proofPath, "--proof"))
 		if errors.Is(err, errInvalid) {
@@ -90,7 +103,7 @@ func main() {
 var errInvalid = errors.New("invalid proof")
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: c2pa-zk-gnark setup|check|prove|verify (see the source header)")
+	fmt.Fprintln(os.Stderr, "usage: c2pa-zk-gnark setup|check|prove|verify|convert-pk (see the source header)")
 	os.Exit(2)
 }
 
@@ -178,7 +191,77 @@ func check(inputPath string) error {
 	return nil
 }
 
-func prove(dir, inputPath, proofPath string) error {
+// pkFiles maps a proving-key format to its file in the key directory.
+var pkFiles = map[string]string{"compressed": pkFile, "raw": pkFile + ".raw", "dump": pkFile + ".dump"}
+
+// loadProvingKey reads the proving key in the given format and checking
+// mode, reporting reading, hashing, and parsing separately.
+func loadProvingKey(dir string, m manifest, format, check string) (groth16.ProvingKey, error) {
+	name, ok := pkFiles[format]
+	if !ok {
+		return nil, fmt.Errorf("unknown --pk-format %q", format)
+	}
+	if check != "full" && check != "none" {
+		return nil, fmt.Errorf("unknown --pk-check %q", check)
+	}
+	if format == "dump" && check == "full" {
+		return nil, fmt.Errorf("a dumped proving key cannot be validated on load: use --pk-check none")
+	}
+	pk := groth16.NewProvingKey(ecc.BN254)
+	err := timed("load proving key", func() error {
+		data, err := readChecked(dir, name, m, "proving key")
+		if err != nil {
+			return err
+		}
+		return timed("parse proving key", func() error {
+			switch {
+			case format == "dump":
+				return pk.(gnarkio.BinaryDumper).ReadDump(bytes.NewReader(data))
+			case check == "none":
+				_, err := pk.(gnarkio.UnsafeReaderFrom).UnsafeReadFrom(bytes.NewReader(data))
+				return err
+			default:
+				_, err := pk.ReadFrom(bytes.NewReader(data))
+				return err
+			}
+		})
+	})
+	return pk, err
+}
+
+// convertPK writes the proving key raw and as a binary dump, next to the
+// compressed key setup wrote, and records their hashes in keys.json.
+func convertPK(dir string) error {
+	m, err := readManifest(dir)
+	if err != nil {
+		return err
+	}
+	pk, err := loadProvingKey(dir, m, "compressed", "full")
+	if err != nil {
+		return err
+	}
+	writers := map[string]io.WriterTo{
+		pkFiles["raw"]:  writerFunc(func(w io.Writer) (int64, error) { return pk.WriteRawTo(w) }),
+		pkFiles["dump"]: writerFunc(func(w io.Writer) (int64, error) { return 0, pk.(gnarkio.BinaryDumper).WriteDump(w) }),
+	}
+	for name, w := range writers {
+		if err := timed("write "+name, func() error {
+			sum, err := writeFile(filepath.Join(dir, name), w)
+			m.SHA256[name] = sum
+			return err
+		}); err != nil {
+			return err
+		}
+	}
+	data, _ := json.MarshalIndent(m, "", "  ")
+	return os.WriteFile(filepath.Join(dir, manifestFile), append(data, '\n'), 0o644)
+}
+
+type writerFunc func(io.Writer) (int64, error)
+
+func (f writerFunc) WriteTo(w io.Writer) (int64, error) { return f(w) }
+
+func prove(dir, inputPath, proofPath, pkFormat, pkCheck string) error {
 	m, err := readManifest(dir)
 	if err != nil {
 		return err
@@ -192,11 +275,11 @@ func prove(dir, inputPath, proofPath string) error {
 		return err
 	}
 	ccs := groth16.NewCS(ecc.BN254)
-	pk := groth16.NewProvingKey(ecc.BN254)
 	if err := timed("load constraint system", func() error { return readFile(dir, ccsFile, m, ccs) }); err != nil {
 		return err
 	}
-	if err := timed("load proving key", func() error { return readFile(dir, pkFile, m, pk) }); err != nil {
+	pk, err := loadProvingKey(dir, m, pkFormat, pkCheck)
+	if err != nil {
 		return err
 	}
 	w, err := frontend.NewWitness(assignment, ecc.BN254.ScalarField())
@@ -257,16 +340,40 @@ func readManifest(dir string) (manifest, error) {
 
 // readFile loads a key-directory file after checking its hash against keys.json.
 func readFile(dir, name string, m manifest, into io.ReaderFrom) error {
-	data, err := os.ReadFile(filepath.Join(dir, name))
+	data, err := readChecked(dir, name, m, "")
 	if err != nil {
 		return err
 	}
-	sum := sha256.Sum256(data)
-	if hex.EncodeToString(sum[:]) != m.SHA256[name] {
-		return fmt.Errorf("%s does not match keys.json", name)
-	}
 	_, err = into.ReadFrom(bytes.NewReader(data))
 	return err
+}
+
+// readChecked reads a key-directory file and checks its SHA-256 against
+// keys.json; with a label, it reports reading and hashing times.
+func readChecked(dir, name string, m manifest, label string) ([]byte, error) {
+	expected, ok := m.SHA256[name]
+	if !ok {
+		return nil, fmt.Errorf("keys.json has no hash for %s (run convert-pk?)", name)
+	}
+	var data []byte
+	read := func() (err error) { data, err = os.ReadFile(filepath.Join(dir, name)); return }
+	hash := func() error {
+		sum := sha256.Sum256(data)
+		if hex.EncodeToString(sum[:]) != expected {
+			return fmt.Errorf("%s does not match keys.json", name)
+		}
+		return nil
+	}
+	if label == "" {
+		if err := read(); err != nil {
+			return nil, err
+		}
+		return data, hash()
+	}
+	if err := timed("read "+label, read); err != nil {
+		return nil, err
+	}
+	return data, timed("hash "+label, hash)
 }
 
 func writeFile(path string, w io.WriterTo) (string, error) {

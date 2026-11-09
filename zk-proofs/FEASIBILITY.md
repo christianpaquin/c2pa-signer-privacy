@@ -146,17 +146,24 @@ The proof itself takes 17.8–18.7 s (solving the witness, about 3 s of it) in e
 
 ### Observations
 
-- **Decompressing points and checking G2 subgroups each cost about 24 s**; skipping both brings per-asset anonymization from ~77 s to 25–28 s, **under the 30 s on-device target on time** (memory, at 9.2 GiB, remains far from its 2 GB target).
+- **Decompressing points and checking G2 subgroups each cost about 24 s**; skipping both brings per-asset anonymization from ~77 s to 25–28 s, **under 30 s on the reference laptop**. That is not phone performance, and memory (9.2 GiB here, 6.3 GiB with streamed loading) remains far above the device target of 2 GB: the result supports laptop- or server-side anonymization, not mobile feasibility.
 - **What is skipped.** In gnark, validating a raw point is the subgroup check, which includes the on-curve check; with checks off, raw points are taken as written (only their coordinates must be canonical field elements). Compressed points are on the curve by construction, so with checks off only G2's subgroup check is skipped. A dump is not validated at all, and its format is gnark-internal: it is raw memory, starting with a marker that detects a dump written on a different architecture (byte order) but carrying no version, so a dump should be regenerated whenever gnark is upgraded.
 - **Peak memory rises with the larger files** (9.2 against 7.4 GiB) because the CLI reads the whole key into memory to hash it before parsing; hashing while streaming would remove most of that increase.
 - **The same trade-off as for V0's key** ([Proving-key loading](#proving-key-loading)): for a key written by local setup whose hash matches `keys.json`, the point checks add nothing; the hash, stored next to the key, detects corruption and mix-ups, not replacement by someone who can write to the key directory; and no point check would stop a malicious but well-formed key, which could weaken zero-knowledge.
 
 ### Proposal (for decision)
 
-- **Recommended: raw keys loaded without point checks, behind the hash recorded at setup** (28.2 s per asset). It uses gnark's documented serialization, so keys survive gnark upgrades, and costs 3.6 s more than a dump.
-- **Fastest: the dump** (24.6 s), if the gnark version is pinned with the keys.
-- **Either way**, with the guardrails already set for the V0 key: record the format (and for a dump, the gnark version) in `keys.json`; keep full validation (compressed or raw, checks on) whenever a key's provenance is not a local setup with a recorded hash; leave verifying-key loading unchanged; and hash while streaming, to keep peak memory at 7.4 GiB.
-- **Not adopted yet**: `prove` still defaults to the compressed key with full checks.
+- **Recommended: raw keys loaded without point checks, behind the hash recorded at setup** (28.2 s per asset), adopted first as an opt-in path. Raw is preferred because it goes through gnark's supported serialization API, not because it is guaranteed stable: gnark states that its serialized formats may change between versions, so raw keys, like dumps, must record the gnark version that wrote them.
+- **The dump is not recommended as a storage format**: it saves 3.6 s but is a native memory image, tied to the architecture and the gnark version; at most an explicitly experimental, disposable local cache.
+- **Adoption guardrails:**
+  - convert from a fully validated key of trusted provenance (local setup), keeping the existing verifying key;
+  - verify the hash before any unchecked parsing, and make sure the file cannot change between hashing and parsing;
+  - record versioned metadata (format, producing gnark version, the source key's hash) and handle migration explicitly;
+  - never fall back silently to unchecked loading when provenance or metadata is missing: refuse instead;
+  - leave verifying-key loading, proof verification, and the anonymizer's check of its own proof unchanged;
+  - stream the hash and parse through a bounded buffer: an exploratory single run in review loaded, proved, and verified with a raw key at 6.30 GiB peak (against 9.18 GiB reading the whole file), in 27.3 s against 30.4 s.
+- **What the hash does not establish.** Stored next to the key, it detects corruption and mix-ups, not replacement by someone who can write to the key directory; and neither point checks nor a successful verification show that an attacker-supplied, well-formed key preserves zero-knowledge.
+- **Not adopted here**: `prove` still defaults to the compressed key with full checks.
 
 ## E1: P-384 and SHA-384 primitives
 

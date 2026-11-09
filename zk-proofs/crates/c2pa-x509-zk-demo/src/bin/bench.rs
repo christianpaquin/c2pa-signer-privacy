@@ -137,6 +137,9 @@ enum Cmd {
         /// Third-party only: validate the proving key's points on load (full, none)
         #[arg(long, default_value = "full")]
         pk_check: String,
+        /// Third-party only: the curve for new keys (bn254, bls12-381); with --keys, the keys' own curve applies
+        #[arg(long, default_value = "bn254", value_parser = ["bn254", "bls12-381"])]
+        curve: String,
     },
     /// Measure loading the proving key in each encoding, loader, and level of checking
     PkLoad {
@@ -187,7 +190,7 @@ enum Cmd {
 
 fn main() -> Result<()> {
     match Args::parse().command {
-        Cmd::Run { work_dir, circuits_dir, reuse_build, keep, out, proving_key, variant, gnark, asset, trust_list, tsa_trust_list, keys, pk_format, pk_check } => {
+        Cmd::Run { work_dir, circuits_dir, reuse_build, keep, out, proving_key, variant, gnark, asset, trust_list, tsa_trust_list, keys, pk_format, pk_check, curve } => {
             if variant != "third-party" && (asset.is_some() || keys.is_some()) {
                 bail!("--asset and --keys apply to --variant third-party");
             }
@@ -198,7 +201,7 @@ fn main() -> Result<()> {
                 if keys.is_none() && key_loading.format != "compressed" {
                     bail!("--pk-format {} needs --keys with converted keys (c2pa-zk-gnark convert-pk)", key_loading.format);
                 }
-                Some(ThirdParty { gnark: std::fs::canonicalize(&gnark)?, external, keys, key_loading })
+                Some(ThirdParty { gnark: std::fs::canonicalize(&gnark)?, external, keys, key_loading, curve })
             } else {
                 None
             };
@@ -583,6 +586,7 @@ struct ThirdParty {
     external: Option<third_party::External>,
     keys: Option<PathBuf>,
     key_loading: third_party::KeyLoading,
+    curve: String,
 }
 
 /// `third_party`: measure the third-party variant instead of V0.
@@ -609,7 +613,7 @@ fn run(
     // Captured before any phase runs, so later edits to the tree are not attributed to this run.
     let environment = environment(&zk_root);
     let record = match &third_party {
-        Some(tp) => third_party::measure(&exe, &zk_root, &work_dir, &tp.gnark, environment, tp.external.as_ref(), tp.keys.as_deref(), tp.key_loading)?,
+        Some(tp) => third_party::measure(&exe, &zk_root, &work_dir, &tp.gnark, environment, tp.external.as_ref(), tp.keys.as_deref(), tp.key_loading, &tp.curve)?,
         None => measure(&exe, &zk_root, &work_dir, &circuits_dir, reuse_build, environment, proving_key)?,
     };
 

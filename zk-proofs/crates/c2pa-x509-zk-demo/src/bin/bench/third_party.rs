@@ -26,7 +26,7 @@ use std::process::{Command, Stdio};
 use c2pa_x509_zk_demo::jumbf::{active_manifest, manifest_store};
 use c2pa_x509_zk_demo::original_signature::OriginalSignature;
 use c2pa_x509_zk_demo::third_party::{check_claim, replace_signature, statement_inputs};
-use c2pa_x509_zk_demo::zk_signature::{ZkSignature, PROOF_LEN};
+use c2pa_x509_zk_demo::zk_signature::{proof_len, ZkSignature, DEFAULT_CURVE};
 use c2pa_x509_zk_demo::{issuing_path_for, file_sha256, TrustList};
 
 use super::pk_load::{cache_state, evict, resident_fraction};
@@ -149,18 +149,20 @@ pub fn phase(name: &str, work_dir: &Path, zk_root: &Path) -> Result<()> {
             let inputs = timed(&mut steps, "build_inputs", || statement_inputs(&signed, &trust))?;
             let original = OriginalSignature::from_manifest(manifest.clone())?;
             let chain = issuing_path_for(original.signer_certificate()?, &original.x5chain[1..], &trust, inputs.public.time)?;
-            let vk_sha256 = keys_manifest(&paths.keys)?["sha256"]["statement.vk"].as_str().unwrap_or_default().to_string();
+            let keys = keys_manifest(&paths.keys)?;
+            let vk_sha256 = keys["sha256"]["statement.vk"].as_str().unwrap_or_default().to_string();
+            let curve = keys["curve"].as_str().unwrap_or(DEFAULT_CURVE).to_string();
             let token = original.time_stamp.as_ref().ok_or_else(|| anyhow!("no time stamp"))?.token.clone();
             let size = manifest.cose_sign1.len();
             let spare = timed(&mut steps, "check_size", || {
-                let signature = ZkSignature { issuing_chain: chain.clone(), vk_sha256: vk_sha256.clone(), time_stamp_token: token.clone(), proof: vec![0; PROOF_LEN] };
+                let signature = ZkSignature { issuing_chain: chain.clone(), vk_sha256: vk_sha256.clone(), curve: curve.clone(), time_stamp_token: token.clone(), proof: vec![0; proof_len(&curve)?] };
                 signature.encode_exact(size)?;
                 Ok(size - signature.encode(0, 0).len())
             })?;
             timed(&mut steps, "write_inputs", || {
                 std::fs::write(work_dir.join("inputs.json"), serde_json::to_vec(&inputs)?)?;
                 std::fs::write(work_dir.join("public.json"), serde_json::to_vec(&inputs.public)?)?;
-                let context = json!({ "issuing_chain": chain.iter().map(|c| super::b64(c)).collect::<Vec<_>>(), "vk_sha256": vk_sha256, "token": super::b64(&token) });
+                let context = json!({ "issuing_chain": chain.iter().map(|c| super::b64(c)).collect::<Vec<_>>(), "vk_sha256": vk_sha256, "curve": curve, "token": super::b64(&token) });
                 Ok(std::fs::write(work_dir.join("context.json"), serde_json::to_vec(&context)?)?)
             })?;
             let tbs_len = original.signer_certificate()?.get(6..8).map(|b| 4 + (b[0] as usize) * 256 + b[1] as usize).unwrap_or(0);
@@ -185,6 +187,7 @@ pub fn phase(name: &str, work_dir: &Path, zk_root: &Path) -> Result<()> {
                 let signature = ZkSignature {
                     issuing_chain: context["issuing_chain"].as_array().ok_or_else(|| anyhow!("no chain"))?.iter().map(decode).collect::<Result<_>>()?,
                     vk_sha256: context["vk_sha256"].as_str().unwrap_or_default().to_string(),
+                    curve: context["curve"].as_str().unwrap_or(DEFAULT_CURVE).to_string(),
                     time_stamp_token: decode(&context["token"])?,
                     proof: proof.clone(),
                 };
@@ -365,6 +368,7 @@ pub fn measure(
     external: Option<&External>,
     keys: Option<&Path>,
     key_loading: KeyLoading,
+    curve: &str,
 ) -> Result<Value> {
     let files = key_loading.prover_files();
     let reps = PROVE_REPS;
@@ -402,7 +406,7 @@ pub fn measure(
     if keys_given(work_dir, &keys) {
         phases.push(json!({ "name": "setup", "category": "one-time", "skipped": "reused existing keys" }));
     } else {
-        phases.push(gnark_phase("setup", "one-time", &mut gnark_cmd(&["setup".as_ref(), "--keys".as_ref(), keys.as_os_str()]))?);
+        phases.push(gnark_phase("setup", "one-time", &mut gnark_cmd(&["setup".as_ref(), "--keys".as_ref(), keys.as_os_str(), "--curve".as_ref(), curve.as_ref()]))?);
     }
     run_phase(&mut phases, "prepare", "anonymization", &mut phase_cmd("tp-prepare"))?;
 
@@ -445,7 +449,7 @@ pub fn measure(
             "time_stamp": "sigTst2, imprint bound in the circuit, token verified off-circuit",
             "proof_system": "Groth16 (gnark v0.16.4, native Go witness solving, one BSB22 commitment)",
             "proving_key": { "format": key_loading.format, "point_checks": key_loading.check, "file_sha256_checked": true },
-            "curve": "BN254",
+            "curve": manifest["curve"].as_str().unwrap_or(DEFAULT_CURVE),
             "circuit": "gnark/statement (third-party/1)",
         },
         "statement": STATEMENT,

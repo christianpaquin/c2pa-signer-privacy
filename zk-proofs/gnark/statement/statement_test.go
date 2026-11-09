@@ -23,31 +23,72 @@ import (
 // Smaller limits than the defaults keep the tests fast; the fixtures fit.
 var testSizes = Sizes{MaxProtected: 1536, MaxClaim: 512, MaxTBS: 768, MaxExtensions: 8, MaxEKUs: 4}
 
-var (
-	compileOnce sync.Once
-	compiled    constraint.ConstraintSystem
-	compileErr  error
-)
-
-func testCircuit(t *testing.T) constraint.ConstraintSystem {
-	t.Helper()
-	compileOnce.Do(func() {
-		compiled, compileErr = frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, NewCircuit(testSizes))
-	})
-	if compileErr != nil {
-		t.Fatal(compileErr)
-	}
-	return compiled
+// compiledCircuit is the statement compiled at test sizes for one curve, once.
+type compiledCircuit struct {
+	once sync.Once
+	ccs  constraint.ConstraintSystem
+	err  error
 }
 
-// solved reports whether the compiled constraint system accepts the assignment.
-func solved(t *testing.T, c *Circuit) bool {
+var compiled = map[ecc.ID]*compiledCircuit{ecc.BN254: {}, ecc.BLS12_381: {}}
+
+func testCircuitOn(t *testing.T, curve ecc.ID) constraint.ConstraintSystem {
 	t.Helper()
-	w, err := frontend.NewWitness(c, ecc.BN254.ScalarField())
+	c := compiled[curve]
+	c.once.Do(func() {
+		c.ccs, c.err = frontend.Compile(curve.ScalarField(), r1cs.NewBuilder, NewCircuit(testSizes))
+	})
+	if c.err != nil {
+		t.Fatal(c.err)
+	}
+	return c.ccs
+}
+
+func testCircuit(t *testing.T) constraint.ConstraintSystem { return testCircuitOn(t, ecc.BN254) }
+
+// solvedOn reports whether the statement compiled for the curve accepts the assignment.
+func solvedOn(t *testing.T, curve ecc.ID, c *Circuit) bool {
+	t.Helper()
+	w, err := frontend.NewWitness(c, curve.ScalarField())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return testCircuit(t).IsSolved(w) == nil
+	return testCircuitOn(t, curve).IsSolved(w) == nil
+}
+
+// solved reports whether the compiled constraint system (BN254) accepts the assignment.
+func solved(t *testing.T, c *Circuit) bool { t.Helper(); return solvedOn(t, ecc.BN254, c) }
+
+// The statement over BLS12-381 (roadmap E7): the circuit is the same, compiled
+// for another scalar field; valid statements are accepted and forgeries
+// rejected as on BN254.
+func TestStatementOnBLS12381(t *testing.T) {
+	for _, claimLen := range []int{377, 200} {
+		if !solvedOn(t, ecc.BLS12_381, assign(t, newFixture(t, fixtureOptions{claimLen: claimLen}).in)) {
+			t.Fatalf("valid statement rejected (claim %d bytes)", claimLen)
+		}
+	}
+	t.Logf("%d constraints at test sizes", testCircuitOn(t, ecc.BLS12_381).GetNbConstraints())
+	f := newFixture(t, fixtureOptions{})
+	for name, tamper := range map[string]func(in *Inputs){
+		"claim byte": func(in *Inputs) { in.Claim[100] ^= 1 },
+		"imprint":    func(in *Inputs) { in.Imprint[0] ^= 1 },
+		"time":       func(in *Inputs) { in.Time = f.notAfter.Unix() + 1 },
+		"another CA": func(in *Inputs) { in.IssuerCert = newFixture(t, fixtureOptions{}).in.IssuerCert },
+	} {
+		in := f.in
+		in.Claim = append([]byte{}, f.in.Claim...)
+		in.Imprint = append([]byte{}, f.in.Imprint...)
+		tamper(&in)
+		if solvedOn(t, ecc.BLS12_381, assign(t, in)) {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	for name, opt := range map[string]fixtureOptions{"a CA certificate": {isCA: true}, "EKU hidden in another extension": {hiddenEKU: true}} {
+		if solvedOn(t, ecc.BLS12_381, assign(t, newFixture(t, opt).in)) {
+			t.Errorf("%s: accepted", name)
+		}
+	}
 }
 
 func assign(t *testing.T, in Inputs) *Circuit {

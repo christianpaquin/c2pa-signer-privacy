@@ -236,7 +236,7 @@ For the two 1,500-byte CA circuits, prove is the median of three runs with the r
 
 ## E1: RSA primitives
 
-What RSA signatures cost in a circuit, next to ECDSA: RSA CAs (RSA-4096 and RSA-2048, signing with SHA256-RSA or SHA384-RSA, which is PKCS#1 v1.5) appear on both trust lists, and RSA signer keys with PS256 are common among interim-list signers ([DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md#what-this-means-for-the-prototype)). Same spike, stack, and accounting as [P-384](#e1-p-384-and-sha-384-primitives) (code in [`experiments/e1-p384`](experiments/e1-p384/)); every circuit, the ECDSA and hash ones included, measured in one session: [2026-11-10-e1-rsa-gnark](bench/results/2026-11-10-e1-rsa-gnark.json), clean commit `ed2b899`.
+What RSA signatures cost in a circuit, next to ECDSA: RSA CAs (RSA-4096 and RSA-2048, signing with SHA256-RSA or SHA384-RSA, which is PKCS#1 v1.5) appear on both trust lists, and RSA signer keys with PS256 are common among interim-list signers ([DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md#what-this-means-for-the-prototype)). Same spike, stack, and accounting as [P-384](#e1-p-384-and-sha-384-primitives) (code in [`experiments/e1-p384`](experiments/e1-p384/)); the RSA circuits as reviewed, with the ECDSA ones for comparison, measured in one session: [2026-11-10-e1-rsa-gnark-review](bench/results/2026-11-10-e1-rsa-gnark-review.json), clean commit `b61a545`. The [first record](bench/results/2026-11-10-e1-rsa-gnark.json) (commit `ed2b899`, all 20 E1 circuits) predates the modulus-size and canonical-signature checks, which add 23k (RSA-2048), 35k, and 47k (RSA-4096) constraints, mostly bit decompositions of n and s.
 
 **How RSA is verified.** gnark's variable-modulus emulated arithmetic, with exactly as many 64-bit limbs as the key (32, 48, or 64), so one circuit serves every key of its size. The circuit asserts that n has exactly the key size (its top bit set) and that the signature is below n (RSAVP1), so only the canonical signature, the bytes a time stamp covers, is accepted. With the public exponent 65537, verification is 16 squarings and one multiplication modulo n; the result is asserted below n, decomposed into bits, and checked against the encoding: for **PKCS#1 v1.5**, `00 01 FF…FF 00 || DigestInfo || digest`; for **PS256**, EMSA-PSS-VERIFY with SHA-256, MGF1-SHA-256, and a 32-byte salt (the hash length, as RFC 8230 sets for COSE), including MGF1 in the circuit. CA moduli are public inputs, like the ECDSA CA keys; the PS256 signer's modulus is private, as the signer's key is in the statement.
 
@@ -248,30 +248,29 @@ What RSA signatures cost in a circuit, next to ECDSA: RSA CAs (RSA-4096 and RSA-
 
 | Circuit | R1CS constraints | PLONKish constraints | Setup | Solve | Prove, key resident (incl. solve) | Peak RSS, whole run | Proving key (compressed / raw) |
 |---|---|---|---|---|---|---|---|
-| RSA-2048 PKCS#1 v1.5 verify, digest given | 57,164 | 173,382 | 3.6 s | 0.02 s | 0.19 s | 0.16 GiB | 11 / 22 MB |
-| RSA-3072 PKCS#1 v1.5 verify, digest given | 84,653 | 250,198 | 5.6 s | 0.04 s | 0.34 s | 0.25 GiB | 18 / 35 MB |
-| RSA-4096 PKCS#1 v1.5 verify, digest given | 111,659 | 325,718 | 6.7 s | 0.04 s | 0.35 s | 0.32 GiB | 22 / 43 MB |
-| ECDSA P-256 verify, digest given | 148,357 | 567,375 | 13 s | 0.07 s | 0.66 s | 0.53 GiB | 37 / 73 MB |
-| ECDSA P-384 verify, digest given | 301,556 | 1,149,790 | 26 s | 0.14 s | 1.18 s | 0.93 GiB | 74 / 148 MB |
-| RSA-2048 PS256 verify, digest given | 501,694 | 1,520,774 | 40 s | 0.21 s | 1.46 s | 1.20 GiB | 115 / 228 MB |
-| RSA-3072 PS256 verify, digest given | 670,133 | 2,033,278 | 54 s | 0.27 s | 2.16 s | 1.77 GiB | 163 / 323 MB |
-| RSA-4096 PS256 verify, digest given | 838,569 | 2,545,782 | 71 s | 0.38 s | 3.28 s | 2.04 GiB | 193 / 385 MB |
-| CA signature, RSA-4096 + SHA-384, 414-byte TBS | 589,898 | 1,823,919 | 51 s | 0.27 s | 2.15 s | 1.92 GiB | 148 / 294 MB |
-| CA signature, P-384 + SHA-384, 414-byte TBS | 821,074 | 2,702,402 | 65 s | 0.33 s | 2.64 s | 2.29 GiB | 193 / 383 MB |
-| CA signature, RSA-4096 + SHA-256, 1,500-byte TBS | 1,100,071 | 3,339,137 | 89 s | 0.56 s | 4.12 s | 3.11 GiB | 276 / 550 MB |
-| CA signature, P-256 + SHA-256, 1,500-byte TBS | 1,156,320 | 3,693,065 | 110 s | 0.64 s | 5.53 s | 3.28 GiB | 293 / 583 MB |
-| CA signature, RSA-2048 + SHA-384, 1,500-byte TBS | 1,204,924 | 3,683,105 | 100 s | 0.60 s | 4.44 s | 3.38 GiB | 299 / 595 MB |
-| CA signature, RSA-4096 + SHA-384, 1,500-byte TBS | 1,266,601 | 3,887,489 | 102 s | 0.58 s | 4.80 s | 3.18 GiB | 310 / 616 MB |
-| CA signature, P-384 + SHA-384, 1,500-byte TBS | 1,521,300 | 5,109,304 | 125 s | 0.60 s | 4.87 s | 3.61 GiB | 368 / 731 MB |
+| RSA-2048 PKCS#1 v1.5 verify, digest given | 80,447 | 214,819 | 6.2 s | 0.03 s | 0.35 s | 0.24 GiB | 16 / 31 MB |
+| RSA-3072 PKCS#1 v1.5 verify, digest given | 119,577 | 311,854 | 8.2 s | 0.06 s | 0.43 s | 0.32 GiB | 21 / 42 MB |
+| ECDSA P-256 verify, digest given | 148,357 | 567,375 | 13 s | 0.07 s | 0.62 s | 0.49 GiB | 37 / 73 MB |
+| RSA-4096 PKCS#1 v1.5 verify, digest given | 158,091 | 407,918 | 12 s | 0.09 s | 0.66 s | 0.43 GiB | 30 / 60 MB |
+| ECDSA P-384 verify, digest given | 301,556 | 1,149,790 | 26 s | 0.14 s | 1.17 s | 0.97 GiB | 74 / 148 MB |
+| RSA-2048 PS256 verify, digest given | 525,073 | 1,562,759 | 59 s | 0.34 s | 2.45 s | 1.61 GiB | 134 / 266 MB |
+| RSA-3072 PS256 verify, digest given | 705,200 | 2,096,239 | 79 s | 0.42 s | 2.98 s | 2.03 GiB | 166 / 330 MB |
+| RSA-4096 PS256 verify, digest given | 885,323 | 2,629,719 | 84 s | 0.33 s | 2.67 s | 2.30 GiB | 198 / 393 MB |
+| CA signature, RSA-4096 + SHA-384, 414-byte TBS | 636,652 | 1,907,856 | 50 s | 0.31 s | 2.01 s | 2.04 GiB | 152 / 303 MB |
+| CA signature, P-384 + SHA-384, 414-byte TBS | 821,074 | 2,702,402 | 68 s | 0.39 s | 2.96 s | 2.26 GiB | 193 / 383 MB |
+| CA signature, RSA-4096 + SHA-256, 1,500-byte TBS | 1,146,825 | 3,423,074 | 93 s | 0.60 s | 4.07 s | 3.27 GiB | 281 / 559 MB |
+| CA signature, RSA-2048 + SHA-384, 1,500-byte TBS | 1,228,303 | 3,725,090 | 97 s | 0.62 s | 4.25 s | 3.51 GiB | 301 / 599 MB |
+| CA signature, RSA-4096 + SHA-384, 1,500-byte TBS | 1,313,355 | 3,971,426 | 114 s | 0.70 s | 4.64 s | 3.40 GiB | 314 / 625 MB |
+| CA signature, P-384 + SHA-384, 1,500-byte TBS | 1,521,300 | 5,109,304 | 126 s | 0.68 s | 5.22 s | 3.88 GiB | 368 / 731 MB |
 
-Single runs. The ECDSA, hash, and ECDSA CA circuits reproduce the [P-384 record](#e1-p-384-and-sha-384-primitives)'s constraint counts exactly; their prove times are 6–21% lower than in its first run (P-256 over 1,500 bytes 5.5 s, against 9.0 s then and 4.2–4.3 s in its repeats), so times are compared within this session and constraints across sessions. Every proof is 196 bytes and verifies in 1.5–1.7 ms; a public RSA modulus is 32 to 64 public inputs (one per limb), so verifying keys grow to 1.8 KB (RSA-2048) and 3.1 KB (RSA-4096), against 0.9 KB with a P-384 key.
+Single runs, so times are indicative (RSA-4096 PS256 proved faster than RSA-3072 here) and constraints are the comparison. The ECDSA circuits reproduce the [P-384 record](#e1-p-384-and-sha-384-primitives)'s constraint counts exactly. Every proof is 196 bytes and verifies in 1.5–2.5 ms; a public RSA modulus is 32 to 64 public inputs (one per limb), so verifying keys grow to 1.8 KB (RSA-2048) and 3.1 KB (RSA-4096), against 0.9 KB with a P-384 key.
 
 ### Observations
 
-- **RSA verification is cheaper than ECDSA in the circuit.** With exponent 65537 it is 17 modular multiplications, against an emulated elliptic-curve double scalar multiplication: RSA-4096 PKCS#1 v1.5 costs 112k constraints, 0.37× ECDSA P-384 and 0.75× P-256; RSA-2048 costs 57k. Cost grows about linearly with key size (57k, 85k, 112k for 2048, 3072, 4096 bits).
-- **RSA CAs cost less than P-384 CAs.** Over a 1,500-byte TBS, an RSA-4096 CA signing with SHA-384 costs 0.83× the P-384 circuit, and with SHA-256 0.72×; RSA adds 62k (2048) to 123k (4096) constraints to the hash, about 10% of the circuit. The hash dominates even more than with ECDSA.
-- **PS256 is dominated by its hashing.** MGF1 hashes H with a counter once per 32 bytes of the mask (7, 11, and 15 SHA-256 blocks for 2048, 3072, and 4096 bits), plus two blocks for H′: 43–49k constraints per block, 85–90% of the circuit. A PS256 verification costs 3.4× (RSA-2048) to 5.7× (RSA-4096) an ES256 one.
-- **What RSA would add to the third-party statement** (estimates from these primitives; not measured): an RSA CA in place of the P-384 CA saves 190–245k constraints. A PS256 signer in place of ES256 adds 350–690k for the signature (7–15% of V1's 4.7M), and more for its certificate: an RSA-2048 to RSA-4096 SubjectPublicKeyInfo is about 200–460 bytes longer than a P-256 one, which adds hash blocks over the TBS, and the structural DER walk must locate an RSA key. The rest of the statement (claim hashing, time stamp) is unchanged.
+- **RSA verification costs no more than ECDSA in the circuit.** With exponent 65537 it is 17 modular multiplications, against an emulated elliptic-curve double scalar multiplication: RSA-4096 PKCS#1 v1.5 costs 158k constraints, 0.52× ECDSA P-384 and about the same as P-256 (1.07×); RSA-2048 costs 80k. Cost grows about linearly with key size (80k, 120k, 158k for 2048, 3072, 4096 bits), about 30% of it the modulus-size and canonical-signature checks.
+- **RSA CAs cost less than P-384 CAs.** Over a 1,500-byte TBS, an RSA-4096 CA signing with SHA-384 costs 0.86× the P-384 circuit, and with SHA-256 0.75×; RSA adds 85k (2048) to 170k (4096) constraints to the hash, about 13% of the circuit. The hash dominates even more than with ECDSA.
+- **PS256 is dominated by its hashing.** MGF1 hashes H with a counter once per 32 bytes of the mask (7, 11, and 15 SHA-256 blocks for 2048, 3072, and 4096 bits), plus two blocks for H′: 43–49k constraints per block, 82–85% of the circuit. A PS256 verification costs 3.5× (RSA-2048) to 6.0× (RSA-4096) an ES256 one.
+- **What RSA would add to the third-party statement** (estimates from these primitives; not measured): an RSA CA in place of the P-384 CA saves 140–220k constraints. A PS256 signer in place of ES256 adds 375–740k for the signature (8–16% of V1's 4.7M), and more for its certificate: an RSA-2048 to RSA-4096 SubjectPublicKeyInfo is about 200–460 bytes longer than a P-256 one, which adds hash blocks over the TBS, and the structural DER walk must locate an RSA key. The rest of the statement (claim hashing, time stamp) is unchanged.
 - **Stop-rule assessment:** none triggered. No algorithm found in the trust lists or samples is a cost obstacle for trust model A in gnark, apart from P-521 and Ed25519, which are not measured. Supporting RSA in the statement is an integration task (certificate parsing, one statement per algorithm combination or a selector, key sizes as compile-time limits), relevant to [R3](README.md#r3-interim-list-allowed-signers-via-merkle-membership) and RSA-signed content.
 
 ## Proving-key loading

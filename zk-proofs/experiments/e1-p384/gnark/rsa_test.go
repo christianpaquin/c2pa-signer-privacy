@@ -164,7 +164,7 @@ func TestRsaPkcs1AcceptsExactlyTheStandardEncoding(t *testing.T) {
 }
 
 // pssEncoding returns EMSA-PSS-ENCODE (RFC 8017, 9.1.1) for SHA-256 and a key
-// of k bytes whose size is a multiple of 8 bits, built by hand so that single
+// of k bytes whose size is exactly 8k bits, built by hand so that single
 // fields can be altered: edit changes DB before masking, and emEdit the final EM.
 func pssEncoding(k int, mHash, salt []byte, edit func(db []byte), emEdit func(em []byte)) []byte {
 	mPrime := append(append(make([]byte, 8), mHash...), salt...)

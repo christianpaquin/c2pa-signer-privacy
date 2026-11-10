@@ -245,8 +245,8 @@ const shortcuts = "Primitive benchmarks: no certificate parsing, no field extrac
 	"TBS up to a maximum, at about the cost of the maximum). ECDSA, RSA PKCS#1 v1.5, and the CA circuits verify under a " +
 	"public key given as a public input, as the anonymization circuit does for the issuing CA; the PSS (PS256) circuits " +
 	"take the signer's key as a private input, as the statement does. RSA uses the public exponent 65537 only, " +
-	"a fixed salt length (32 bytes, RFC 8230), and moduli whose size is a multiple of 8 bits; the signature is not " +
-	"asserted below the modulus (s and s + n verify alike; the signature is private). Keys and signatures are fresh " +
+	"a fixed salt length (32 bytes, RFC 8230), and moduli of exactly the circuit's size (2048, 3072, or 4096 bits; " +
+	"asserted); the signature is asserted below the modulus. Keys and signatures are fresh " +
 	"per run and the messages are deterministic stand-ins, neither of which affects cost."
 
 const stepNotes = "compile = R1CS compilation; setup = Groth16 setup (single party, not a ceremony); witness = " +

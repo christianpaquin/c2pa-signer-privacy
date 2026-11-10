@@ -1,0 +1,584 @@
+{
+  "environment": {
+    "cpu": "13th Gen Intel(R) Core(TM) i7-13800H",
+    "git_changed_files": [
+      "M zk-proofs/circuits/build/x509_issue_and_possession_native.vk"
+    ],
+    "git_commit": "ed2b899023176d388cfe1f41ee66b3d229ecf7b8",
+    "gnark": "v0.16.4",
+    "gnark_crypto": "v0.21.1-0.20260913224755-1409fe592052",
+    "go": "go1.27.3",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "logical_cpus": 20,
+    "memory": "32774804 kB",
+    "os": "Ubuntu 24.04.2 LTS",
+    "wsl": true
+  },
+  "experiment": "E1: in-circuit cost of the signature algorithms real C2PA deployments use (P-384/SHA-384 and RSA next to P-256/SHA-256; standalone primitives)",
+  "measurements": [
+    {
+      "data": {
+        "description": "CA signature (ECDSA P-256, SHA-256) over a 1,500-byte TBS",
+        "internal_variables": 1607235,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 292931329,
+        "proving_key_bytes_raw": 582644929,
+        "public_inputs": 8,
+        "public_variables": 9,
+        "r1cs_constraints": 1156320,
+        "scs_constraints": 3693065,
+        "secret_variables": 1508,
+        "verifying_key_bytes": 768
+      },
+      "name": "ca-p256-sha256-1500",
+      "peak_rss_mib": 3360.81640625,
+      "steps": {
+        "compile_s": 3.217700318,
+        "compile_scs_s": 4.601039167,
+        "prove_s": 5.531180404,
+        "setup_s": 110.094692767,
+        "solve_s": 0.639802379,
+        "verify_s": 0.001567789,
+        "witness_s": 0.001779894
+      },
+      "wall_s": 124.891487249
+    },
+    {
+      "data": {
+        "description": "CA signature (ECDSA P-256, SHA-256) over a 414-byte TBS",
+        "internal_variables": 866921,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 147047953,
+        "proving_key_bytes_raw": 292360977,
+        "public_inputs": 8,
+        "public_variables": 9,
+        "r1cs_constraints": 556754,
+        "scs_constraints": 1893233,
+        "secret_variables": 422,
+        "verifying_key_bytes": 768
+      },
+      "name": "ca-p256-sha256-414",
+      "peak_rss_mib": 1913.359375,
+      "steps": {
+        "compile_s": 2.026986837,
+        "compile_scs_s": 1.830084963,
+        "prove_s": 2.110737352,
+        "setup_s": 61.24878801,
+        "solve_s": 0.273433731,
+        "verify_s": 0.001530123,
+        "witness_s": 0.000518756
+      },
+      "wall_s": 67.865669068
+    },
+    {
+      "data": {
+        "description": "CA signature (ECDSA P-384, SHA-384) over a 1,500-byte TBS",
+        "internal_variables": 2155249,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 367879757,
+        "proving_key_bytes_raw": 731445741,
+        "public_inputs": 12,
+        "public_variables": 13,
+        "r1cs_constraints": 1521300,
+        "scs_constraints": 5109304,
+        "secret_variables": 1512,
+        "verifying_key_bytes": 896
+      },
+      "name": "ca-p384-sha384-1500",
+      "peak_rss_mib": 3698.765625,
+      "steps": {
+        "compile_s": 4.423314805,
+        "compile_scs_s": 4.302728076,
+        "prove_s": 4.871115372,
+        "setup_s": 124.992364833,
+        "solve_s": 0.601998643,
+        "verify_s": 0.001535194,
+        "witness_s": 0.001901565
+      },
+      "wall_s": 140.041634716
+    },
+    {
+      "data": {
+        "description": "CA signature (ECDSA P-384, SHA-384) over a 414-byte TBS",
+        "internal_variables": 1195488,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 192714415,
+        "proving_key_bytes_raw": 383036751,
+        "public_inputs": 12,
+        "public_variables": 13,
+        "r1cs_constraints": 821074,
+        "scs_constraints": 2702402,
+        "secret_variables": 426,
+        "verifying_key_bytes": 896
+      },
+      "name": "ca-p384-sha384-414",
+      "peak_rss_mib": 2342.82421875,
+      "steps": {
+        "compile_s": 2.588889025,
+        "compile_scs_s": 2.627907436,
+        "prove_s": 2.641056844,
+        "setup_s": 64.81076502,
+        "solve_s": 0.333897424,
+        "verify_s": 0.001541673,
+        "witness_s": 0.000518755
+      },
+      "wall_s": 73.478224425
+    },
+    {
+      "data": {
+        "description": "CA signature (RSA-2048 PKCS#1 v1.5, SHA-384) over a 1,500-byte TBS",
+        "internal_variables": 1604015,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 299066041,
+        "proving_key_bytes_raw": 594920697,
+        "public_inputs": 32,
+        "public_variables": 33,
+        "r1cs_constraints": 1204924,
+        "scs_constraints": 3683105,
+        "secret_variables": 1532,
+        "verifying_key_bytes": 1776
+      },
+      "name": "ca-rsa2048-sha384-1500",
+      "peak_rss_mib": 3463.41796875,
+      "steps": {
+        "compile_s": 3.199996612,
+        "compile_scs_s": 3.569654282,
+        "prove_s": 4.44190849,
+        "setup_s": 99.917038739,
+        "solve_s": 0.59772371,
+        "verify_s": 0.00162512,
+        "witness_s": 0.001697828
+      },
+      "wall_s": 112.490665888
+    },
+    {
+      "data": {
+        "description": "CA signature (RSA-4096 PKCS#1 v1.5, SHA-256) over a 1,500-byte TBS",
+        "internal_variables": 1477966,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 276460503,
+        "proving_key_bytes_raw": 549961591,
+        "public_inputs": 64,
+        "public_variables": 65,
+        "r1cs_constraints": 1100071,
+        "scs_constraints": 3339137,
+        "secret_variables": 1564,
+        "verifying_key_bytes": 3056
+      },
+      "name": "ca-rsa4096-sha256-1500",
+      "peak_rss_mib": 3180.64453125,
+      "steps": {
+        "compile_s": 2.734788318,
+        "compile_scs_s": 3.143817005,
+        "prove_s": 4.12182086,
+        "setup_s": 88.944225608,
+        "solve_s": 0.56407731,
+        "verify_s": 0.001598465,
+        "witness_s": 0.001598247
+      },
+      "wall_s": 100.848374594
+    },
+    {
+      "data": {
+        "description": "CA signature (RSA-4096 PKCS#1 v1.5, SHA-384) over a 1,500-byte TBS",
+        "internal_variables": 1689852,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 309612083,
+        "proving_key_bytes_raw": 615840979,
+        "public_inputs": 64,
+        "public_variables": 65,
+        "r1cs_constraints": 1266601,
+        "scs_constraints": 3887489,
+        "secret_variables": 1564,
+        "verifying_key_bytes": 3056
+      },
+      "name": "ca-rsa4096-sha384-1500",
+      "peak_rss_mib": 3255.08984375,
+      "steps": {
+        "compile_s": 3.250404274,
+        "compile_scs_s": 3.474187676,
+        "prove_s": 4.803161052,
+        "setup_s": 101.63367575,
+        "solve_s": 0.577108657,
+        "verify_s": 0.001680564,
+        "witness_s": 0.001578921
+      },
+      "wall_s": 115.5074221
+    },
+    {
+      "data": {
+        "description": "CA signature (RSA-4096 PKCS#1 v1.5, SHA-384) over a 414-byte TBS",
+        "internal_variables": 850273,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 147978913,
+        "proving_key_bytes_raw": 294255969,
+        "public_inputs": 64,
+        "public_variables": 65,
+        "r1cs_constraints": 589898,
+        "scs_constraints": 1823919,
+        "secret_variables": 478,
+        "verifying_key_bytes": 3056
+      },
+      "name": "ca-rsa4096-sha384-414",
+      "peak_rss_mib": 1971.09375,
+      "steps": {
+        "compile_s": 1.5879702820000001,
+        "compile_scs_s": 1.85821682,
+        "prove_s": 2.149796861,
+        "setup_s": 50.888870408,
+        "solve_s": 0.27229034,
+        "verify_s": 0.001627785,
+        "witness_s": 0.000574556
+      },
+      "wall_s": 57.220069426
+    },
+    {
+      "data": {
+        "description": "ECDSA P-256 verify, digest given",
+        "internal_variables": 230790,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 36809239,
+        "proving_key_bytes_raw": 73156631,
+        "public_inputs": 8,
+        "public_variables": 9,
+        "r1cs_constraints": 148357,
+        "scs_constraints": 567375,
+        "secret_variables": 12,
+        "verifying_key_bytes": 768
+      },
+      "name": "ecdsa-p256",
+      "peak_rss_mib": 546.52734375,
+      "steps": {
+        "compile_s": 0.574020527,
+        "compile_scs_s": 0.437275876,
+        "prove_s": 0.655474488,
+        "setup_s": 13.039013129,
+        "solve_s": 0.067833101,
+        "verify_s": 0.001467119,
+        "witness_s": 0.000163046
+      },
+      "wall_s": 14.891574463
+    },
+    {
+      "data": {
+        "description": "ECDSA P-384 verify, digest given",
+        "internal_variables": 468699,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 74475061,
+        "proving_key_bytes_raw": 148012437,
+        "public_inputs": 12,
+        "public_variables": 13,
+        "r1cs_constraints": 301556,
+        "scs_constraints": 1149790,
+        "secret_variables": 18,
+        "verifying_key_bytes": 896
+      },
+      "name": "ecdsa-p384",
+      "peak_rss_mib": 953.640625,
+      "steps": {
+        "compile_s": 1.21314468,
+        "compile_scs_s": 1.000381758,
+        "prove_s": 1.175983323,
+        "setup_s": 26.094078193,
+        "solve_s": 0.144111212,
+        "verify_s": 0.001607384,
+        "witness_s": 0.00016992
+      },
+      "wall_s": 29.828951846
+    },
+    {
+      "data": {
+        "description": "RSA-2048 PKCS#1 v1.5 verify (SHA-256 DigestInfo), digest given",
+        "internal_variables": 74793,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 11200629,
+        "proving_key_bytes_raw": 22251253,
+        "public_inputs": 32,
+        "public_variables": 33,
+        "r1cs_constraints": 57164,
+        "scs_constraints": 173382,
+        "secret_variables": 64,
+        "verifying_key_bytes": 1776
+      },
+      "name": "rsa2048-pkcs1-sha256",
+      "peak_rss_mib": 158.96484375,
+      "steps": {
+        "compile_s": 0.193239252,
+        "compile_scs_s": 0.121103949,
+        "prove_s": 0.19310957,
+        "setup_s": 3.565291233,
+        "solve_s": 0.0229825,
+        "verify_s": 0.001647517,
+        "witness_s": 0.000225263
+      },
+      "wall_s": 4.265393877
+    },
+    {
+      "data": {
+        "description": "RSA-2048 PSS verify (PS256: SHA-256, MGF1-SHA-256, 32-byte salt), digest given, private key",
+        "internal_variables": 729840,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 114870563,
+        "proving_key_bytes_raw": 228281027,
+        "public_inputs": 0,
+        "public_variables": 1,
+        "r1cs_constraints": 501694,
+        "scs_constraints": 1520774,
+        "secret_variables": 96,
+        "verifying_key_bytes": 496
+      },
+      "name": "rsa2048-pss-sha256",
+      "peak_rss_mib": 1227.375,
+      "steps": {
+        "compile_s": 1.37758513,
+        "compile_scs_s": 1.351251853,
+        "prove_s": 1.462817579,
+        "setup_s": 39.951132458000004,
+        "solve_s": 0.210567593,
+        "verify_s": 0.001453881,
+        "witness_s": 0.000182567
+      },
+      "wall_s": 44.666748262
+    },
+    {
+      "data": {
+        "description": "RSA-3072 PKCS#1 v1.5 verify (SHA-256 DigestInfo), digest given",
+        "internal_variables": 110154,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 17618967,
+        "proving_key_bytes_raw": 35017143,
+        "public_inputs": 48,
+        "public_variables": 49,
+        "r1cs_constraints": 84653,
+        "scs_constraints": 250198,
+        "secret_variables": 80,
+        "verifying_key_bytes": 2416
+      },
+      "name": "rsa3072-pkcs1-sha256",
+      "peak_rss_mib": 257.921875,
+      "steps": {
+        "compile_s": 0.301679302,
+        "compile_scs_s": 0.197891572,
+        "prove_s": 0.338430193,
+        "setup_s": 5.645408984,
+        "solve_s": 0.0378583,
+        "verify_s": 0.001601178,
+        "witness_s": 0.000196056
+      },
+      "wall_s": 6.954152506
+    },
+    {
+      "data": {
+        "description": "RSA-3072 PSS verify (PS256), digest given, private key",
+        "internal_variables": 942447,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 162545345,
+        "proving_key_bytes_raw": 323205313,
+        "public_inputs": 0,
+        "public_variables": 1,
+        "r1cs_constraints": 670133,
+        "scs_constraints": 2033278,
+        "secret_variables": 128,
+        "verifying_key_bytes": 496
+      },
+      "name": "rsa3072-pss-sha256",
+      "peak_rss_mib": 1815.609375,
+      "steps": {
+        "compile_s": 1.867258189,
+        "compile_scs_s": 1.846079881,
+        "prove_s": 2.158220776,
+        "setup_s": 53.525628527,
+        "solve_s": 0.268713559,
+        "verify_s": 0.001470454,
+        "witness_s": 0.000278333
+      },
+      "wall_s": 60.293357072
+    },
+    {
+      "data": {
+        "description": "RSA-4096 PKCS#1 v1.5 verify (SHA-384 DigestInfo), digest given",
+        "internal_variables": 144392,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 21601939,
+        "proving_key_bytes_raw": 42914515,
+        "public_inputs": 64,
+        "public_variables": 65,
+        "r1cs_constraints": 111659,
+        "scs_constraints": 325718,
+        "secret_variables": 112,
+        "verifying_key_bytes": 3056
+      },
+      "name": "rsa4096-pkcs1-sha384",
+      "peak_rss_mib": 328.45703125,
+      "steps": {
+        "compile_s": 0.390692436,
+        "compile_scs_s": 0.215400278,
+        "prove_s": 0.348792858,
+        "setup_s": 6.712288681,
+        "solve_s": 0.037354275,
+        "verify_s": 0.00156898,
+        "witness_s": 0.000670285
+      },
+      "wall_s": 8.184142797
+    },
+    {
+      "data": {
+        "description": "RSA-4096 PSS verify (PS256), digest given, private key",
+        "internal_variables": 1155051,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 193433593,
+        "proving_key_bytes_raw": 384556537,
+        "public_inputs": 0,
+        "public_variables": 1,
+        "r1cs_constraints": 838569,
+        "scs_constraints": 2545782,
+        "secret_variables": 160,
+        "verifying_key_bytes": 496
+      },
+      "name": "rsa4096-pss-sha256",
+      "peak_rss_mib": 2088.80859375,
+      "steps": {
+        "compile_s": 2.228158931,
+        "compile_scs_s": 3.100171994,
+        "prove_s": 3.280896535,
+        "setup_s": 70.967739311,
+        "solve_s": 0.380978286,
+        "verify_s": 0.001453426,
+        "witness_s": 0.000255216
+      },
+      "wall_s": 81.118132319
+    },
+    {
+      "data": {
+        "description": "SHA-256 over 1,500 bytes",
+        "internal_variables": 1306471,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 221823785,
+        "proving_key_bytes_raw": 441031337,
+        "public_inputs": 32,
+        "public_variables": 33,
+        "r1cs_constraints": 976699,
+        "scs_constraints": 2931038,
+        "secret_variables": 1500,
+        "verifying_key_bytes": 1520
+      },
+      "name": "sha256-1500",
+      "peak_rss_mib": 2202.05078125,
+      "steps": {
+        "compile_s": 3.052958181,
+        "compile_scs_s": 2.831456779,
+        "prove_s": 3.074848422,
+        "setup_s": 78.219867697,
+        "solve_s": 0.437655779,
+        "verify_s": 0.001600123,
+        "witness_s": 0.00157756
+      },
+      "wall_s": 88.136317654
+    },
+    {
+      "data": {
+        "description": "SHA-256 over 414 bytes",
+        "internal_variables": 566157,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 92716985,
+        "proving_key_bytes_raw": 184300537,
+        "public_inputs": 32,
+        "public_variables": 33,
+        "r1cs_constraints": 377133,
+        "scs_constraints": 1131206,
+        "secret_variables": 414,
+        "verifying_key_bytes": 1520
+      },
+      "name": "sha256-414",
+      "peak_rss_mib": 1019.11328125,
+      "steps": {
+        "compile_s": 1.039088592,
+        "compile_scs_s": 1.109474482,
+        "prove_s": 1.173519824,
+        "setup_s": 32.868534071,
+        "solve_s": 0.190117006,
+        "verify_s": 0.001571332,
+        "witness_s": 0.000597101
+      },
+      "wall_s": 36.618109705
+    },
+    {
+      "data": {
+        "description": "SHA-384 over 1,500 bytes",
+        "internal_variables": 1518230,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 288519559,
+        "proving_key_bytes_raw": 573999335,
+        "public_inputs": 48,
+        "public_variables": 49,
+        "r1cs_constraints": 1143102,
+        "scs_constraints": 3479150,
+        "secret_variables": 1500,
+        "verifying_key_bytes": 2032
+      },
+      "name": "sha384-1500",
+      "peak_rss_mib": 3162.72265625,
+      "steps": {
+        "compile_s": 2.967558253,
+        "compile_scs_s": 3.098467721,
+        "prove_s": 4.081610382,
+        "setup_s": 91.845361511,
+        "solve_s": 0.537961702,
+        "verify_s": 0.001505898,
+        "witness_s": 0.001587938
+      },
+      "wall_s": 103.197048043
+    },
+    {
+      "data": {
+        "description": "SHA-384 over 414 bytes",
+        "internal_variables": 678651,
+        "proof_bytes": 196,
+        "proof_commitments": 1,
+        "proving_key_bytes_compressed": 110108693,
+        "proving_key_bytes_raw": 218858933,
+        "public_inputs": 48,
+        "public_variables": 49,
+        "r1cs_constraints": 466399,
+        "scs_constraints": 1415580,
+        "secret_variables": 414,
+        "verifying_key_bytes": 2032
+      },
+      "name": "sha384-414",
+      "peak_rss_mib": 1170.578125,
+      "steps": {
+        "compile_s": 1.27823975,
+        "compile_scs_s": 1.311211798,
+        "prove_s": 1.426855006,
+        "setup_s": 39.476592031,
+        "solve_s": 0.209408253,
+        "verify_s": 0.00145237,
+        "witness_s": 0.000468288
+      },
+      "wall_s": 43.985795744
+    }
+  ],
+  "schema": "c2pa-x509-zk-e1/1",
+  "shortcuts": "Primitive benchmarks: no certificate parsing, no field extraction, no chain or validity checks. Hashes run over a message whose length is fixed at compile time (a real circuit hashes a variable-length TBS up to a maximum, at about the cost of the maximum). ECDSA, RSA PKCS#1 v1.5, and the CA circuits verify under a public key given as a public input, as the anonymization circuit does for the issuing CA; the PSS (PS256) circuits take the signer's key as a private input, as the statement does. RSA uses the public exponent 65537 only, a fixed salt length (32 bytes, RFC 8230), and moduli whose size is a multiple of 8 bits; the signature is not asserted below the modulus (s and s + n verify alike; the signature is private). Keys and signatures are fresh per run and the messages are deterministic stand-ins, neither of which affects cost.",
+  "stack": "gnark v0.16.4, Groth16 on BN254 (R1CS); emulated (non-native) P-256 and P-384 arithmetic; RSA with variable-modulus emulated arithmetic sized to the key (64-bit limbs)",
+  "step_notes": "compile = R1CS compilation; setup = Groth16 setup (single party, not a ceremony); witness = assigning inputs; solve = computing the full witness (gnark's equivalent of witness generation), with a fixed lookup challenge in place of the commitment the prover computes; prove = groth16.Prove, which solves again internally, so prove includes solve; verify = groth16.Verify; compile_scs = compiling the same circuit for a PLONKish backend, for its constraint count only. Proving keys are reported compressed (WriteTo) and raw (WriteRawTo, uncompressed). gnark's hash and range-check gadgets use lookup arguments, which its Groth16 backend implements with a commitment (proof_commitments), adding a commitment and a proof of knowledge to the proof."
+}

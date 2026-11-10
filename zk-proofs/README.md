@@ -514,7 +514,7 @@ The signer-side mode gets the same treatment: it should bind to a claim rather t
 
 Standalone benchmarks of the primitives real deployments use, next to today's P-256 + SHA-256, prioritising **P-384 ECDSA with SHA-384**, which the official list's CAs and the documented real sample use; then RSA-2048 and RSA-4096 with PKCS#1 v1.5 and PSS (RSA CAs and PS256 signers), and optionally P-521. Independent of E2a, so it can run in parallel and show early whether real CAs are affordable in-circuit. Feeds the choice of proof system (E6).
 
-Status: the P-384/SHA-384 spike is measured in gnark ([FEASIBILITY.md](FEASIBILITY.md#e1-p-384-and-sha-384-primitives), [`experiments/e1-p384`](experiments/e1-p384/)). A CA signature over a 1,500-byte TBS costs 1.52M constraints with P-384 and SHA-384, 1.3× P-256 with SHA-256 in the same stack and 0.56× the current circom P-256 component, and proves in ~5 s with the proving key resident (a primitive, not comparable with the per-asset baseline); the hash dominates at real certificate sizes. RSA remains.
+Status: the P-384/SHA-384 spike is measured in gnark ([FEASIBILITY.md](FEASIBILITY.md#e1-p-384-and-sha-384-primitives), [`experiments/e1-p384`](experiments/e1-p384/)). A CA signature over a 1,500-byte TBS costs 1.52M constraints with P-384 and SHA-384, 1.3× P-256 with SHA-256 in the same stack and 0.56× the current circom P-256 component, and proves in ~5 s with the proving key resident (a primitive, not comparable with the per-asset baseline); the hash dominates at real certificate sizes. RSA is measured too ([FEASIBILITY.md](FEASIBILITY.md#e1-rsa-primitives)): with exponent 65537, an RSA-4096 PKCS#1 v1.5 verification costs 158k constraints, about half of P-384 ECDSA, so an RSA-4096 CA over a 1,500-byte TBS costs 0.86× the P-384 one; a PS256 verification costs 0.53–0.89M (RSA-2048 to RSA-4096), mostly the SHA-256 of its mask generation, 3.5–6.0× ES256. No RSA variant found in real deployments is a cost obstacle; adding RSA to the statement is integration work (certificate parsing, algorithm combinations). SHA-384 over a variable-length input is implemented in the statement (E2b) and measured as part of V1; P-521 and Ed25519, seen on the trust lists, are not measured.
 
 #### E2b. Third-party anonymization
 
@@ -575,7 +575,7 @@ One complete vertical slice of third-party anonymization (E2b) with explicit gua
 
 #### R3. Interim-list allowed signers via Merkle membership
 
-The interim list trusts specific end-entity certificates directly; trust model B (E3) over that published set needs no CA or registration step, but still needs the source list authenticated (it is not signed; at minimum, pin its content hash) and interpreted consistently. Most of those signers use RSA keys with PS256, so this depends on the RSA costs from E1.
+The interim list trusts specific end-entity certificates directly; trust model B (E3) over that published set needs no CA or registration step, but still needs the source list authenticated (it is not signed; at minimum, pin its content hash) and interpreted consistently. Most of those signers use RSA keys with PS256, so this depends on the RSA costs from E1: measured as affordable (a PS256 verification is 0.53–0.89M constraints), with the statement's RSA support still to build.
 
 ### Hardening
 

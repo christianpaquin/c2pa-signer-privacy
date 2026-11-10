@@ -47,7 +47,7 @@ func main() {
 	switch os.Args[1] {
 	case "list":
 		for _, n := range specNames() {
-			fmt.Printf("%-22s %s\n", n, specs[n].description)
+			fmt.Printf("%-24s %s\n", n, specs[n].description)
 		}
 	case "one":
 		if len(os.Args) != 3 {
@@ -127,14 +127,7 @@ func one(name string) error {
 	}); err != nil {
 		return err
 	}
-	// Solving on its own needs the commitment hint the prover normally
-	// supplies; a fixed challenge stands in for it (the lookup identities hold
-	// for any challenge), so solve excludes computing the commitment itself.
-	fixedChallenge := solver.OverrideHint(solver.GetHintID(fcs.Bsb22CommitmentComputePlaceholder), func(_ *big.Int, _ []*big.Int, out []*big.Int) error {
-		out[0].Lsh(big.NewInt(1), 200).Add(out[0], big.NewInt(12345))
-		return nil
-	})
-	if err := timed("solve", func() error { _, err := ccs.Solve(full, fixedChallenge); return err }); err != nil {
+	if err := timed("solve", func() error { _, err := ccs.Solve(full, fixedChallenge()); return err }); err != nil {
 		return err
 	}
 	var proof groth16.Proof
@@ -167,6 +160,17 @@ func one(name string) error {
 	}
 	fmt.Println(resultPrefix + string(out))
 	return nil
+}
+
+// fixedChallenge lets a constraint system be solved without the prover: solving
+// on its own needs the commitment hint the prover normally supplies; a fixed
+// challenge stands in for it (the lookup identities hold for any challenge), so
+// solving excludes computing the commitment itself.
+func fixedChallenge() solver.Option {
+	return solver.OverrideHint(solver.GetHintID(fcs.Bsb22CommitmentComputePlaceholder), func(_ *big.Int, _ []*big.Int, out []*big.Int) error {
+		out[0].Lsh(big.NewInt(1), 200).Add(out[0], big.NewInt(12345))
+		return nil
+	})
 }
 
 // all measures each circuit in its own subprocess and writes one record.
@@ -218,8 +222,8 @@ func all(args []string) error {
 	}
 	record := map[string]any{
 		"schema":       "c2pa-x509-zk-e1/1",
-		"experiment":   "E1: in-circuit cost of P-384/SHA-384 next to P-256/SHA-256 (standalone primitives)",
-		"stack":        "gnark " + moduleVersion("github.com/consensys/gnark") + ", Groth16 on BN254 (R1CS); emulated (non-native) P-256 and P-384 arithmetic",
+		"experiment":   "E1: in-circuit cost of the signature algorithms real C2PA deployments use (P-384/SHA-384 and RSA next to P-256/SHA-256; standalone primitives)",
+		"stack":        "gnark " + moduleVersion("github.com/consensys/gnark") + ", Groth16 on BN254 (R1CS); emulated (non-native) P-256 and P-384 arithmetic; RSA with variable-modulus emulated arithmetic sized to the key (64-bit limbs)",
 		"environment":  env,
 		"shortcuts":    shortcuts,
 		"step_notes":   stepNotes,
@@ -238,9 +242,12 @@ func all(args []string) error {
 
 const shortcuts = "Primitive benchmarks: no certificate parsing, no field extraction, no chain or validity checks. " +
 	"Hashes run over a message whose length is fixed at compile time (a real circuit hashes a variable-length " +
-	"TBS up to a maximum, at about the cost of the maximum). ECDSA verifies under a public key given as a public " +
-	"input, as the anonymization circuit does for the issuing CA; keys and signatures are fresh per run and the " +
-	"messages are deterministic stand-ins, neither of which affects cost."
+	"TBS up to a maximum, at about the cost of the maximum). ECDSA, RSA PKCS#1 v1.5, and the CA circuits verify under a " +
+	"public key given as a public input, as the anonymization circuit does for the issuing CA; the PSS (PS256) circuits " +
+	"take the signer's key as a private input, as the statement does. RSA uses the public exponent 65537 only, " +
+	"a fixed salt length (32 bytes, RFC 8230), and moduli of exactly the circuit's size (2048, 3072, or 4096 bits; " +
+	"asserted); the signature is asserted below the modulus. Keys and signatures are fresh " +
+	"per run and the messages are deterministic stand-ins, neither of which affects cost."
 
 const stepNotes = "compile = R1CS compilation; setup = Groth16 setup (single party, not a ceremony); witness = " +
 	"assigning inputs; solve = computing the full witness (gnark's equivalent of witness generation), with a fixed lookup challenge in place of the commitment the prover computes; prove = " +

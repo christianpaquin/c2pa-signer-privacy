@@ -19,6 +19,8 @@ How the X.509 + ZK prototype evolved, for reporting. Details live in the pull re
 | Foundation | Nov 3–4 | #14, #16, #17 | A C2PA-like test PKI and trust lists, with off-circuit chain validation (F1); witness checking and forgery tests (F3); a benchmark harness and the feasibility matrix with the measured baseline (F2) |
 | Third-party anonymization | Nov 4–5 | #18–#24 | The statement and time policy (E2a); the cost of P-384 and SHA-384 (E1); proving-key loading options; the statement in gnark, the anonymizer and verifier, and its benchmark (E2b) |
 | Real content | Nov 6 | #26 | A real device-signed photo under the official trust list anonymized and verified with the unchanged tools ([R2](DEPLOYMENT-FINDINGS.md#r2-anonymizing-a-real-asset)) |
+| Prover options | Nov 6–9 | #27–#29 | Proving-key loading: an opt-in raw path behind provenance records (E6); BLS12-381 as an option, BN254 the default (E7) |
+| RSA cost | Nov 10 | #30 | RSA PKCS#1 v1.5 and PS256 measured in gnark (E1) |
 
 ## Defects found in the original prototype
 
@@ -56,12 +58,14 @@ All on the same laptop ([reference machine](FEASIBILITY.md#reference-machine)); 
 | [V1 on a real photo](bench/results/2026-11-06-r2-device-photo.json) (#26) | Same, on a real asset under the official lists | 133 s | 7.4 GiB | The fixture took 110 s in the same session: consistent with similar cost; the machine ran 40% slower that day |
 | [V1, key loading variants](bench/results/2026-11-06-e6/) (E6) | Same as V1 | 77 s → **25–28 s** | 7.4 → 9.2 GiB | Raw or dumped proving key, points not validated on load, behind its setup hash. Adopted as an opt-in raw path with provenance records and streamed loading: 49 s against 97 s in a slower session, 6.7 GiB |
 | [V1 on BLS12-381](bench/results/2026-11-09-e7/) (E7) | Same, on a ~120-bit curve (curve-level estimate; option, BN254 stays default) | 302 s; **88 s** with the raw key path | 8.5 GiB | BN254 in the same session: 72 s and 33 s; raw BLS12-381 keys parse slowly even unchecked |
+| [E1 RSA primitives](bench/results/2026-11-10-e1-rsa-gnark-review.json) (#30) | RSA CA and PS256 signatures, next to ECDSA, in gnark | 4.6 s for an RSA-4096 CA over a 1.5 KB TBS (key resident; not comparable) | 3.4 GiB | RSA-4096 costs about as much as ECDSA P-256 (exponent 65537); RSA CAs 0.75–0.86× P-384 ones; PS256 3.5–6.0× ES256, mostly MGF1 hashing |
 
 ## Lessons
 
 - **Write the statement before optimizing it.** The original circuit was efficient at proving the wrong thing: an asset digest, an unchecked time, and byte patterns rather than certificate fields. Specifying the chain of trust first (E2a) surfaced what had to be proved.
 - **Signed is not the same as parsed.** Two distinct problems: fields read from bytes outside the CA-signed TBS (the forgery fixed in #10, by pinning them inside it), and expected bytes found inside the wrong signed field, such as an extension (addressed by the structural DER walk, Q5, in E2b). Bind fields to the signed data, parse its structure, and make anything unrecognized fail.
 - **Test what a check rejects, and why.** Proofs from bad witnesses and the forgery both hid behind checks that passed for the wrong reason. Negative tests now assert the reason for rejection, and positive controls show the check can pass.
+- **Sizing is not constraining.** A circuit with room for a 2048-bit key does not establish that the key has 2048 bits, and a value correct modulo n is not the canonical one; both must be asserted, since encodings depend on the size and time stamps cover the exact bytes (#30). Tests must also run against the compiled constraints, not only the circuit definition.
 - **Formats should leave no room for other data.** Strict decoding (exact fields, zero padding, fixed-length proof) closed places where identifying data could ride along (#23).
 - **Measure the conditions, not just the time.** Record the cache state rather than assume it, repeat runs on a noisy machine (single runs here varied by 2×), compare only under the same accounting, and keep primitive timings apart from per-asset ones (#17, #19, #21, #24).
 - **The proving key, not the proof, dominates.** In both stacks, loading and validating the 1 GB key costs more than proving; the cheapest remaining gain is there.

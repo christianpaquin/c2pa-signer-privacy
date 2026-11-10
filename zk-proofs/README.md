@@ -557,18 +557,25 @@ Status: **BLS12-381 available as an option** (`c2pa-zk-gnark setup --curve bls12
 
 #### E8. Ingredient manifests
 
-An edited asset carries the manifests of its ingredients, each naming its own signer, and the anonymizer refuses such assets ([E2b](#e2b-third-party-anonymization)). Anonymizing them is harder than replacing one more signature: each later claim commits to its ingredients' manifests (a `c2pa.ingredient.v3` assertion holds hashes of the ingredient's manifest and of its claim signature), so an ingredient's signature cannot be replaced afterwards without invalidating every later signature.
+An edited asset carries the manifests of its ingredients, each naming its own signer, and the anonymizer refuses such assets ([E2b](#e2b-third-party-anonymization)). Anonymizing them is harder than replacing one more signature: each later claim commits to its ingredients' manifests (a `c2pa.ingredient.v3` assertion holds hashes of the ingredient's manifest and of its claim signature). Replacing an ingredient's signature afterwards does not invalidate the later signatures, which still verify over their unchanged claims, but it breaks those claims' ingredient hashes, so their provenance no longer validates; updating the references requires the later signer to sign again.
 
 The value differs from anonymizing the active manifest. A proof about an ingredient establishes that a signed original with that claim existed; that the asset was derived from it, and how ("only resized"), rests on the later signer's assertions, and the ingredient's hard binding covers content no longer present. It can still matter: for example, a device capture resized by a distribution platform, where the platform's signature stays and the device's signer is hidden.
 
 Options, for consideration:
 
-- **Active manifest only (opt-in).** Anonymize the active signer and leave the ingredients' manifests as they are, reporting which signers stay visible. Useful when only the last signer needs privacy.
+- **Active manifest only (opt-in).** Anonymize the active signer and leave the ingredients' manifests as they are, reporting which signers stay visible. Useful when only the last signer needs privacy, and only if the retained provenance does not identify that same signer: the same person may have signed an earlier ingredient, and removing the active certificate alone then establishes no privacy.
 - **Anonymize first, then edit.** The creator anonymizes before distribution; later editors take the anonymized asset as an ingredient and sign normally. No new statement; it needs C2PA tools and editing flows to keep a ZK-signed ingredient (to be checked).
-- **Prove the chain.** One proof covers a later signature, its commitment to the ingredient's original signature, and that signature under a trusted CA with its time stamp; each replaced signature becomes a ZK one. About two V1 statements in one; the commitment stays in the asset, so whoever holds the original can link the two.
-- **Cooperative re-signing.** A later editor re-signs over an anonymized ingredient (the second option, applied after the fact).
+- **Prove the chain.** A new verification statement, not two V1 statements side by side: it must connect the later claim's commitments (its ingredient hashes) to the hidden original ingredient bytes, and relate those to the modified ingredient that stays public; specify which standard ingredient-hash checks the proof replaces (they would otherwise fail after the replacement) and which remain ordinary validation; and define which commitments are disclosed and what they make linkable (whoever holds the original can link an asset through a retained hash). Its cost is a hypothesis: at least two V1 statements, plus hashing and parsing the ingredient's manifest.
+- **Cooperative re-signing.** A later editor re-signs over an anonymized ingredient (the second option, applied after the fact), which also repairs the ingredient hashes.
 
-Status: **open question.** The first step would be the second option's check: whether an anonymized asset survives as an ingredient through c2pa-rs and an editing flow.
+Status: **open question.** The first step is the second option's check, an anonymized asset taken as an ingredient through c2pa-rs and an editing flow. It succeeds only if:
+
+- the editor keeps the ZK-signed ingredient as it is, without restoring its original signer's certificate;
+- the new manifest's ingredient hashes resolve to the anonymized ingredient;
+- the ingredient's proof still verifies in the edited asset;
+- tools report the ZK signature as unsupported or unverified, not as trusted.
+
+Preserving the bytes alone is not success: the provenance and the proof must also hold.
 
 ### Goal 2: what works today
 

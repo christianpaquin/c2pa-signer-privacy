@@ -175,7 +175,7 @@ C2PA staples OCSP responses in the `rVals` unprotected header (§13.5.2); they n
 Under O1 every original assertion stays visible and authenticated, so the anonymizer inspects the claim before proving:
 
 - **Identity assertions** (for example `cawg.identity`) identify the signer by design: refuse, unless O2 is adopted to redact them.
-- **Ingredients with their own manifests** carry other signers' certificates: refuse in E2b (anonymizing multi-manifest provenance is out of scope).
+- **Ingredients with their own manifests** carry other signers' certificates: refuse in E2b (anonymizing multi-manifest provenance is out of scope; options in [E8](README.md#e8-ingredient-manifests)).
 - **Everything else** is reported, so the user sees what stays visible.
 
 **Metadata outside the hard binding.** The real sample's `c2pa.hash.data` excludes its EXIF and XMP segments as well as the manifest store, so that metadata (make, model, lens, capture time, and a GPS block) is neither authenticated by the claim nor covered by the proof. The anonymizer reports it in E2b. H6 adds scrubbing: excluded ranges can be overwritten in place at the same length without affecting the binding.

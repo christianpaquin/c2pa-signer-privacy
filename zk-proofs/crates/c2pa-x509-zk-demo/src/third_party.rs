@@ -260,9 +260,11 @@ pub struct AnonymizeReport {
     pub spare_bytes: usize,
 }
 
-/// Replace the active manifest's claim signature with `cose` (same length)
-/// and write the asset with the updated store.
-pub fn replace_signature(input: &Path, output: &Path, store: &[u8], manifest: &ActiveManifest, cose: &[u8]) -> Result<()> {
+/// The asset with the active manifest's claim signature replaced by `cose`
+/// (same length). Fails if the format's writer would change the asset's size,
+/// as c2pa-rs does for TIFF-based formats (TIFF, DNG): the hard binding would
+/// no longer match.
+fn rewrite_asset(input: &Path, store: &[u8], manifest: &ActiveManifest, cose: &[u8]) -> Result<Vec<u8>> {
     if cose.len() != manifest.cose_sign1_range.len() {
         bail!("the replacement signature is {} bytes, not {}", cose.len(), manifest.cose_sign1_range.len());
     }
@@ -272,9 +274,15 @@ pub fn replace_signature(input: &Path, output: &Path, store: &[u8], manifest: &A
     let asset = std::fs::read(input)?;
     let written = c2pa::jumbf_io::save_jumbf_to_memory(format, &asset, &updated).map_err(|e| anyhow!("failed to write the manifest store: {e}"))?;
     if written.len() != asset.len() {
-        bail!("rewriting the manifest store changed the asset's size; the hard binding would not match");
+        bail!("rewriting the manifest store changes the asset's size, so the hard binding would not match; this format is not supported (for example TIFF and DNG)");
     }
-    std::fs::write(output, written)?;
+    Ok(written)
+}
+
+/// Replace the active manifest's claim signature with `cose` (same length)
+/// and write the asset with the updated store.
+pub fn replace_signature(input: &Path, output: &Path, store: &[u8], manifest: &ActiveManifest, cose: &[u8]) -> Result<()> {
+    std::fs::write(output, rewrite_asset(input, store, manifest, cose)?)?;
     Ok(())
 }
 
@@ -295,6 +303,9 @@ pub fn anonymize(input: &Path, output: &Path, trust: &TrustList, prover: &Prover
     let mut signature = ZkSignature { issuing_chain: issuing_chain.clone(), vk_sha256: prover.vk_sha256()?, curve, time_stamp_token: token, proof: vec![0; expected_len] };
     signature.encode_exact(size)?;
     let spare_bytes = size - signature.encode(0, 0).len();
+    // The format must allow rewriting the store at the same size: try it with
+    // the original signature, also before proving.
+    rewrite_asset(input, &store, &manifest, &manifest.cose_sign1)?;
 
     signature.proof = prover.prove(&inputs)?;
     if signature.proof.len() != expected_len {

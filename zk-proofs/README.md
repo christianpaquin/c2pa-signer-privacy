@@ -444,6 +444,7 @@ What the prototype does not establish, in third-party mode. Every experiment sta
 - **Time-stamp linkability.** The public time-stamp token lets the TSA operator link the anonymized asset to the original request ([Q7](THIRD-PARTY-STATEMENT.md#q7-time-stamp-threat-model)).
 - **Unauthenticated trust lists.** Trust lists are read from files; the C2PA lists are not signed.
 - **Proof system.** Groth16 on BN254 (~100-bit security) with a single-party local setup, whose operator could forge proofs ([H5](#h5-production-proving-setup), [E7](#e7-curve-bn254-vs-bls12-381)).
+- **Single-manifest assets only.** Assets with ingredients or more than one manifest (edits) are refused, since the ingredients' manifests name their own signers ([E8](#e8-ingredient-manifests)).
 - **Metadata.** Data outside the hard binding (for example EXIF) is reported, not scrubbed ([H6](#h6-metadata-privacy-beyond-the-signature)).
 - **Cost.** 79 s and 7.5 GiB per asset, three quarters of it loading the proving key ([FEASIBILITY.md](FEASIBILITY.md#v1-third-party-e2b-measured-detail)).
 - **Tool display.** Standard C2PA validators reject the ZK signature, an unknown critical algorithm ([H8](#h8-c2patool-support)).
@@ -552,6 +553,21 @@ Decision D2, guided by the measurements from F2, E1, and E2b, cheapest first: na
 Decision D3: the same circuit and prover on both curves, comparing proving time, memory, and proof size against the security margin (~100 vs ~120 bits).
 
 Status: **BLS12-381 available as an option** (`c2pa-zk-gnark setup --curve bls12-381`; ~120 bits as a curve-level estimate); BN254 stays the default, also for reproducibility. Same statement and constraint count; per asset, 88 s with the raw key path (BN254: 33 s) and 302 s with full point checks (BN254: 72 s), in one session; proof 292 B, verifying key 3.2 KB, 8.5 GiB ([FEASIBILITY.md](FEASIBILITY.md#e7-bls12-381-as-an-option)).
+
+#### E8. Ingredient manifests
+
+An edited asset carries the manifests of its ingredients, each naming its own signer, and the anonymizer refuses such assets ([E2b](#e2b-third-party-anonymization)). Anonymizing them is harder than replacing one more signature: each later claim commits to its ingredients' manifests (a `c2pa.ingredient.v3` assertion holds hashes of the ingredient's manifest and of its claim signature), so an ingredient's signature cannot be replaced afterwards without invalidating every later signature.
+
+The value differs from anonymizing the active manifest. A proof about an ingredient establishes that a signed original with that claim existed; that the asset was derived from it, and how ("only resized"), rests on the later signer's assertions, and the ingredient's hard binding covers content no longer present. It can still matter: for example, a device capture resized by a distribution platform, where the platform's signature stays and the device's signer is hidden.
+
+Options, for consideration:
+
+- **Active manifest only (opt-in).** Anonymize the active signer and leave the ingredients' manifests as they are, reporting which signers stay visible. Useful when only the last signer needs privacy.
+- **Anonymize first, then edit.** The creator anonymizes before distribution; later editors take the anonymized asset as an ingredient and sign normally. No new statement; it needs C2PA tools and editing flows to keep a ZK-signed ingredient (to be checked).
+- **Prove the chain.** One proof covers a later signature, its commitment to the ingredient's original signature, and that signature under a trusted CA with its time stamp; each replaced signature becomes a ZK one. About two V1 statements in one; the commitment stays in the asset, so whoever holds the original can link the two.
+- **Cooperative re-signing.** A later editor re-signs over an anonymized ingredient (the second option, applied after the fact).
+
+Status: **open question.** The first step would be the second option's check: whether an anonymized asset survives as an ingredient through c2pa-rs and an editing flow.
 
 ### Goal 2: what works today
 

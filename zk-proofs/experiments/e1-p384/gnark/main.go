@@ -127,14 +127,7 @@ func one(name string) error {
 	}); err != nil {
 		return err
 	}
-	// Solving on its own needs the commitment hint the prover normally
-	// supplies; a fixed challenge stands in for it (the lookup identities hold
-	// for any challenge), so solve excludes computing the commitment itself.
-	fixedChallenge := solver.OverrideHint(solver.GetHintID(fcs.Bsb22CommitmentComputePlaceholder), func(_ *big.Int, _ []*big.Int, out []*big.Int) error {
-		out[0].Lsh(big.NewInt(1), 200).Add(out[0], big.NewInt(12345))
-		return nil
-	})
-	if err := timed("solve", func() error { _, err := ccs.Solve(full, fixedChallenge); return err }); err != nil {
+	if err := timed("solve", func() error { _, err := ccs.Solve(full, fixedChallenge()); return err }); err != nil {
 		return err
 	}
 	var proof groth16.Proof
@@ -167,6 +160,17 @@ func one(name string) error {
 	}
 	fmt.Println(resultPrefix + string(out))
 	return nil
+}
+
+// fixedChallenge lets a constraint system be solved without the prover: solving
+// on its own needs the commitment hint the prover normally supplies; a fixed
+// challenge stands in for it (the lookup identities hold for any challenge), so
+// solving excludes computing the commitment itself.
+func fixedChallenge() solver.Option {
+	return solver.OverrideHint(solver.GetHintID(fcs.Bsb22CommitmentComputePlaceholder), func(_ *big.Int, _ []*big.Int, out []*big.Int) error {
+		out[0].Lsh(big.NewInt(1), 200).Add(out[0], big.NewInt(12345))
+		return nil
+	})
 }
 
 // all measures each circuit in its own subprocess and writes one record.

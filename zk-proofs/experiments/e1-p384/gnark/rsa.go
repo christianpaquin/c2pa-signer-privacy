@@ -14,9 +14,10 @@ package main
 //
 // The modulus is an emulated element of exactly the key's size (variable
 // modulus arithmetic, gnark's ModMul), so one circuit serves every key of that
-// size. The signature s is private; s^65537 mod n is computed with 16
-// squarings and one multiplication, its canonical value (asserted below n) is
-// decomposed into bits, and the encoded message is checked bit by bit.
+// size, and the modulus is asserted to have exactly that size. The signature s
+// is private and asserted below n; s^65537 mod n is computed with 16 squarings
+// and one multiplication, its canonical value (asserted below n) is decomposed
+// into bits, and the encoded message is checked bit by bit.
 
 import (
 	"fmt"
@@ -122,12 +123,19 @@ func (c *RsaPssCircuit[T]) Define(api frontend.API) error {
 
 // rsaEncodedMessage computes s^65537 mod n and returns it as big-endian bytes,
 // each byte as eight bits, least significant first. The result is asserted to
-// be below n, so its bits are unique.
+// be below n, so its bits are unique. It also asserts what the encodings rely
+// on: n has exactly the circuit's key size (its top bit is set: PS256's emBits
+// is that size minus one), and s is below n (RSAVP1, RFC 8017, 5.2.2), so only
+// the canonical signature, the one a time stamp covers, is accepted.
 func rsaEncodedMessage[T emulated.FieldParams](api frontend.API, s, n *emulated.Element[T]) ([][]frontend.Variable, error) {
 	f, err := emulated.NewField[T](api)
 	if err != nil {
 		return nil, err
 	}
+	nBits := f.ToBits(n) // least significant first; the key size, as n is a witness with zero overflow
+	api.AssertIsEqual(nBits[len(nBits)-1], 1)
+	f.AssertIsLessOrEqual(s, f.ReduceStrict(f.Sub(n, f.One())))
+
 	m := s
 	for i := 0; i < 16; i++ {
 		m = f.ModMul(m, m, n)

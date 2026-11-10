@@ -9,33 +9,83 @@ import (
 	"testing"
 
 	"github.com/consensys/gnark-crypto/ecc"
+	"github.com/consensys/gnark/frontend"
+	"github.com/consensys/gnark/frontend/cs/r1cs"
 	"github.com/consensys/gnark/test"
 )
 
-// rsaCase is one input to an RSA circuit, with the verdict expected from both
-// the circuit and Go's crypto/rsa: every case is checked against the standard
-// library, so the circuit accepts exactly what a standard verifier accepts.
+// rsaCase is one input to an RSA circuit, with the verdict expected from the
+// circuit and from Go's crypto/rsa. Every case is checked against the standard
+// library: the circuit accepts exactly what a standard verifier accepts, except
+// what it refuses by design (outsideScope: a modulus smaller than the circuit's
+// key size, which a standard verifier accepts).
 type rsaCase struct {
-	name     string
-	n, sig   []byte
-	dgst     []byte
-	accepted bool
+	name         string
+	n, sig       []byte
+	dgst         []byte
+	accepted     bool
+	outsideScope bool
 }
 
+// checkRsaCases runs every case through crypto/rsa, gnark's test engine, and
+// the compiled R1CS (solved, without proving), so the verdicts hold for the
+// constraints a proof is made against, not only for the circuit's definition.
 func checkRsaCases(t *testing.T, cases []rsaCase, stdlib func(c rsaCase) error, build func(c rsaCase) fixture) {
 	t.Helper()
+	field := ecc.BN254.ScalarField()
+	ccs, err := frontend.Compile(field, r1cs.NewBuilder, build(cases[0]).circuit)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if err := stdlib(c); (err == nil) != c.accepted {
-				t.Fatalf("crypto/rsa verdict %v, want accepted=%v", err, c.accepted)
+			if err := stdlib(c); (err == nil) != (c.accepted || c.outsideScope) {
+				t.Fatalf("crypto/rsa verdict %v, want accepted=%v", err, c.accepted || c.outsideScope)
 			}
 			fx := build(c)
-			err := test.IsSolved(fx.circuit, fx.assignment, ecc.BN254.ScalarField())
-			if (err == nil) != c.accepted {
-				t.Fatalf("circuit verdict %v, want accepted=%v", err, c.accepted)
+			if err := test.IsSolved(fx.circuit, fx.assignment, field); (err == nil) != c.accepted {
+				t.Fatalf("test engine verdict %v, want accepted=%v", err, c.accepted)
+			}
+			w, err := frontend.NewWitness(fx.assignment, field)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ccs.IsSolved(w, fixedChallenge()); (err == nil) != c.accepted {
+				t.Fatalf("compiled R1CS verdict %v, want accepted=%v", err, c.accepted)
 			}
 		})
 	}
+}
+
+// plusModulus returns a signature s + n that still fits the key size, and the
+// digest it verifies (as s) under: s + n is the same signature modulo n, which
+// RSAVP1 refuses.
+func plusModulus(t *testing.T, key *rsa.PrivateKey, sign func(i int) (sig, dgst []byte)) ([]byte, []byte) {
+	t.Helper()
+	limit := new(big.Int).Lsh(big.NewInt(1), uint(8*key.Size()))
+	for i := range 256 {
+		sig, dgst := sign(i)
+		if s := new(big.Int).Add(bigBytes(sig), key.N); s.Cmp(limit) < 0 {
+			return s.FillBytes(make([]byte, key.Size())), dgst
+		}
+	}
+	t.Fatal("no signature s with s + n below the key size")
+	return nil, nil
+}
+
+// shortKey is a 2047-bit key: standard verifiers accept its signatures, and a
+// 2048-bit circuit must refuse its modulus (PS256's encoding size depends on
+// the modulus size).
+func shortKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2047)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key.N.BitLen() != 2047 || key.Size() != 256 {
+		t.Fatalf("got a %d-bit key", key.N.BitLen())
+	}
+	return key
 }
 
 // pkcs1Encoding returns EMSA-PKCS1-v1_5 for a key of k bytes, built by hand
@@ -79,17 +129,32 @@ func TestRsaPkcs1AcceptsExactlyTheStandardEncoding(t *testing.T) {
 	tamperedDigest := append([]byte(nil), dgst...)
 	tamperedDigest[31] ^= 1
 	tLen := len(prefix) + len(dgst)
+	bigSig, bigDigest := plusModulus(t, key, func(i int) ([]byte, []byte) {
+		d := digest("sha256", message(i))
+		sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sig, d
+	})
+	short := shortKey(t)
+	shortSig, err := rsa.SignPKCS1v15(rand.Reader, short, crypto.SHA256, dgst)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	cases := []rsaCase{
-		{"signed by crypto/rsa", n, signed, dgst, true},
-		{"hand-built encoding", n, alter(func([]byte) {}), dgst, true},
-		{"tampered signature", n, tamperedSig, dgst, false},
-		{"tampered digest", n, signed, tamperedDigest, false},
-		{"another key's modulus", other.N.Bytes(), signed, dgst, false},
-		{"block type 2", n, alter(func(em []byte) { em[1] = 0x02 }), dgst, false},
-		{"padding byte not 0xff", n, alter(func(em []byte) { em[10] = 0xfe }), dgst, false},
-		{"no zero separator", n, alter(func(em []byte) { em[k-tLen-1] = 0xff }), dgst, false},
-		{"SHA-384 algorithm identifier", n, alter(func(em []byte) { em[k-tLen+14] = 0x02 }), dgst, false},
+		{"signed by crypto/rsa", n, signed, dgst, true, false},
+		{"hand-built encoding", n, alter(func([]byte) {}), dgst, true, false},
+		{"tampered signature", n, tamperedSig, dgst, false, false},
+		{"tampered digest", n, signed, tamperedDigest, false, false},
+		{"another key's modulus", other.N.Bytes(), signed, dgst, false, false},
+		{"block type 2", n, alter(func(em []byte) { em[1] = 0x02 }), dgst, false, false},
+		{"padding byte not 0xff", n, alter(func(em []byte) { em[10] = 0xfe }), dgst, false, false},
+		{"no zero separator", n, alter(func(em []byte) { em[k-tLen-1] = 0xff }), dgst, false, false},
+		{"SHA-384 algorithm identifier", n, alter(func(em []byte) { em[k-tLen+14] = 0x02 }), dgst, false, false},
+		{"signature plus modulus", n, bigSig, bigDigest, false, false},
+		{"2047-bit modulus", short.N.Bytes(), shortSig, dgst, false, true},
 	}
 	checkRsaCases(t, cases,
 		func(c rsaCase) error {
@@ -156,18 +221,32 @@ func TestRsaPssAcceptsExactlyPS256(t *testing.T) {
 	}
 	tamperedDigest := append([]byte(nil), dgst...)
 	tamperedDigest[0] ^= 1
+	bigSig, _ := plusModulus(t, key, func(int) ([]byte, []byte) {
+		sig, err := rsa.SignPSS(rand.Reader, key, crypto.SHA256, dgst, pssOptions)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sig, dgst
+	})
+	short := shortKey(t)
+	shortSig, err := rsa.SignPSS(rand.Reader, short, crypto.SHA256, dgst, pssOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	cases := []rsaCase{
-		{"signed by crypto/rsa", n, signed, dgst, true},
-		{"hand-built encoding", n, built(salt, nil, nil), dgst, true},
-		{"tampered digest", n, signed, tamperedDigest, false},
-		{"another key's modulus", other.N.Bytes(), signed, dgst, false},
-		{"20-byte salt", n, shortSalt, dgst, false},
-		{"empty salt", n, built(nil, nil, nil), dgst, false},
-		{"trailer not 0xbc", n, built(salt, nil, func(em []byte) { em[k-1] = 0xbd }), dgst, false},
-		{"leftmost bit set", n, leftmostBitSet(t, key, dgst), dgst, false},
-		{"nonzero padding", n, built(salt, func(db []byte) { db[5] = 0x01 }, nil), dgst, false},
-		{"separator not 0x01", n, built(salt, func(db []byte) { db[len(db)-pssSaltLen-1] = 0x02 }, nil), dgst, false},
+		{"signed by crypto/rsa", n, signed, dgst, true, false},
+		{"hand-built encoding", n, built(salt, nil, nil), dgst, true, false},
+		{"tampered digest", n, signed, tamperedDigest, false, false},
+		{"another key's modulus", other.N.Bytes(), signed, dgst, false, false},
+		{"20-byte salt", n, shortSalt, dgst, false, false},
+		{"empty salt", n, built(nil, nil, nil), dgst, false, false},
+		{"trailer not 0xbc", n, built(salt, nil, func(em []byte) { em[k-1] = 0xbd }), dgst, false, false},
+		{"leftmost bit set", n, leftmostBitSet(t, key, dgst), dgst, false, false},
+		{"nonzero padding", n, built(salt, func(db []byte) { db[5] = 0x01 }, nil), dgst, false, false},
+		{"separator not 0x01", n, built(salt, func(db []byte) { db[len(db)-pssSaltLen-1] = 0x02 }, nil), dgst, false, false},
+		{"signature plus modulus", n, bigSig, dgst, false, false},
+		{"2047-bit modulus", short.N.Bytes(), shortSig, dgst, false, true},
 	}
 	checkRsaCases(t, cases,
 		func(c rsaCase) error {

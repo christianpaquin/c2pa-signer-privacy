@@ -21,6 +21,7 @@ How the X.509 + ZK prototype evolved, for reporting. Details live in the pull re
 | Real content | Nov 6 | #26 | A real device-signed photo under the official trust list anonymized and verified with the unchanged tools ([R2](DEPLOYMENT-FINDINGS.md#r2-anonymizing-a-real-asset)) |
 | Prover options | Nov 6–9 | #27–#29 | Proving-key loading: an opt-in raw path behind provenance records (E6); BLS12-381 as an option, BN254 the default (E7) |
 | RSA cost | Nov 10 | #30 | RSA PKCS#1 v1.5 and PS256 measured in gnark (E1) |
+| Scope | Nov 10 | #31, #32 | Ingredient manifests as an open question (E8); TIFF-based formats refused |
 
 ## Defects found in the original prototype
 
@@ -41,6 +42,7 @@ Recorded in [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIONS.md) (D1–D7) and
 - **Replace the signature in place** (Q1): the original claim and its hard binding stay valid, with nothing added to the asset.
 - **A trusted time stamp is required** (D7, Q6): validity at the time a TSA attested the signature, as C2PA defines it; the token is public, so the TSA operator can link the output to the original (Q7).
 - **gnark for E2b** (#22), after E1 measured ECDSA at a thirteenth of circom's constraints and P-384 available.
+- **Single-manifest assets only** (#31): later claims commit to their ingredients' signatures, so an earlier signer cannot be anonymized afterwards without breaking the provenance links; anonymizing before editing is the first option to test ([E8](README.md#e8-ingredient-manifests)).
 - **V0 kept as a frozen baseline** rather than retired, so the comparison can be reproduced. Moving past it was a decision (Q2), not a dominance result: the two disclose different information and accept different inputs.
 
 ## Measurements over time

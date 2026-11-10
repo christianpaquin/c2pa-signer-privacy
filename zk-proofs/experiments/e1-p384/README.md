@@ -1,6 +1,6 @@
-# E1 spike: P-384 and SHA-384 in-circuit
+# E1 spike: P-384, SHA-384, and RSA in-circuit
 
-Roadmap item [E1](../../README.md#e1-cost-of-reality-p-384-sha-384-and-rsa-in-circuit), first spike: what verifying a P-384 ECDSA signature with SHA-384 costs in a circuit, the algorithms the official C2PA trust list's CAs use, next to the P-256 and SHA-256 the current circuit uses. Results and conclusions are in [FEASIBILITY.md](../../FEASIBILITY.md#e1-p-384-and-sha-384-primitives).
+Roadmap item [E1](../../README.md#e1-cost-of-reality-p-384-sha-384-and-rsa-in-circuit): what verifying the signature algorithms of real C2PA deployments costs in a circuit, next to the P-256 and SHA-256 the current circuit uses. First P-384 ECDSA with SHA-384, the algorithms the official trust list's CAs use ([results](../../FEASIBILITY.md#e1-p-384-and-sha-384-primitives)); then RSA, PKCS#1 v1.5 for RSA CAs and PS256 for RSA signers ([results](../../FEASIBILITY.md#e1-rsa-primitives)). The directory keeps its first name so that earlier records and links stay valid.
 
 ## What is measured
 
@@ -11,10 +11,13 @@ Standalone primitives, Groth16 on BN254 with [gnark](https://github.com/consensy
 | `ecdsa-p256`, `ecdsa-p384` | ECDSA verification of a given digest under a public key |
 | `sha256-414`, `sha256-1500`, `sha384-414`, `sha384-1500` | A hash over a private message of 414 or 1,500 bytes equals a public digest |
 | `ca-p256-sha256-*`, `ca-p384-sha384-*` | A CA signature over a TBS: hash the private TBS bytes, verify the CA's signature over the digest under the CA's public key |
+| `rsa{2048,3072}-pkcs1-sha256`, `rsa4096-pkcs1-sha384` | RSASSA-PKCS1-v1_5 verification of a given digest under a public modulus, exponent 65537 |
+| `rsa{2048,3072,4096}-pss-sha256` | PS256 verification (RSASSA-PSS, SHA-256, MGF1-SHA-256, 32-byte salt) of a given digest under a private modulus, as the signer's key is in the statement |
+| `ca-rsa2048-sha384-1500`, `ca-rsa4096-sha256-1500`, `ca-rsa4096-sha384-*` | A CA signature over a TBS with RSA PKCS#1 v1.5, as above |
 
 414 bytes is the test PKI's signer TBS; 1,500 bytes stands for a larger real certificate (the current circuit's maximum).
 
-**Shortcuts** (these are primitive benchmarks): no certificate parsing or field extraction, no chain or validity checks; hashes run over a length fixed at compile time, whereas a real circuit hashes a variable-length TBS up to a maximum (at about the cost of the maximum). Fresh keys and signatures each run, deterministic stand-in messages; neither affects cost.
+**Shortcuts** (these are primitive benchmarks): no certificate parsing or field extraction, no chain or validity checks; hashes run over a length fixed at compile time, whereas a real circuit hashes a variable-length TBS up to a maximum (at about the cost of the maximum). Fresh keys and signatures each run, deterministic stand-in messages; neither affects cost. RSA: exponent 65537, key sizes that are multiples of 8 bits, and a 32-byte PSS salt only; the signature is not asserted below the modulus. RSA uses gnark's variable-modulus emulated arithmetic ([rsa.go](gnark/rsa.go)), with as many 64-bit limbs as the key, so one circuit serves every key of its size.
 
 ## Why gnark
 
@@ -26,11 +29,11 @@ Requires Go 1.27.3 or later (set in `go.mod`); Go downloads gnark on first build
 
 ```bash
 cd zk-proofs/experiments/e1-p384/gnark
-go test -short .   # SHA-384 vs crypto/sha512; the two 414-byte CA circuits accept and reject
-go test .          # every circuit accepts its fixture and rejects a tampered one (under a minute)
+go test -short .   # SHA-384 vs crypto/sha512; RSA-2048 verdicts vs crypto/rsa; the two 414-byte ECDSA CA circuits
+go test .          # also: every circuit accepts its fixture and rejects a tampered one (under a minute)
 go build -o e1bench .
 ./e1bench list
-./e1bench all -out ../../../bench/results/<date>-e1-p384-gnark.json   # all circuits, ~25 min
+./e1bench all -out ../../../bench/results/<date>-e1-gnark.json        # all 20 circuits, ~25 min
 ./e1bench all ecdsa-p384 sha384-414                                    # a subset, to stdout
 ```
 

@@ -19,6 +19,8 @@ How the X.509 + ZK prototype evolved, for reporting. Details live in the pull re
 | Foundation | Nov 3–4 | #14, #16, #17 | A C2PA-like test PKI and trust lists, with off-circuit chain validation (F1); witness checking and forgery tests (F3); a benchmark harness and the feasibility matrix with the measured baseline (F2) |
 | Third-party anonymization | Nov 4–5 | #18–#24 | The statement and time policy (E2a); the cost of P-384 and SHA-384 (E1); proving-key loading options; the statement in gnark, the anonymizer and verifier, and its benchmark (E2b) |
 | Real content | Nov 6 | #26 | A real device-signed photo under the official trust list anonymized and verified with the unchanged tools ([R2](DEPLOYMENT-FINDINGS.md#r2-anonymizing-a-real-asset)) |
+| Prover options | Nov 6–9 | #27–#29 | Proving-key loading: an opt-in raw path behind provenance records (E6); BLS12-381 as an option, BN254 the default (E7) |
+| RSA cost | Nov 10 | #30 | RSA PKCS#1 v1.5 and PS256 measured in gnark (E1) |
 
 ## Defects found in the original prototype
 
@@ -56,6 +58,7 @@ All on the same laptop ([reference machine](FEASIBILITY.md#reference-machine)); 
 | [V1 on a real photo](bench/results/2026-11-06-r2-device-photo.json) (#26) | Same, on a real asset under the official lists | 133 s | 7.4 GiB | The fixture took 110 s in the same session: consistent with similar cost; the machine ran 40% slower that day |
 | [V1, key loading variants](bench/results/2026-11-06-e6/) (E6) | Same as V1 | 77 s → **25–28 s** | 7.4 → 9.2 GiB | Raw or dumped proving key, points not validated on load, behind its setup hash. Adopted as an opt-in raw path with provenance records and streamed loading: 49 s against 97 s in a slower session, 6.7 GiB |
 | [V1 on BLS12-381](bench/results/2026-11-09-e7/) (E7) | Same, on a ~120-bit curve (curve-level estimate; option, BN254 stays default) | 302 s; **88 s** with the raw key path | 8.5 GiB | BN254 in the same session: 72 s and 33 s; raw BLS12-381 keys parse slowly even unchecked |
+| [E1 RSA primitives](bench/results/2026-11-10-e1-rsa-gnark.json) (#30) | RSA CA and PS256 signatures, next to ECDSA, in gnark | 4.8 s for an RSA-4096 CA over a 1.5 KB TBS (key resident; not comparable) | 3.2 GiB | RSA verification is cheaper than ECDSA (exponent 65537); PS256 costs 3.4–5.7× ES256, mostly MGF1 hashing |
 
 ## Lessons
 

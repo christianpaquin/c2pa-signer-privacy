@@ -17,7 +17,7 @@ Standalone primitives, Groth16 on BN254 with [gnark](https://github.com/consensy
 
 414 bytes is the test PKI's signer TBS; 1,500 bytes stands for a larger real certificate (the current circuit's maximum).
 
-**Shortcuts** (these are primitive benchmarks): no certificate parsing or field extraction, no chain or validity checks; hashes run over a length fixed at compile time, whereas a real circuit hashes a variable-length TBS up to a maximum (at about the cost of the maximum). Fresh keys and signatures each run, deterministic stand-in messages; neither affects cost. RSA: exponent 65537, key sizes that are multiples of 8 bits, and a 32-byte PSS salt only; the signature is not asserted below the modulus. RSA uses gnark's variable-modulus emulated arithmetic ([rsa.go](gnark/rsa.go)), with as many 64-bit limbs as the key, so one circuit serves every key of its size.
+**Shortcuts** (these are primitive benchmarks): no certificate parsing or field extraction, no chain or validity checks; hashes run over a length fixed at compile time, whereas a real circuit hashes a variable-length TBS up to a maximum (at about the cost of the maximum). Fresh keys and signatures each run, deterministic stand-in messages; neither affects cost. RSA: exponent 65537, keys of exactly 2048, 3072, or 4096 bits (asserted), and a 32-byte PSS salt only; the signature is asserted below the modulus. RSA uses gnark's variable-modulus emulated arithmetic ([rsa.go](gnark/rsa.go)), with as many 64-bit limbs as the key, so one circuit serves every key of its size.
 
 ## Why gnark
 
@@ -29,7 +29,7 @@ Requires Go 1.27.3 or later (set in `go.mod`); Go downloads gnark on first build
 
 ```bash
 cd zk-proofs/experiments/e1-p384/gnark
-go test -short .   # SHA-384 vs crypto/sha512; RSA-2048 verdicts vs crypto/rsa; the two 414-byte ECDSA CA circuits
+go test -short .   # SHA-384 vs crypto/sha512; RSA-2048 verdicts vs crypto/rsa (test engine and compiled R1CS); the two 414-byte ECDSA CA circuits
 go test .          # also: every circuit accepts its fixture and rejects a tampered one (under a minute)
 go build -o e1bench .
 ./e1bench list

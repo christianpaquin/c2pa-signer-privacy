@@ -568,14 +568,15 @@ Options, for consideration:
 - **Prove the chain.** A new verification statement, not two V1 statements side by side: it must connect the later claim's commitments (its ingredient hashes) to the hidden original ingredient bytes, and relate those to the modified ingredient that stays public; specify which standard ingredient-hash checks the proof replaces (they would otherwise fail after the replacement) and which remain ordinary validation; and define which commitments are disclosed and what they make linkable (whoever holds the original can link an asset through a retained hash). Its cost is a hypothesis: at least two V1 statements, plus hashing and parsing the ingredient's manifest.
 - **Cooperative re-signing.** A later editor re-signs over an anonymized ingredient (the second option, applied after the fact), which also repairs the ingredient hashes.
 
-Status: **open question.** The first step is the second option's check, an anonymized asset taken as an ingredient through c2pa-rs and an editing flow. It succeeds only if:
+Status: **"anonymize first, then edit" works with c2pa-rs 0.77** (tests `anonymized_asset_is_kept_as_an_ingredient` and, with real proofs, `anonymized_ingredient_proof_verifies_after_an_edit`). An anonymized test asset, opened as the parent ingredient of a resize and signed by a second signer from another test PKI, meets the four criteria set for the check:
 
-- the editor keeps the ZK-signed ingredient as it is, without restoring its original signer's certificate;
-- the new manifest's ingredient hashes resolve to the anonymized ingredient;
-- the ingredient's proof still verifies in the edited asset;
-- tools report the ZK signature as unsupported or unverified, not as trusted.
+- the ZK-signed manifest is carried byte for byte (claim and ZK signature), and neither the original signer's certificate, key, nor signature reappears;
+- the editor's ingredient hash resolves to it (`ingredient.manifest.validated`), and the editor's own manifest is valid and trusted;
+- its proof still verifies in the edited asset (`third_party::verify_ingredient`: keys, time stamp, issuing chain, and proof over the ingredient's claim; a changed claim byte is rejected);
+- c2pa-rs reports its signature as failing (`algorithm.unsupported`, `claimSignature.mismatch`), never as trusted.
 
-Preserving the bytes alone is not success: the provenance and the proof must also hold.
+The cost of this honesty: c2pa-rs rates the whole edited asset **Invalid**, because the ingredient's failures propagate to the overall state, although the editor's manifest is valid. A validator that understands ZK signatures (H8) would report the ingredient's proof instead. Not covered yet: the verifier CLI checks only the active manifest (`verify_ingredient` is a library function), and only one editing tool was tried.
+
 
 ### Goal 2: what works today
 

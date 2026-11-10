@@ -96,32 +96,35 @@ fn cbor_content(children: &[JBox]) -> Result<Range<usize>> {
     Ok(found.content.clone())
 }
 
-/// The active (last) manifest of a manifest store.
-pub fn active_manifest(store: &[u8]) -> Result<ActiveManifest> {
+/// The manifests of a manifest store, in store order (the active one last).
+fn manifest_boxes(store: &[u8]) -> Result<Vec<JBox>> {
     let top = boxes(store, 0..store.len())?;
     let root = top.first().filter(|b| &b.kind == b"jumb").ok_or_else(|| anyhow!("not a JUMBF manifest store"))?;
     let (store_label, manifests) = superbox(store, root.content.clone())?;
     if store_label != "c2pa" {
         bail!("manifest store label is {store_label:?}, not \"c2pa\"");
     }
-    let last = manifests.iter().filter(|b| &b.kind == b"jumb").last().ok_or_else(|| anyhow!("manifest store has no manifests"))?;
-    let (label, parts) = superbox(store, last.content.clone())?;
+    Ok(manifests.into_iter().filter(|b| &b.kind == b"jumb").collect())
+}
 
+/// A manifest's label, claim, and claim signature.
+fn parse_manifest(store: &[u8], manifest: &JBox) -> Result<ActiveManifest> {
+    let (label, parts) = superbox(store, manifest.content.clone())?;
     let (mut claim, mut signature) = (None, None);
     for part in parts.iter().filter(|b| &b.kind == b"jumb") {
         let (part_label, children) = superbox(store, part.content.clone())?;
         if part_label == "c2pa.claim.v2" || part_label == "c2pa.claim" {
             if claim.replace((part_label, cbor_content(&children)?)).is_some() {
-                bail!("more than one claim in the active manifest");
+                bail!("more than one claim in manifest {label}");
             }
         } else if part_label == "c2pa.signature" {
             if signature.replace(cbor_content(&children)?).is_some() {
-                bail!("more than one claim signature in the active manifest");
+                bail!("more than one claim signature in manifest {label}");
             }
         }
     }
-    let (claim_label, claim) = claim.ok_or_else(|| anyhow!("active manifest has no claim"))?;
-    let cose_sign1_range = signature.ok_or_else(|| anyhow!("active manifest has no claim signature"))?;
+    let (claim_label, claim) = claim.ok_or_else(|| anyhow!("manifest {label} has no claim"))?;
+    let cose_sign1_range = signature.ok_or_else(|| anyhow!("manifest {label} has no claim signature"))?;
     Ok(ActiveManifest {
         label,
         claim_label,
@@ -129,6 +132,18 @@ pub fn active_manifest(store: &[u8]) -> Result<ActiveManifest> {
         cose_sign1: store[cose_sign1_range.clone()].to_vec(),
         cose_sign1_range,
     })
+}
+
+/// The active (last) manifest of a manifest store.
+pub fn active_manifest(store: &[u8]) -> Result<ActiveManifest> {
+    let manifests = manifest_boxes(store)?;
+    let last = manifests.last().ok_or_else(|| anyhow!("manifest store has no manifests"))?;
+    parse_manifest(store, last)
+}
+
+/// Every manifest of a manifest store, in store order (the active one last).
+pub fn manifests(store: &[u8]) -> Result<Vec<ActiveManifest>> {
+    manifest_boxes(store)?.iter().map(|m| parse_manifest(store, m)).collect()
 }
 
 /// The number of manifests in a manifest store.

@@ -574,3 +574,154 @@ fn real_asset_end_to_end() {
     std::fs::write(&tampered, changed).unwrap();
     verify(&tampered).failure().stderr(predicates::str::contains("proof does not verify"));
 }
+
+// ---- E8: an anonymized asset as an ingredient ---------------------------------
+
+/// The anonymized asset edited by another signer (its own test PKI and TSA):
+/// opened as the parent ingredient and resized, as an editing or distribution
+/// tool would. Returns the edited asset and a c2pa context trusting both PKIs.
+fn edit_as_parent(fixture: &Fixture, anonymized: &Path) -> (PathBuf, impl Fn() -> c2pa::Context) {
+    use c2pa_x509_zk_demo::local_tsa::{LocalTsa, TimeStampingSigner};
+    let editor = fixture.dir.path().join("editor-pki");
+    let ok = std::process::Command::new("bash").arg(zk_root().join("generate-test-pki.sh")).arg("--mirror").arg(&editor).arg("Editor")
+        .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success();
+    assert!(ok, "generate-test-pki.sh failed");
+    let read = |p: PathBuf| std::fs::read_to_string(p).unwrap();
+    let chain = format!("{}\n{}", read(editor.join("signer.pem")).trim(), read(editor.join("issuing-ca.pem")).trim());
+    let signer = c2pa::create_signer::from_keys(chain.as_bytes(), read(editor.join("signer.key")).as_bytes(), c2pa::SigningAlg::Es256, None).unwrap();
+    let signer = TimeStampingSigner::new(signer, LocalTsa { cert: editor.join("tsa.pem"), key: editor.join("tsa.key") });
+
+    let anchors = ["trust-list.pem", "tsa-trust-list.pem"].iter()
+        .flat_map(|f| [read(fixture.pki(f)), read(editor.join(f))])
+        .collect::<Vec<_>>()
+        .join("\n");
+    let ekus = [C2PA_CLAIM_SIGNING_EKU, EMAIL_PROTECTION_EKU, TIME_STAMPING_EKU].join("\n");
+    let settings = serde_json::json!({
+        "trust": { "trust_anchors": anchors, "trust_config": ekus },
+        "verify": { "verify_trust": true, "verify_timestamp_trust": true },
+    });
+    let context = move || c2pa::Context::new().with_settings(settings.clone()).unwrap();
+
+    let definition = serde_json::json!({
+        "claim_version": 2,
+        "claim_generator_info": [{ "name": "e8-test-editor", "version": "0.1" }],
+        "assertions": [{ "label": "c2pa.actions.v2", "data": { "actions": [
+            { "action": "c2pa.opened", "parameters": { "ingredientIds": ["parent"] } },
+            { "action": "c2pa.resized" }
+        ] } }]
+    });
+    let mut builder = c2pa::Builder::from_context(context()).with_definition(definition.to_string()).unwrap();
+    builder
+        .add_ingredient_from_stream(
+            serde_json::json!({ "title": "anonymized.png", "relationship": "parentOf", "label": "parent" }).to_string(),
+            "image/png",
+            &mut std::fs::File::open(anonymized).unwrap(),
+        )
+        .unwrap();
+    let edited = fixture.dir.path().join("edited.png");
+    builder
+        .sign(&signer, "image/png", &mut std::fs::File::open(anonymized).unwrap(), &mut std::fs::File::create(&edited).unwrap())
+        .unwrap();
+    (edited, context)
+}
+
+/// E8, "anonymize first, then edit": c2pa-rs keeps an anonymized asset as an
+/// ingredient. The ZK-signed manifest is carried unchanged, without the
+/// original signer's certificate; the editor's ingredient hashes resolve to
+/// it; and its ZK signature is reported as unsupported, not trusted. (The
+/// proof itself is checked with real keys below.)
+#[test]
+fn anonymized_asset_is_kept_as_an_ingredient() {
+    let fixture = Fixture::new(true, true);
+    let anonymized = replaced_with_placeholder(&fixture);
+    let (edited, context) = edit_as_parent(&fixture, &anonymized);
+
+    // The ZK-signed manifest is carried byte for byte.
+    let zk = active_manifest(&manifest_store(&anonymized).unwrap()).unwrap();
+    let store = manifest_store(&edited).unwrap();
+    let all = c2pa_x509_zk_demo::jumbf::manifests(&store).unwrap();
+    assert_eq!(all.len(), 2);
+    let ingredient = all.iter().find(|m| m.label == zk.label).expect("the anonymized manifest in the edited asset");
+    assert_eq!((&ingredient.claim, &ingredient.cose_sign1), (&zk.claim, &zk.cose_sign1));
+    assert_ne!(all.last().unwrap().label, zk.label, "the editor's manifest is the active one");
+
+    // Nothing of the original signer is restored.
+    let original = fixture.original();
+    let signer = x509_cert::Certificate::from_der(original.signer_certificate().unwrap()).unwrap();
+    let after = std::fs::read(&edited).unwrap();
+    for (what, needle) in [
+        ("signer certificate", original.signer_certificate().unwrap()),
+        ("signer key", signer.tbs_certificate.subject_public_key_info.subject_public_key.raw_bytes()),
+        ("original signature", original.signature.as_slice()),
+    ] {
+        assert!(!after.windows(needle.len()).any(|w| w == needle), "{what} found in the edited asset");
+    }
+
+    // c2pa: the editor's manifest is valid and trusted, its ingredient hash
+    // resolves, and the only failures are the ingredient's ZK signature.
+    let reader = c2pa::Reader::from_context(context()).with_stream("image/png", std::fs::File::open(&edited).unwrap()).unwrap();
+    let results = reader.validation_results().unwrap();
+    let active = results.active_manifest().unwrap();
+    assert!(active.failure().is_empty(), "{:?}", active.failure());
+    let active_codes: Vec<_> = active.success().iter().map(|s| s.code()).collect();
+    for code in ["claimSignature.validated", "signingCredential.trusted", "timeStamp.trusted"] {
+        assert!(active_codes.contains(&code), "{code} missing: {active_codes:?}");
+    }
+    let deltas = results.ingredient_deltas().unwrap();
+    assert_eq!(deltas.len(), 1);
+    let delta = serde_json::to_value(&deltas[0]).unwrap();
+    let codes = |kind: &str| -> Vec<String> {
+        delta["validationDeltas"][kind].as_array().unwrap().iter().map(|s| s["code"].as_str().unwrap().to_string()).collect()
+    };
+    assert_eq!(codes("success"), ["ingredient.manifest.validated"]);
+    assert_eq!(codes("failure"), ["algorithm.unsupported", "claimSignature.mismatch"]);
+    let mut status: Vec<_> = reader.validation_status().unwrap().iter().map(|s| s.code().to_string()).collect();
+    status.sort();
+    assert_eq!(status, ["algorithm.unsupported", "claimSignature.mismatch"]);
+    assert_eq!(reader.validation_state(), c2pa::ValidationState::Invalid, "the unsupported ingredient signature makes the asset invalid to c2pa");
+}
+
+/// E8 with real proofs: the anonymized asset's proof still verifies as an
+/// ingredient of the edited asset, and a changed ingredient claim is rejected.
+/// Needs keys and the gnark CLI as for the end-to-end test.
+#[test]
+#[ignore = "needs gnark keys and CLI; proves for ~1.5 min"]
+fn anonymized_ingredient_proof_verifies_after_an_edit() {
+    let keys = std::env::var_os("C2PA_ZK_KEYS").map(PathBuf::from).unwrap_or_else(|| zk_root().join("target/gnark-keys"));
+    let gnark = zk_root().join("target/c2pa-zk-gnark");
+    assert!(keys.join("keys.json").exists() && gnark.exists(), "run c2pa-zk-gnark setup --keys {} first", keys.display());
+
+    let fixture = Fixture::new(true, true);
+    let anonymized = fixture.dir.path().join("anonymized.png");
+    Command::cargo_bin("c2pa-x509-zk-anonymizer")
+        .unwrap()
+        .arg("--third-party").arg("--keys").arg(&keys).arg("--gnark").arg(&gnark)
+        .arg("--input").arg(fixture.signed()).arg("--output").arg(&anonymized)
+        .arg("--trust-list").arg(fixture.pki("trust-list.pem"))
+        .assert()
+        .success();
+    let (edited, _) = edit_as_parent(&fixture, &anonymized);
+
+    let label = active_manifest(&manifest_store(&anonymized).unwrap()).unwrap().label;
+    let trust = c2pa_x509_zk_demo::TrustList::from_file(&fixture.pki("trust-list.pem")).unwrap();
+    let tsa_trust = fixture.pki("tsa-trust-list.pem");
+    let prover = Prover { cli: gnark, keys };
+    let store = manifest_store(&edited).unwrap();
+    let report = third_party::verify_ingredient(&store, &label, &trust, &tsa_trust, &prover).unwrap();
+    let issuer = c2pa_x509_zk_demo::extract_subject_dn(&std::fs::read(fixture.pki("issuing-ca.der")).unwrap()).unwrap();
+    assert_eq!(report.issuer, issuer);
+
+    // A changed byte in the ingredient's claim (the claim generator's name):
+    // the proof is bound to the claim.
+    let ingredient = c2pa_x509_zk_demo::jumbf::manifests(&store).unwrap().into_iter().find(|m| m.label == label).unwrap();
+    let mut changed = store.clone();
+    let claim_at = changed.windows(ingredient.claim.len()).position(|w| w == ingredient.claim.as_slice()).unwrap();
+    let name_at = claim_at + ingredient.claim.windows(8).position(|w| w == b"c2pa-x50").unwrap();
+    changed[name_at] = b'C';
+    let err = third_party::verify_ingredient(&changed, &label, &trust, &tsa_trust, &prover).unwrap_err().to_string();
+    assert!(err.contains("proof does not verify"), "{err}");
+
+    // The active manifest is not an anonymized one: verify_ingredient refuses it.
+    let editor_label = c2pa_x509_zk_demo::jumbf::manifests(&store).unwrap().last().unwrap().label.clone();
+    assert!(third_party::verify_ingredient(&store, &editor_label, &trust, &tsa_trust, &prover).is_err());
+}

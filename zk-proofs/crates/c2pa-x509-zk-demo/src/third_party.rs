@@ -7,7 +7,7 @@
 //! The time stamp is required (THIRD-PARTY-STATEMENT.md, Q6) and, for now,
 //! must be `sigTst2` (Q10).
 
-use crate::jumbf::{active_assertions, active_manifest, manifest_count, manifest_store, ActiveManifest};
+use crate::jumbf::{active_assertions, active_manifest, manifest_count, manifest_store, manifests, ActiveManifest};
 use crate::original_signature::{tst_info, OriginalSignature, TimeStampVersion, COSE_ALG_ES256, SHA256_OID};
 use crate::trust::{issuing_path_for, validate_issuing_chain, TrustList};
 use crate::zk_signature::{proof_len, ZkSignature, DEFAULT_CURVE};
@@ -394,6 +394,62 @@ pub fn c2pa_claim_checks(asset: &Path) -> Result<Vec<String>> {
 pub fn verify(asset: &Path, trust: &TrustList, tsa_trust: &Path, prover: &Prover, expected_issuer: Option<&str>) -> Result<VerifyReport> {
     let store = manifest_store(asset)?;
     let manifest = active_manifest(&store)?;
+    let claim = check_claim(&store, &manifest.claim)?;
+    let checked = verify_zk_signature(&manifest, trust, tsa_trust, prover, expected_issuer)?;
+    let c2pa_success = c2pa_claim_checks(asset)?;
+    if !checked.proof_verified(prover)? {
+        bail!("the proof does not verify for this asset's claim, issuing CA, and time stamp");
+    }
+    Ok(VerifyReport { claim, issuer: checked.issuer, path: checked.path, time: checked.time, c2pa_success })
+}
+
+/// What verifying an ingredient's ZK signature established.
+#[derive(Debug, Clone)]
+pub struct IngredientReport {
+    /// The ingredient manifest's label.
+    pub label: String,
+    /// The issuing CA's subject.
+    pub issuer: String,
+    /// The validated path, issuing CA first, ending at the trust anchor.
+    pub path: Vec<Vec<u8>>,
+    /// The time stamp's attested time (Unix seconds).
+    pub time: u64,
+}
+
+/// Verify the ZK signature of an ingredient's manifest (roadmap E8): the
+/// keys, the time stamp against the TSA trust list at its attested time, the
+/// issuing chain against the trust list at that time, and the proof over the
+/// ingredient's claim. Not checked here: the ingredient's hard binding, which
+/// covers content no longer in the asset, and the later manifest's reference
+/// to the ingredient (its ingredient hashes), which standard validation checks.
+pub fn verify_ingredient(store: &[u8], label: &str, trust: &TrustList, tsa_trust: &Path, prover: &Prover) -> Result<IngredientReport> {
+    let manifest = manifests(store)?
+        .into_iter()
+        .find(|m| m.label == label)
+        .ok_or_else(|| anyhow!("no manifest {label} in the store"))?;
+    let checked = verify_zk_signature(&manifest, trust, tsa_trust, prover, None)?;
+    if !checked.proof_verified(prover)? {
+        bail!("the proof does not verify for the ingredient's claim, issuing CA, and time stamp");
+    }
+    Ok(IngredientReport { label: manifest.label, issuer: checked.issuer, path: checked.path, time: checked.time })
+}
+
+/// The checks of a ZK signature that do not depend on the asset's content.
+struct CheckedSignature {
+    signature: ZkSignature,
+    public: PublicInputs,
+    issuer: String,
+    path: Vec<Vec<u8>>,
+    time: u64,
+}
+
+impl CheckedSignature {
+    fn proof_verified(&self, prover: &Prover) -> Result<bool> {
+        prover.verify(&self.public, &self.signature.proof)
+    }
+}
+
+fn verify_zk_signature(manifest: &ActiveManifest, trust: &TrustList, tsa_trust: &Path, prover: &Prover, expected_issuer: Option<&str>) -> Result<CheckedSignature> {
     let signature = ZkSignature::decode(&manifest.cose_sign1)?;
     let keys_curve = prover.curve()?;
     if signature.curve != keys_curve {
@@ -402,7 +458,6 @@ pub fn verify(asset: &Path, trust: &TrustList, tsa_trust: &Path, prover: &Prover
     if signature.vk_sha256 != prover.vk_sha256()? {
         bail!("the proof was made with other keys (verifying key {}), not those in {}", signature.vk_sha256, prover.keys.display());
     }
-    let claim = check_claim(&store, &manifest.claim)?;
 
     let info = tst_info(&signature.time_stamp_token)?;
     if info.hash_algorithm_oid != SHA256_OID {
@@ -412,18 +467,13 @@ pub fn verify(asset: &Path, trust: &TrustList, tsa_trust: &Path, prover: &Prover
     verify_time_stamp(&signature.time_stamp_token, &info.hashed_message, tsa_trust, time)?;
 
     let path = validate_issuing_chain(&signature.issuing_chain, trust, time)?;
-    let issuer = &signature.issuing_chain[0];
-    let issuer_dn = crate::extract_subject_dn(issuer)?;
+    let issuer_certificate = &signature.issuing_chain[0];
+    let issuer = crate::extract_subject_dn(issuer_certificate)?;
     if let Some(expected) = expected_issuer {
-        if issuer_dn != expected {
-            bail!("the issuing CA is {issuer_dn}, not the expected {expected}");
+        if issuer != expected {
+            bail!("the issuing CA is {issuer}, not the expected {expected}");
         }
     }
-    let c2pa_success = c2pa_claim_checks(asset)?;
-
-    let public = PublicInputs { claim: b64(&manifest.claim), issuer_certificate: b64(issuer), time, imprint: b64(&info.hashed_message) };
-    if !prover.verify(&public, &signature.proof)? {
-        bail!("the proof does not verify for this asset's claim, issuing CA, and time stamp");
-    }
-    Ok(VerifyReport { claim, issuer: issuer_dn, path, time, c2pa_success })
+    let public = PublicInputs { claim: b64(&manifest.claim), issuer_certificate: b64(issuer_certificate), time, imprint: b64(&info.hashed_message) };
+    Ok(CheckedSignature { signature, public, issuer, path, time })
 }

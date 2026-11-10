@@ -577,9 +577,11 @@ fn real_asset_end_to_end() {
 
 // ---- E8: an anonymized asset as an ingredient ---------------------------------
 
-/// The anonymized asset edited by another signer (its own test PKI and TSA):
-/// opened as the parent ingredient and resized, as an editing or distribution
-/// tool would. Returns the edited asset and a c2pa context trusting both PKIs.
+/// The anonymized asset edited by another signer (its own test PKI and TSA),
+/// as an editing or distribution tool would: its pixels resized to half size
+/// and saved as a new PNG, signed with the anonymized asset imported as the
+/// parent ingredient (`c2pa.opened`, then `c2pa.resized`). Returns the edited
+/// asset and a c2pa context trusting both PKIs.
 fn edit_as_parent(fixture: &Fixture, anonymized: &Path) -> (PathBuf, impl Fn() -> c2pa::Context) {
     use c2pa_x509_zk_demo::local_tsa::{LocalTsa, TimeStampingSigner};
     let editor = fixture.dir.path().join("editor-pki");
@@ -618,11 +620,38 @@ fn edit_as_parent(fixture: &Fixture, anonymized: &Path) -> (PathBuf, impl Fn() -
             &mut std::fs::File::open(anonymized).unwrap(),
         )
         .unwrap();
+    // The derived image: the anonymized pixels at half size, a new PNG with
+    // no manifest of its own until the editor signs it.
+    let pixels = image::open(anonymized).unwrap();
+    let resized = pixels.resize_exact(pixels.width() / 2, pixels.height() / 2, image::imageops::FilterType::Triangle);
+    let mut derived = std::io::Cursor::new(Vec::new());
+    resized.write_to(&mut derived, image::ImageFormat::Png).unwrap();
+    derived.set_position(0);
     let edited = fixture.dir.path().join("edited.png");
-    builder
-        .sign(&signer, "image/png", &mut std::fs::File::open(anonymized).unwrap(), &mut std::fs::File::create(&edited).unwrap())
-        .unwrap();
+    builder.sign(&signer, "image/png", &mut derived, &mut std::fs::File::create(&edited).unwrap()).unwrap();
+    let (before, after) = (image::image_dimensions(anonymized).unwrap(), image::image_dimensions(&edited).unwrap());
+    assert_eq!(after, (before.0 / 2, before.1 / 2), "the edited asset is the resized image");
     (edited, context)
+}
+
+/// The edited asset with its provenance link to the ingredient broken: one
+/// letter changed in the ingredient's actions assertion ("Created by" becomes
+/// "created by"). That assertion is covered by the ingredient's own claim and
+/// by the editor's ingredient hash, but not by the ZK proof, which covers the
+/// ingredient's claim. The store is rewritten with c2pa so the PNG stays
+/// well-formed.
+fn with_broken_ingredient_link(fixture: &Fixture, edited: &Path) -> PathBuf {
+    let store = manifest_store(edited).unwrap();
+    let text = b"Created by the c2pa-x509-zk test signer.";
+    let positions: Vec<_> = store.windows(text.len()).enumerate().filter(|(_, w)| *w == text).map(|(i, _)| i).collect();
+    assert_eq!(positions.len(), 1, "the description appears once, in the ingredient's manifest");
+    let mut changed = store.clone();
+    changed[positions[0]] = b'c';
+    let asset = std::fs::read(edited).unwrap();
+    let written = c2pa::jumbf_io::save_jumbf_to_memory("png", &asset, &changed).unwrap();
+    let broken = fixture.dir.path().join("broken-link.png");
+    std::fs::write(&broken, written).unwrap();
+    broken
 }
 
 /// E8, "anonymize first, then edit": c2pa-rs keeps an anonymized asset as an
@@ -682,7 +711,9 @@ fn anonymized_asset_is_kept_as_an_ingredient() {
 }
 
 /// E8 with real proofs: the anonymized asset's proof still verifies as an
-/// ingredient of the edited asset, and a changed ingredient claim is rejected.
+/// ingredient of the edited asset, a changed ingredient claim is rejected, and
+/// a broken provenance link does not affect it (that is standard validation's
+/// to report).
 /// Needs keys and the gnark CLI as for the end-to-end test.
 #[test]
 #[ignore = "needs gnark keys and CLI; proves for ~1.5 min"]
@@ -721,7 +752,40 @@ fn anonymized_ingredient_proof_verifies_after_an_edit() {
     let err = third_party::verify_ingredient(&changed, &label, &trust, &tsa_trust, &prover).unwrap_err().to_string();
     assert!(err.contains("proof does not verify"), "{err}");
 
+    // Negative control: with the editor's link to the ingredient broken (see
+    // broken_ingredient_link_is_reported_by_c2pa), the ingredient's proof still
+    // verifies. verify_ingredient establishes the ingredient's signature, not
+    // the provenance chain; that needs standard validation as well.
+    let broken = with_broken_ingredient_link(&fixture, &edited);
+    third_party::verify_ingredient(&manifest_store(&broken).unwrap(), &label, &trust, &tsa_trust, &prover).unwrap();
+
     // The active manifest is not an anonymized one: verify_ingredient refuses it.
     let editor_label = c2pa_x509_zk_demo::jumbf::manifests(&store).unwrap().last().unwrap().label.clone();
     assert!(third_party::verify_ingredient(&store, &editor_label, &trust, &tsa_trust, &prover).is_err());
+}
+
+/// E8 negative control: a broken link from the editor to the ingredient is
+/// reported by standard validation (the ingredient's hash no longer matches),
+/// whatever the ingredient's proof says; the proof is checked below.
+#[test]
+fn broken_ingredient_link_is_reported_by_c2pa() {
+    let fixture = Fixture::new(true, true);
+    let anonymized = replaced_with_placeholder(&fixture);
+    let (edited, context) = edit_as_parent(&fixture, &anonymized);
+    let broken = with_broken_ingredient_link(&fixture, &edited);
+    let reader = c2pa::Reader::from_context(context()).with_stream("image/png", std::fs::File::open(&broken).unwrap()).unwrap();
+    let results = reader.validation_results().unwrap();
+    assert!(results.active_manifest().unwrap().failure().is_empty(), "the editor's own manifest is untouched");
+    let delta = serde_json::to_value(&results.ingredient_deltas().unwrap()[0]).unwrap();
+    let codes = |kind: &str| -> Vec<String> {
+        delta["validationDeltas"][kind].as_array().unwrap().iter().map(|s| s["code"].as_str().unwrap().to_string()).collect()
+    };
+    assert!(codes("success").is_empty(), "{:?}", codes("success"));
+    let failures = codes("failure");
+    for code in ["ingredient.manifest.mismatch", "assertion.hashedURI.mismatch"] {
+        assert!(failures.contains(&code.to_string()), "{code} missing: {failures:?}");
+    }
+    // The overall state is Invalid with or without the broken link: only the
+    // codes tell them apart.
+    assert_eq!(reader.validation_state(), c2pa::ValidationState::Invalid);
 }

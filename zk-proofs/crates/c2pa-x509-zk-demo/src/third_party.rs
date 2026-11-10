@@ -422,6 +422,10 @@ pub struct IngredientReport {
 /// ingredient's claim. Not checked here: the ingredient's hard binding, which
 /// covers content no longer in the asset, and the later manifest's reference
 /// to the ingredient (its ingredient hashes), which standard validation checks.
+/// Success establishes the ingredient's signature, not the provenance chain:
+/// a broken link from the later manifest leaves this result unchanged, so
+/// callers must also run standard validation and check that the ingredient's
+/// hash matches (`ingredient.manifest.validated`).
 pub fn verify_ingredient(store: &[u8], label: &str, trust: &TrustList, tsa_trust: &Path, prover: &Prover) -> Result<IngredientReport> {
     let manifest = manifests(store)?
         .into_iter()

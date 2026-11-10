@@ -22,7 +22,7 @@ How the X.509 + ZK prototype evolved, for reporting. Details live in the pull re
 | Prover options | Nov 6–9 | #27–#29 | Proving-key loading: an opt-in raw path behind provenance records (E6); BLS12-381 as an option, BN254 the default (E7) |
 | RSA cost | Nov 10 | #30 | RSA PKCS#1 v1.5 and PS256 measured in gnark (E1) |
 | Scope | Nov 10 | #31, #32 | Ingredient manifests as an open question (E8); TIFF-based formats refused |
-| Anonymize, then edit | Nov 10 | #33 | An anonymized asset survives an edit as an ingredient, with its proof still verifying; c2pa-rs rates the edited asset Invalid (E8) |
+| Anonymize, then edit | Nov 10 | #33 | An anonymized asset survives a resize as an ingredient, with its proof still verifying; the proof covers the ingredient's signature, not the link to it, which standard validation checks; c2pa-rs rates the edited asset Invalid either way (E8) |
 
 ## Defects found in the original prototype
 

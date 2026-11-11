@@ -44,7 +44,18 @@ The chain of trust of [E2a](THIRD-PARTY-STATEMENT.md#the-chain-of-trust), with t
 | Trusted issuer | Off-circuit: the verifier validates the disclosed issuing chain against the trust list at `t`; the CA's key is a public input | **In-circuit:** the CA's key, with its validity period, is a leaf of the Merkle tree whose root `R` is public; `notBefore ≤ t ≤ notAfter`. The verifier rebuilds `R` from its trust list |
 | Authorized signer, original signature, claim, time | Unchanged | Unchanged, with the CA's key now private |
 
-What the verifier learns: *the claim in this asset was signed by the holder of a certificate that a CA on trust list `R` issued for claim signing, valid at time `t`*.
+What the verifier learns: *the claim in this asset was signed by the holder of a certificate that was issued for claim signing by some CA of the circuit's key type listed directly in a verifier-approved set `R`, and valid at time `t`*. Two qualifications: H4 proves membership of the **issuing CA**, not of the signer (signer membership is [E3](README.md#e3-trust-model-b-merkle-membership)); and the CA must be **directly listed**, so certificates issued by an unlisted intermediate under a listed root are not covered ([I2](#i2-chain-depth)).
+
+What a membership proof can and cannot express:
+
+| Desired statement | Supported? |
+|---|---|
+| Issued by some supported CA on the complete approved list | Yes |
+| Issued by some CA in an approved subset (for example, the CAs of organizations A, B, and C), without revealing which | Yes, with that subset's root; no new trusted setup, since the root is a public input and the depth is fixed. A proof against the full list's root does not prove membership in a subset: the proof must be made against the subset's root |
+| Signed by one of several named individuals or directly trusted signer keys | No: that is signer membership ([E3](README.md#e3-trust-model-b-merkle-membership)) |
+| Issued by some CA in an approved subset, without revealing which subset | No: the root identifies the set |
+
+The verifier must approve the root ([I4](#i4-tree-shape-and-verifier-policy)): accepting a root supplied by the asset would let anyone define their own trust list.
 
 | Public | Private (new) |
 |---|---|
@@ -57,7 +68,7 @@ What the verifier learns: *the claim in this asset was signed by the holder of a
 
 Which certificates become leaves.
 
-- **Every certificate on the signer trust list with the circuit's key type (proposed).** For the current statement, the 28 P-384 certificates, roots and intermediates alike: a listed certificate is a trust anchor, whatever its position in its organization's hierarchy. The verifier admits only certificates that are CAs (basic constraints, key usage) when it builds the tree.
+- **Every certificate on the signer trust list with the circuit's key type (proposed).** For the current statement, the 28 P-384 certificates, roots and intermediates alike: a listed certificate is a trust anchor, whatever its position in its organization's hierarchy. **Eligibility is unchanged from the disclosed form:** building the tree applies the verifier's existing CA check (`check_ca` in [`trust.rs`](crates/c2pa-x509-zk-demo/src/trust.rs)) to each certificate: a CA certificate, key usage (if any) allowing certificate signing, an extended key usage (if any) allowing C2PA claim signing, no unrecognized critical extension, and a path length allowing it to issue end-entity certificates. Only the validity at `t` moves into the circuit ([I3](#i3-the-leaf-and-the-hash)). **Constraints on the signer's subject cannot be checked** when the subject is hidden: certificates carrying name constraints or policy constraints, critical or not, are left out of the tree (enforcing them in-circuit is out of scope).
 - **Only listed intermediates.** A smaller set (11 P-384), reflecting where issuance actually happens, but excluding organizations that issue end-entity certificates from their root.
 
 Per-key-type trees follow from fixed circuits: an RSA-4096 CA would need the RSA CA circuit ([E1](FEASIBILITY.md#e1-rsa-primitives)) and its own tree, and the algorithm, being disclosed, splits the anonymity set.
@@ -69,19 +80,23 @@ Per-key-type trees follow from fixed circuits: an RSA-4096 CA would need the RSA
 
 ### I3. The leaf and the hash
 
-- **Leaf** = H(CA key, `notBefore`, `notAfter`): the key the circuit verifies the signer certificate with, and the validity period the circuit must now check at `t` (today checked off-circuit). Other properties of the CA certificate (CA flag, key usage, name constraints) are checked by the verifier when it builds the tree; they do not depend on `t`.
+- **Leaf** = H(CA key, `notBefore`, `notAfter`): the key the circuit verifies the signer certificate with, and the validity period the circuit must now check at `t` (today checked off-circuit). The CA's other properties do not depend on `t` and are checked when the tree is built ([I1](#i1-the-membership-set)). The exact encoding is in [Tree format, version 1](#tree-format-version-1).
 - **Hash: Poseidon2 over the proof's scalar field (proposed).** Cheap in-circuit (a few hundred constraints per hash, so a depth-8 path is negligible next to V1's 4.7M), available in gnark (`std/hash/poseidon2`, with `std/accumulator/merkle`). It is curve-specific: BN254 and BLS12-381 keys ([E7](README.md#e7-curve-bn254-vs-bls12-381)) give different roots, so the root is computed by the same Go code as the proof, in the gnark CLI, for prover and verifier alike.
 - **SHA-256** would make the root computable by any tool, but costs about 54k constraints per block: about 0.5M for the leaf and a depth-8 path, roughly +10%.
 
-### I4. Tree shape and list updates
+### I4. Tree shape and verifier policy
 
-- **Fixed depth 8 (proposed):** up to 256 leaves, leaves sorted by hash, empty leaves zero. The list's growth does not change the circuit, and the depth does not reveal the list's size.
-- **Updates.** The root changes whenever the trust list does. The ZK signature carries `R` and an identifier of the list version; the verifier accepts `R` if it equals the root of a list version it trusts. Without a history of lists, an asset anonymized under an older list stops verifying when the list changes. Proposed: the verifier takes a set of trusted list versions (the official list is versioned in git), and reports which version matched. Whether a CA removed from the list should still be accepted for content signed while it was listed is a policy question C2PA answers for ordinary validation; the verifier follows it by choosing which versions it trusts.
+- **Fixed depth 8 (proposed):** up to 256 leaves, built as specified in [Tree format, version 1](#tree-format-version-1). The list's growth does not change the circuit, and the depth does not reveal the list's size.
+- **Approved roots.** The verifier is configured with the roots it approves, each built by the verifier itself from a trust-list snapshot or from a subset it approves. The asset's root must equal one of them. The ZK signature also carries an identifier of the list version, but only as a hint for finding the root: it is never trusted, and an asset cannot select a policy through it.
+- **Subsets.** An approved subset is a list like any other (for example, the CAs of a few organizations), built into its own root. The root reveals which subset was used, and a narrow subset narrows the anonymity set accordingly; results report the set's size.
+- **Older lists and removed CAs.** The root changes whenever the trust list does, and accepting an old root alone does not establish that its CAs were trusted at the signing time. Proposed: each approved snapshot comes with the interval during which it applied (from its effective date until the next snapshot), and the verifier requires the asset's `t` to fall in that interval. A CA removed from the list then stays acceptable for content time-stamped while it was listed, and not after; a verifier wanting stricter treatment (for example, after a CA's compromise) withdraws the affected snapshots from its policy. The official list is versioned in git, which gives the snapshots and their dates.
+- **Tests:** a root the verifier did not approve; a list identifier naming one snapshot with the root of another, or a root of an approved snapshot with `t` outside its interval (both rejected); a subset's root accepted only when the verifier approves that subset.
 
 ### I5. The output format
 
 - The ZK signature drops the issuing chain (saving about 1–2 KB, more room for the proof and a hidden token) and carries `R` and the list identifier instead.
-- **D4 is revised:** `x5chain` is absent, since no certificate is disclosed. Standard tools that need a signing certificate (c2pa-rs treats its absence as fatal) then fail earlier than today, where they display the issuing CA; display needs the same changes as [H8](README.md#h8-c2patool-support). The critical private-use algorithm still makes the signature fail closed.
+- **D4 is revised:** `x5chain` is absent, since no certificate is disclosed. Standard tools then fail earlier than today, where they display the issuing CA; display needs the same changes as [H8](README.md#h8-c2patool-support). The critical private-use algorithm still makes the signature fail closed.
+- **Our own verifier depends on it too.** Checked with a probe on the mirror fixture (a ZK signature without `x5chain`, same size): c2pa-rs 0.77 does not read the manifest at all ("could not find signing certificate chain in COSE signature"), so the verifier's c2pa checks of the claim's assertions and hard binding would fail. **Requirement:** those checks are preserved, never disabled. Proposed: the verifier validates a local copy of the asset whose ZK signature carries a fixed placeholder certificate (the same for every asset, identifying no one, padded to the same size so the hard binding's exclusions are unchanged), ignoring only the signature and credential codes, as it does today; the output itself carries no certificate. Alternative: validate the assertion hashes and the hard binding directly, which avoids the copy but reimplements part of C2PA validation.
 - `--issuer` (checking which CA issued the certificate) no longer applies; a verifier wanting a specific CA uses the disclosed form.
 
 ### I6. The time-stamp token
@@ -94,6 +109,16 @@ For the gain of [What H4 can and cannot hide](#what-h4-can-and-cannot-hide) to h
 
 - **Proposed: a choice of the anonymizer,** with two statements (and two key sets): the current one (CA disclosed, `--issuer` possible, cheaper to display) and the H4 one. Disclosing the CA can be useful (a verifier may trust some CAs more), and the choice is visible in the output.
 - **Proposed default: the CA disclosed; the hidden CA is opt-in** (an anonymizer flag such as `--hide-issuer`, named at implementation), as for BLS12-381 ([E7](README.md#e7-curve-bn254-vs-bls12-381)). The disclosed form needs only the current trust list, keeps `--issuer`, and displays as today, and the hidden form gains little where the claim and the time-stamp token already name the organization ([What H4 can and cannot hide](#what-h4-can-and-cannot-hide)). Revisit the default if the hidden token (I6) lands and hiding becomes the common need.
+
+## Tree format, version 1
+
+Specified so that the root is reproducible and has a single interpretation.
+
+- **Leaf inputs,** in order, each a field element: a domain tag (`1`, leaf), the format version (`1`), a key-type tag (`1`, P-384), the CA key's x coordinate as three 128-bit limbs (most significant first), the y coordinate likewise, then `notBefore` and `notAfter` as Unix seconds (each below 2^64). Coordinates are canonical (below P-384's field modulus) and are never reduced into a single field element, so the encoding is injective. In the circuit, the 128-bit limbs are composed from the emulated key's range-checked 64-bit limbs, with the coordinates asserted canonical.
+- **Internal nodes:** H(`2`, left, right). **Empty leaves:** H(`3`). Distinct tags separate the three, so no leaf can equal a node or an empty leaf by construction.
+- **Hash:** Poseidon2 with gnark-crypto's default parameters for the proof's scalar field, in gnark's Merkle–Damgård mode (`std/hash/poseidon2`), pinned by the gnark version recorded with the keys. BN254 and BLS12-381 give different roots.
+- **Ordering:** leaves sorted by their hash as an integer, ascending; a certificate listed twice (the same key and validity) gives one leaf; the same key with different validity periods (renewals) gives one leaf each. Padding with empty leaves to 256; more than 256 eligible certificates is refused (a new format version).
+- **Recorded with the root,** in the ZK signature: the format version, the key type, the proof's curve, and the list identifier (a hint, [I4](#i4-tree-shape-and-verifier-policy)).
 
 ## Estimated cost
 
@@ -110,7 +135,7 @@ Verification cost and proof size are unchanged; the ZK signature shrinks by the 
 
 ## Proposed plan
 
-1. **H4 core (I1–I5 and I7 as proposed, opt-in):** Poseidon2 tree over the P-384 certificates of the signer trust list, built by the gnark CLI; the statement takes `R` instead of the CA's key and checks the CA's validity at `t`; the ZK signature carries `R` and the list identifier; the verifier rebuilds `R` from the trusted list versions. Tests: membership forgery (a key not on the list, a wrong path, a CA outside its validity at `t`), a root from another list, and the existing end-to-end and real-asset tests. Measured with the harness against V1.
+1. **H4 core (I1–I5 and I7 as proposed, opt-in):** a Poseidon2 tree (version 1) over the eligible P-384 certificates of the signer trust list, built by the gnark CLI; the statement takes `R` instead of the CA's key and checks the CA's validity at `t`; the ZK signature carries `R` and the list identifier; the verifier checks `R` against its approved roots and their intervals, and keeps its c2pa checks through the placeholder copy. Tests: membership forgery (a key not on the list, a wrong path, a CA outside its validity at `t`, a non-canonical coordinate), the policy tests of [I4](#i4-tree-shape-and-verifier-policy), assertion and hard-binding failures still detected without `x5chain`, and the existing end-to-end and real-asset tests. Measured with the harness against V1.
 2. **Hidden token (I6),** as a separate experiment once H4's core is in.
 3. **One unlisted intermediate (I2),** only if real assets need it.
 
@@ -119,5 +144,5 @@ Verification cost and proof size are unchanged; the ZK signature shrinks by the 
 Unchanged from [E2a](THIRD-PARTY-STATEMENT.md#guarantees-and-shortcuts), except:
 
 - **Gained:** the issuing CA is hidden among the listed CAs of the circuit's key type, against verifiers who do not hold the original asset.
-- **Not gained:** the claim's content and, with a public token, the TSA still disclose what they disclose today; for vertically integrated pipelines that is the organization and often the product.
-- **New trust in the verifier's list history:** an asset verifies only against a list version the verifier trusts, so trust-list governance (which versions, removals) becomes part of verification.
+- **Not gained:** the claim's content and, with a public token, the TSA still disclose what they disclose today; for vertically integrated pipelines that is the organization and often the product. H4 hides which CA's membership was proved; it does not prevent inferring the issuer from the claim, metadata, the token, or a small set. Implementation results must report these residual disclosures and the anonymity set's size.
+- **New trust in the verifier's policy:** an asset verifies only against a root the verifier approved, within the interval of its snapshot, so trust-list governance (which snapshots and subsets, removals) becomes part of verification.

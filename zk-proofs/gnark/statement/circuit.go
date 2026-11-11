@@ -120,6 +120,31 @@ func (r *reader) skip(p frontend.Variable, tag byte) frontend.Variable {
 }
 
 func (c *Circuit) Define(api frontend.API) error {
+	return define(api, c.shared(), &c.CAKey)
+}
+
+// shared are the inputs common to both statements (the hidden-issuer one
+// differs only in how the CA's key is established).
+type shared struct {
+	Sizes        Sizes
+	Claim        []frontend.Variable
+	ClaimLen     frontend.Variable
+	Time         frontend.Variable
+	Imprint      [2]frontend.Variable
+	SigStructure []frontend.Variable
+	ProtectedLen frontend.Variable
+	ClaimSig     []frontend.Variable
+	CASig        *ecdsa.Signature[emulated.P384Fr]
+}
+
+func (c *Circuit) shared() *shared {
+	return &shared{c.Sizes, c.Claim, c.ClaimLen, c.Time, c.Imprint, c.SigStructure, c.ProtectedLen, c.ClaimSig, &c.CASig}
+}
+
+// define is the statement, with the issuing CA's key given: public in
+// Circuit, private and proven a member of the issuer tree in
+// HiddenIssuerCircuit.
+func define(api frontend.API, c *shared, caKey *ecdsa.PublicKey[emulated.P384Fp, emulated.P384Fr]) error {
 	s := c.Sizes
 	if len(c.SigStructure) != s.sigStructureLen() || len(c.Claim) != s.claimElements() || len(c.ClaimSig) != signatureLen {
 		return fmt.Errorf("circuit not allocated for its sizes")
@@ -182,7 +207,7 @@ func (c *Circuit) Define(api frontend.API) error {
 	if err != nil {
 		return err
 	}
-	c.CAKey.Verify(api, sw_emulated.GetCurveParams[emulated.P384Fp](), caMsg, &c.CASig)
+	caKey.Verify(api, sw_emulated.GetCurveParams[emulated.P384Fp](), caMsg, c.CASig)
 
 	// ---- Walk the TBS ----------------------------------------------------
 	for i, b := range tbsVersion {
@@ -406,7 +431,7 @@ func (r *reader) notCA(pos, length, present frontend.Variable) {
 // imprint asserts the public imprint is the SHA-256 of the countersignature
 // structure ["CounterSignature", P, h”, bstr(bstr(r || s))], built from the
 // Sig_structure's P and the claim signature.
-func (c *Circuit) imprint(api frontend.API, bapi *uints.Bytes, r *reader, sig []uints.U8, pLen frontend.Variable) error {
+func (c *shared) imprint(api frontend.API, bapi *uints.Bytes, r *reader, sig []uints.U8, pLen frontend.Variable) error {
 	s := c.Sizes
 	cs := make([]uints.U8, s.countersignatureLen())
 	for i, b := range csContext {

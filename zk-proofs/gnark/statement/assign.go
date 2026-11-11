@@ -4,15 +4,19 @@ import (
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/std/math/emulated"
 	gnarkecdsa "github.com/consensys/gnark/std/signature/ecdsa"
+
+	"c2pa-zk-gnark/issuertree"
 )
 
 // Public is what the verifier derives from the anonymized asset: the claim,
@@ -170,4 +174,89 @@ func certificateSignature(der []byte) (struct{ R, S *big.Int }, error) {
 		return sig, fmt.Errorf("signer certificate's signature is not ECDSA: %v", err)
 	}
 	return sig, nil
+}
+
+// HiddenPublic is what the verifier supplies for the hidden-issuer statement:
+// as Public, with the root of an issuer tree it approves (hex) in place of the
+// issuing CA's certificate.
+type HiddenPublic struct {
+	Claim   []byte `json:"claim"`
+	Root    string `json:"issuer_root"`
+	Time    int64  `json:"time"`
+	Imprint []byte `json:"imprint"`
+}
+
+// AssignHidden builds the full hidden-issuer assignment: the statement's
+// inputs, the issuing CA's key, and its membership proof in the tree.
+func AssignHidden(in Inputs, tree *issuertree.Tree, s Sizes) (*HiddenIssuerCircuit, error) {
+	full, err := Assign(in, s)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(in.IssuerCert)
+	proof, err := tree.Prove(hex.EncodeToString(sum[:]))
+	if err != nil {
+		return nil, fmt.Errorf("the issuing CA is not in the issuer tree: %w", err)
+	}
+	c := NewHiddenIssuerCircuit(s)
+	copy(c.Claim, full.Claim)
+	c.ClaimLen = full.ClaimLen
+	c.Root = tree.Root()
+	c.Time = full.Time
+	c.Imprint = full.Imprint
+	copy(c.SigStructure, full.SigStructure)
+	c.ProtectedLen = full.ProtectedLen
+	copy(c.ClaimSig, full.ClaimSig)
+	c.CASig = full.CASig
+	c.CAKey = full.CAKey
+	c.CANotBefore = proof.CA.NotBefore
+	c.CANotAfter = proof.CA.NotAfter
+	for d := 0; d < issuertree.Depth; d++ {
+		c.Siblings[d] = proof.Siblings[d]
+		c.IndexBits[d] = (proof.Index >> d) & 1
+	}
+	return c, nil
+}
+
+// AssignHiddenPublic builds the public part of the hidden-issuer assignment
+// (the private part is zero), as the verifier does.
+func AssignHiddenPublic(pub HiddenPublic, s Sizes) (*HiddenIssuerCircuit, error) {
+	root, ok := new(big.Int).SetString(pub.Root, 16)
+	if !ok || root.Sign() < 0 {
+		return nil, fmt.Errorf("issuer_root is not a hex number")
+	}
+	// The claim, time, and imprint checks and encodings are Circuit's; the
+	// issuer certificate is not used.
+	if len(pub.Claim) < 24 || len(pub.Claim) > s.MaxClaim {
+		return nil, fmt.Errorf("claim is %d bytes; the circuit takes 24 to %d", len(pub.Claim), s.MaxClaim)
+	}
+	if len(pub.Imprint) != 32 {
+		return nil, fmt.Errorf("imprint is %d bytes, not 32 (SHA-256)", len(pub.Imprint))
+	}
+	c := NewHiddenIssuerCircuit(s)
+	padded := make([]byte, len(c.Claim)*claimChunk)
+	copy(padded, pub.Claim)
+	for k := range c.Claim {
+		c.Claim[k] = new(big.Int).SetBytes(padded[k*claimChunk : (k+1)*claimChunk])
+	}
+	c.ClaimLen = len(pub.Claim)
+	c.Root = root
+	c.Time = pub.Time
+	c.Imprint = [2]frontend.Variable{new(big.Int).SetBytes(pub.Imprint[:16]), new(big.Int).SetBytes(pub.Imprint[16:])}
+	for i := range c.SigStructure {
+		c.SigStructure[i] = 0
+	}
+	c.ProtectedLen = 0
+	for i := range c.ClaimSig {
+		c.ClaimSig[i] = 0
+	}
+	zeroFr := emulated.ValueOf[emulated.P384Fr](0)
+	zeroFp := emulated.ValueOf[emulated.P384Fp](0)
+	c.CASig = gnarkecdsa.Signature[emulated.P384Fr]{R: zeroFr, S: zeroFr}
+	c.CAKey = gnarkecdsa.PublicKey[emulated.P384Fp, emulated.P384Fr]{X: zeroFp, Y: zeroFp}
+	c.CANotBefore, c.CANotAfter = 0, 0
+	for d := 0; d < issuertree.Depth; d++ {
+		c.Siblings[d], c.IndexBits[d] = 0, 0
+	}
+	return c, nil
 }

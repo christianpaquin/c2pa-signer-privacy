@@ -205,6 +205,6 @@ What an E2b result under the defaults may claim, and what it must list as not es
 |---|---|
 | The claim was signed by a key certified for claim signing (EKU, not a CA, read from the parsed certificate) by an issuing CA on the trust list | Revocation of the signer certificate ([Q8](#q8-revocation), H3) |
 | The certificate was valid at the TSA's attested time (a trusted time stamp is required) | Any validity claim in the research mode without a time stamp ([Q6](#q6-time-policy)) |
-| The claim and its assertions, including the hard binding to the asset, are the ones originally signed | Full certificate profile (key usage, critical extensions, policies; H2) |
+| The claim and its assertions, including the hard binding to the asset, are the ones originally signed | Full certificate profile (key usage, critical extensions, policies; H2); calendar validity of the signer certificate's dates: the circuit bounds the day to 1–31 without checking it exists in its month, so a CA-signed impossible date (February 31) is read as the normalized one. Fixed for the time-stamp token's `genTime` (#39); to be fixed here when this circuit next changes, since it changes the keys |
 | The time-stamp token covers the original signature (v2) or claim (v1) | Unlinkability from the TSA operator ([Q7](#q7-time-stamp-threat-model)) |
 | Neither the signer certificate nor the original signature is disclosed | Metadata outside the hard binding ([Q9](#q9-assertions-and-metadata), H6); the issuing CA's identity (H4); single-party setup (H5) |

@@ -36,6 +36,7 @@ import (
 	"github.com/consensys/gnark/std/algebra/emulated/sw_emulated"
 	"github.com/consensys/gnark/std/hash/sha2"
 	"github.com/consensys/gnark/std/lookup/logderivlookup"
+	"github.com/consensys/gnark/std/math/bits"
 	"github.com/consensys/gnark/std/math/cmp"
 	"github.com/consensys/gnark/std/math/emulated"
 	"github.com/consensys/gnark/std/math/uints"
@@ -194,6 +195,7 @@ func verifyToken(api frontend.API, s TokenSizes, tk *TokenInputs, tsaCAKey *ecds
 	// genTime: GeneralizedTime "20YYMMDDHHMMSSZ"
 	api.AssertIsEqual(rt.matches(p, []byte{0x18, 0x0f, '2', '0'}), 1)
 	genTime := rt.utcTime(api.Add(p, 4))
+	rt.assertDayInMonth(api.Add(p, 4))
 	api.AssertIsEqual(rt.at(api.Add(p, 16)), 'Z')
 	rt.pos.AssertIsLessEq(api.Add(p, 17), tEnd) // genTime lies within TSTInfo
 
@@ -371,10 +373,37 @@ func (c *TokenCircuit) Define(api frontend.API) error {
 	return nil
 }
 
+// timeBits bounds the window's public endpoints: Unix seconds in [0, 2^34),
+// up to the year 2514. genTime is below 2^32 by construction (2000-2049).
+const timeBits = 34
+
 // assertInWindow asserts t1 <= t < t2, a half-open window
-// (HIDING-THE-TIME-STAMP.md, T3).
+// (HIDING-THE-TIME-STAMP.md, T3). The endpoints are public field elements: each
+// is first constrained to [0, 2^timeBits), so that the comparisons are between
+// integers (a field element such as p - 1 would otherwise act as -1).
 func assertInWindow(api frontend.API, t, t1, t2 frontend.Variable) {
-	c := cmp.NewBoundedComparator(api, big.NewInt(1<<34), false)
+	bits.ToBinary(api, t1, bits.WithNbDigits(timeBits))
+	bits.ToBinary(api, t2, bits.WithNbDigits(timeBits))
+	c := cmp.NewBoundedComparator(api, big.NewInt(1<<timeBits), false)
 	c.AssertIsLessEq(t1, t)
 	c.AssertIsLessEq(api.Add(t, 1), t2)
+}
+
+// assertDayInMonth asserts that the day of the YYMMDD digits at p exists in
+// its month (28 to 31 days, February 29 in leap years). The shared utcTime
+// bounds the day to 1-31 only; the check is the token path's own, so that the
+// existing statements' constraint systems, and keys, are unchanged. utcTime
+// has already range-checked the digits and bounded the year and month.
+func (r *reader) assertDayInMonth(p frontend.Variable) {
+	api := r.api
+	digit := func(i int) frontend.Variable { return api.Sub(r.at(api.Add(p, i)), '0') }
+	two := func(i int) frontend.Variable { return api.Add(api.Mul(digit(i), 10), digit(i+1)) }
+	year, month, day := two(0), two(2), two(4)
+	monthDays := logderivlookup.New(api)
+	for _, d := range []int{0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31} {
+		monthDays.Insert(d)
+	}
+	february := r.isEq(month, 2)
+	last := api.Add(monthDays.Lookup(month)[0], api.Mul(february, r.leapYear.Lookup(year)[0]))
+	r.small.AssertIsLessEq(day, last)
 }

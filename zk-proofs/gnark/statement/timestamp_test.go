@@ -448,3 +448,76 @@ func TestParseTokenRefusesWhatItCannotUse(t *testing.T) {
 		t.Fatal("an oversized TSTInfo was assigned")
 	}
 }
+
+// genTime must be a date that exists: a day beyond its month's length is not
+// normalized into the next month (HIDING-THE-TIME-STAMP.md, T2).
+func TestTokenGenTimeIsACalendarDate(t *testing.T) {
+	forEachCurve(t, func(t *testing.T, curve ecc.ID) {
+		wide := [2]time.Time{time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2031, 1, 1, 0, 0, 0, 0, time.UTC)}
+		// A token whose genTime is the given digits, in the window of the
+		// date they would normalize to.
+		check := func(digits string, y, m, d int) bool {
+			normalized := time.Date(y, time.Month(m), d, 12, 0, 0, 0, time.UTC)
+			f := newToken(t, tokenOptions{validity: &wide, genTime: normalized, tstInfo: func(imprint []byte, _ string) []byte {
+				return tstInfoWith(t, []byte{0x02, 0x01, 0x01}, tlv(0x30, oidDER(t, oidSHA256)), imprint, digits)
+			}})
+			return tokenSolved(t, curve, inDay(t, f))
+		}
+		for name, c := range map[string]struct {
+			digits  string
+			y, m, d int
+		}{
+			"February 29 in a common year": {"20260229120000Z", 2026, 2, 29},
+			"February 30":                  {"20280230120000Z", 2028, 2, 30},
+			"February 31":                  {"20260231120000Z", 2026, 2, 31},
+			"April 31":                     {"20260431120000Z", 2026, 4, 31},
+			"November 31":                  {"20261131120000Z", 2026, 11, 31},
+		} {
+			if check(c.digits, c.y, c.m, c.d) {
+				t.Errorf("%s: accepted", name)
+			}
+		}
+		for name, c := range map[string]struct {
+			digits  string
+			y, m, d int
+		}{
+			"February 29 in a leap year":   {"20280229120000Z", 2028, 2, 29},
+			"February 28 in a common year": {"20260228120000Z", 2026, 2, 28},
+			"December 31":                  {"20261231120000Z", 2026, 12, 31},
+			"April 30":                     {"20260430120000Z", 2026, 4, 30},
+		} {
+			if !check(c.digits, c.y, c.m, c.d) {
+				t.Errorf("%s: rejected", name)
+			}
+		}
+	})
+}
+
+// The window's endpoints are integers in [0, 2^34): field elements that would
+// wrap around (p - 1 acting as -1) or larger values are rejected.
+func TestTokenWindowEndpointsAreBounded(t *testing.T) {
+	forEachCurve(t, func(t *testing.T, curve ecc.ID) {
+		f := newToken(t, tokenOptions{})
+		g := f.genTime
+		pMinus1 := new(big.Int).Sub(curve.ScalarField(), big.NewInt(1))
+		limit := new(big.Int).Lsh(big.NewInt(1), timeBits)
+		assign := func(t1, t2 any) *TokenCircuit {
+			c := tokenAssignment(t, f, 0, 0)
+			c.T1, c.T2 = t1, t2
+			return c
+		}
+		for name, c := range map[string]*TokenCircuit{
+			"t1 = p - 1": assign(pMinus1, g+1),
+			"t2 = p - 1": assign(g, pMinus1),
+			"t2 = 2^34":  assign(g, limit),
+			"t1 = 2^34":  assign(limit, g+1),
+		} {
+			if tokenSolved(t, curve, c) {
+				t.Errorf("%s: accepted", name)
+			}
+		}
+		if !tokenSolved(t, curve, assign(0, new(big.Int).Sub(limit, big.NewInt(1)))) {
+			t.Error("the widest window in range: rejected")
+		}
+	})
+}

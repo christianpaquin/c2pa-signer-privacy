@@ -1,6 +1,6 @@
 # I6: Hiding the Time-Stamp Token
 
-**Status: adopted (PR #37); being implemented.** Done: the fixture's profile and eligibility by purpose (PR #38); the token gadget in gnark, verifying a token under the contract below ([`statement/timestamp.go`](gnark/statement/timestamp.go), 1,863,055 constraints; PR #39). This note designs the hidden time-stamp token ([HIDING-THE-ISSUER.md, I6](HIDING-THE-ISSUER.md#i6-the-time-stamp-token); [THIRD-PARTY-STATEMENT.md, Q7](THIRD-PARTY-STATEMENT.md#q7-time-stamp-threat-model), "hidden token") before any circuit work, as the H4 note did for the issuer. Each choice is listed under [Decisions for review](#decisions-for-review) with a proposed default.
+**Status: adopted (PR #37); being implemented.** Done: the fixture's profile and eligibility by purpose (PR #38); the token gadget in gnark, verifying a token under the contract below ([`statement/timestamp.go`](gnark/statement/timestamp.go), 1,863,500 constraints; PR #39). This note designs the hidden time-stamp token ([HIDING-THE-ISSUER.md, I6](HIDING-THE-ISSUER.md#i6-the-time-stamp-token); [THIRD-PARTY-STATEMENT.md, Q7](THIRD-PARTY-STATEMENT.md#q7-time-stamp-threat-model), "hidden token") before any circuit work, as the H4 note did for the issuer. Each choice is listed under [Decisions for review](#decisions-for-review) with a proposed default.
 
 ## The problem
 
@@ -72,7 +72,8 @@ The circuit fixes the layouts it parses, as it does for the protected header ([Q
 - **Algorithms, fixed and checked:** SHA-256 as `TSTInfo`'s imprint algorithm, ES256 (ECDSA P-256 with SHA-256) as the TSA's signature, ECDSA-SHA384 as the TSA CA's.
 - **The signature preimage:** the signed attributes are hashed with the DER `SET OF` tag (`31`), not the `[0]` tag (`A0`) they carry inside the `SignerInfo` (RFC 5652, §5.4).
 - **The TSA certificate:** a v3 certificate with a P-256 key, not a CA, validity containing `genTime`, and exactly one extended key usage extension, critical, whose only purpose is time stamping (RFC 3161, §2.3).
-- **Profile restrictions** (refused otherwise): `TSTInfo` version 1; `genTime` in whole seconds (`20YYMMDDHHMMSSZ`, no fraction), years 2000–2049; the TSA certificate's validity in UTCTime.
+- **Profile restrictions** (refused otherwise): `TSTInfo` version 1; `genTime` in whole seconds (`20YYMMDDHHMMSSZ`, no fraction), years 2000–2049, a date that exists (the day within its month's length, February 29 only in leap years); the TSA certificate's validity in UTCTime.
+- **The window's endpoints** are public field elements: each is constrained to an integer in `[0, 2³⁴)` (Unix seconds, up to the year 2514) before the comparisons, so that no value wraps around the field.
 
 This is a **reduced verification profile**, not equivalent to everything OpenSSL checks. Deliberately not checked:
 
@@ -118,7 +119,7 @@ Estimated from E1 and E2b, not measured. The countersignature hash that binds th
 | SHA-256 of `TSTInfo` (≤ 256 B), parsing it | ~0.3M | E1 |
 | TSA tree membership, window and validity comparisons | Under 20k | H4 |
 | **I6, as proposed** | **~2.0–2.1M, about +45% on V1** | |
-| **Measured: the token gadget alone** (all of the above but the tree and the comparisons with the statement) | **1,863,055** (BN254; 1,863,082 on BLS12-381), about +40% on V1 | `TokenCircuit` at the default sizes |
+| **Measured: the token gadget alone** (all of the above but the tree and the comparisons with the statement) | **1,863,500** (BN254; 1,863,530 on BLS12-381), about +40% on V1 | `TokenCircuit` at the default sizes |
 
 Expect per-asset anonymization of about 1.4× V1's (proving scales with constraints, and the proving key with it, to about 1.7 GB); verification is unchanged in cost.
 

@@ -684,6 +684,32 @@ fn hidden_issuer_verification_follows_the_verifiers_policy() {
     assert!(err.contains("keys in") && err.contains("disclosed statement"), "{err}");
 }
 
+/// Both trees can be built in one working directory (PR #40 review): each
+/// purpose writes its own eligible-issuers file, and each file keeps its own
+/// certificates after the other tree is built.
+#[test]
+fn both_purpose_trees_coexist_in_one_directory() {
+    use c2pa_x509_zk_demo::trust::Purpose;
+    let fixture = Fixture::new(true, true);
+    let prover = hidden_stand_in(fixture.dir.path());
+    let dir = tempfile::tempdir().unwrap();
+    let trust = TrustList::from_file(&fixture.pki("trust-list.pem")).unwrap();
+    let tsa_trust = TrustList::from_file(&fixture.pki("tsa-trust-list.pem")).unwrap();
+    let (issuer_tree, issuer_pem) = third_party::purpose_tree(&trust, Purpose::ClaimSigning, &prover, dir.path()).unwrap();
+    let issuer_contents = std::fs::read(&issuer_pem).unwrap();
+    let (tsa_tree, tsa_pem) = third_party::purpose_tree(&tsa_trust, Purpose::TimeStamping, &prover, dir.path()).unwrap();
+    assert_ne!(issuer_pem, tsa_pem);
+    assert_eq!(std::fs::read(&issuer_pem).unwrap(), issuer_contents, "the issuer list was overwritten");
+    let certs = |path: &Path| TrustList::from_file(path).unwrap().anchors;
+    let (issuers, tsas) = (certs(&issuer_pem), certs(&tsa_pem));
+    let read = |name: &str| std::fs::read(fixture.pki(name)).unwrap();
+    assert!(issuers.contains(&read("issuing-ca.der")) && !issuers.contains(&read("tsa-ca.der")));
+    assert!(tsas.contains(&read("tsa-ca.der")) && !tsas.contains(&read("issuing-ca.der")));
+    // Each returned file still builds the root returned with it.
+    assert_eq!(third_party::purpose_tree(&TrustList { anchors: issuers, skipped: 0 }, Purpose::ClaimSigning, &prover, tempfile::tempdir().unwrap().path()).unwrap().0.root, issuer_tree.root);
+    assert_eq!(third_party::purpose_tree(&TrustList { anchors: tsas, skipped: 0 }, Purpose::TimeStamping, &prover, tempfile::tempdir().unwrap().path()).unwrap().0.root, tsa_tree.root);
+}
+
 /// The mirror fixture's time stamp has the real profile (I6,
 /// HIDING-THE-TIME-STAMP.md): a P-256 TSA certificate issued by a listed
 /// P-384 TSA CA, both carried in the token, the root not; the TSA CA is

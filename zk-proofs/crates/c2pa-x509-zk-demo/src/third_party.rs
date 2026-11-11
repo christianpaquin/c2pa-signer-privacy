@@ -322,8 +322,17 @@ fn tree_role(purpose: Purpose) -> &'static str {
     }
 }
 
+/// The file name of a purpose's eligible issuers in a working directory: one
+/// per purpose, so that both trees' lists can coexist in one directory.
+pub fn eligible_issuers_file(purpose: Purpose) -> &'static str {
+    match purpose {
+        Purpose::ClaimSigning => "eligible-issuers.pem",
+        Purpose::TimeStamping => "eligible-tsa-issuers.pem",
+    }
+}
+
 /// The eligible issuers of a trust list for `purpose` (`eligible_issuers`),
-/// written as PEM into `dir`, for the CLI.
+/// written as PEM into `dir` (`eligible_issuers_file`), for the CLI.
 fn eligible_issuers_pem(trust: &TrustList, purpose: Purpose, dir: &Path) -> Result<PathBuf> {
     let (eligible, _) = eligible_issuers(trust, purpose);
     if eligible.is_empty() {
@@ -338,7 +347,7 @@ fn eligible_issuers_pem(trust: &TrustList, purpose: Purpose, dir: &Path) -> Resu
         }
         pem.push_str("-----END CERTIFICATE-----\n");
     }
-    let path = dir.join("eligible-issuers.pem");
+    let path = dir.join(eligible_issuers_file(purpose));
     std::fs::write(&path, pem)?;
     Ok(path)
 }

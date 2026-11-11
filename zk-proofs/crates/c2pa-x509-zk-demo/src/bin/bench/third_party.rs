@@ -432,7 +432,7 @@ pub fn measure(
         Ok(())
     };
     let (inputs, public, proof) = (work_dir.join("inputs.json"), work_dir.join("public.json"), work_dir.join("proof.bin"));
-    let issuers_pem = work_dir.join("eligible-issuers.pem");
+    let issuers_pem = work_dir.join(c2pa_x509_zk_demo::third_party::eligible_issuers_file(c2pa_x509_zk_demo::trust::Purpose::ClaimSigning));
     let mut prove_args: Vec<&std::ffi::OsStr> = vec![
         "prove".as_ref(), "--keys".as_ref(), keys.as_os_str(), "--input".as_ref(), inputs.as_os_str(), "--proof".as_ref(), proof.as_os_str(),
         "--pk-format".as_ref(), key_loading.format.as_ref(), "--pk-check".as_ref(), key_loading.check.as_ref(),

@@ -93,6 +93,7 @@ For the gain of [What H4 can and cannot hide](#what-h4-can-and-cannot-hide) to h
 ### I7. Disclosed or hidden, per asset
 
 - **Proposed: a choice of the anonymizer,** with two statements (and two key sets): the current one (CA disclosed, `--issuer` possible, cheaper to display) and the H4 one. Disclosing the CA can be useful (a verifier may trust some CAs more), and the choice is visible in the output.
+- **Proposed default: the CA disclosed; the hidden CA is opt-in** (an anonymizer flag such as `--hide-issuer`, named at implementation), as for BLS12-381 ([E7](README.md#e7-curve-bn254-vs-bls12-381)). The disclosed form needs only the current trust list, keeps `--issuer`, and displays as today, and the hidden form gains little where the claim and the time-stamp token already name the organization ([What H4 can and cannot hide](#what-h4-can-and-cannot-hide)). Revisit the default if the hidden token (I6) lands and hiding becomes the common need.
 
 ## Estimated cost
 
@@ -109,7 +110,7 @@ Verification cost and proof size are unchanged; the ZK signature shrinks by the 
 
 ## Proposed plan
 
-1. **H4 core (I1–I5 as proposed):** Poseidon2 tree over the P-384 certificates of the signer trust list, built by the gnark CLI; the statement takes `R` instead of the CA's key and checks the CA's validity at `t`; the ZK signature carries `R` and the list identifier; the verifier rebuilds `R` from the trusted list versions. Tests: membership forgery (a key not on the list, a wrong path, a CA outside its validity at `t`), a root from another list, and the existing end-to-end and real-asset tests. Measured with the harness against V1.
+1. **H4 core (I1–I5 and I7 as proposed, opt-in):** Poseidon2 tree over the P-384 certificates of the signer trust list, built by the gnark CLI; the statement takes `R` instead of the CA's key and checks the CA's validity at `t`; the ZK signature carries `R` and the list identifier; the verifier rebuilds `R` from the trusted list versions. Tests: membership forgery (a key not on the list, a wrong path, a CA outside its validity at `t`), a root from another list, and the existing end-to-end and real-asset tests. Measured with the harness against V1.
 2. **Hidden token (I6),** as a separate experiment once H4's core is in.
 3. **One unlisted intermediate (I2),** only if real assets need it.
 

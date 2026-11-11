@@ -622,7 +622,7 @@ Operational revocation for signer keys, following the semantics set in E2a and E
 
 As the blog post suggests, prove membership of the issuing CA's key in a published set of trusted CAs (for example, a Merkle root over a trust list) instead of disclosing which CA issued the certificate. Trust models B and C can achieve this directly by spanning every listed CA.
 
-Status: **design proposed** in [HIDING-THE-ISSUER.md](HIDING-THE-ISSUER.md), for review. Proposed: a Poseidon2 Merkle tree over the trust list's certificates of the circuit's key type (28 P-384 on the official list), with the issuing CA on the list, its validity checked in-circuit, and the root replacing the CA's key as a public input; estimated under 1% of V1's constraints. The gain is limited where the claim generator and a public time-stamp token already name the organization; hiding the token (Q7) is a separate experiment.
+Status: **design proposed** in [HIDING-THE-ISSUER.md](HIDING-THE-ISSUER.md), for review. Proposed as an opt-in, the disclosed CA staying the default: a Poseidon2 Merkle tree over the trust list's certificates of the circuit's key type (28 P-384 on the official list), with the issuing CA on the list, its validity checked in-circuit, and the root replacing the CA's key as a public input; estimated under 1% of V1's constraints. The gain is limited where the claim generator and a public time-stamp token already name the organization; hiding the token (Q7) is a separate experiment.
 
 #### H5. Production proving setup
 

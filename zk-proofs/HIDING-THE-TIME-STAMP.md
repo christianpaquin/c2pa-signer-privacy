@@ -69,9 +69,11 @@ The circuit fixes the layouts it parses, as it does for the protected header ([Q
 
 Hiding the token does not stop the TSA operator from linking if `genTime` stays exact: its records show which requests it time-stamped in that second. The anonymity set against the operator is the operator's requests within the published window.
 
-- **Proposed: a window chosen by the anonymizer**, `genTime` rounded down and up to a granularity (default: one hour; one second keeps today's precision), proven in-circuit: `t₁ ≤ genTime ≤ t₂`. Certificate validity is still checked at the exact, private `genTime`.
+- **Proposed: a window aligned to fixed boundaries, one UTC day by default**: `t₁` is `genTime` rounded down to the granularity, `t₂` the end of that interval, and the circuit proves `t₁ ≤ genTime ≤ t₂`. Certificate validity is still checked at the exact, private `genTime`, so a certificate issued an hour before the photo (as in the real sample) still verifies.
+- **Aligned, never centered:** a window centered on `genTime` would reveal it as its midpoint. Alignment also makes every asset time-stamped the same day publish the same window.
+- **Easy to change:** the window's bounds are public inputs, not part of the circuit, so any granularity works with the same keys. The anonymizer takes it as an option (`--time-window`, default `1d`; also `1h`, `1s` for today's precision); the verifier accepts any aligned window and its policy may set a maximum (`max_time_window`), for verifiers that need finer times. The verifier checks the alignment, so an anonymizer cannot publish an unaligned, more revealing window by mistake.
 - The verifier's snapshot periods apply to the whole window: a snapshot is used only if `[t₁, t₂]` lies within its period. A window straddling a trust-list change is refused (the anonymizer can choose a finer one).
-- Published, verifiers see the time to within the window, not the second. Assets whose window is coarse cannot be ordered within it.
+- Published, verifiers learn only the date (by default). Assets in the same window cannot be ordered within it.
 
 ### T4. Trust in the TSA
 
@@ -107,7 +109,7 @@ Expect per-asset anonymization of about 1.4× V1's (proving scales with constrai
 
 1. **Mirror the real token's profile in the fixture:** `generate-test-pki.sh --mirror` issues a P-256 TSA certificate from a listed P-384 TSA CA (the existing tests keep passing: off-circuit token checks do not depend on the profile).
 2. **Circuit (Go):** the combined statement, `TSTInfo` and signed-attribute parsing, the TSA certificate's walk and signatures, the TSA tree, the window; forgery tests (a TSA certificate not issued by a listed CA, a non-TSA EKU, a CA certificate as TSA, a changed `TSTInfo`, signed attributes, or TSA signature, `genTime` outside the window or the certificates' validity, an imprint of another signature); measured constraint count.
-3. **Anonymizer and verifier (Rust):** `--hide-time-stamp GRANULARITY` (implies `--hide-issuer`), the format, TSA snapshots in the policy, end-to-end tests including that no token, TSA certificate, or serial number remains in the output; measured with the harness.
+3. **Anonymizer and verifier (Rust):** `--hide-time-stamp` (implies `--hide-issuer`) with `--time-window` (default `1d`), the alignment check and `max_time_window` in the verifier, the format, TSA snapshots in the policy, end-to-end tests including that no token, TSA certificate, or serial number remains in the output; measured with the harness.
 
 ## Guarantees and shortcuts
 

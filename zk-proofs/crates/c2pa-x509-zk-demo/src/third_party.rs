@@ -10,7 +10,7 @@
 use crate::jumbf::{active_assertions, active_manifest, manifest_count, manifest_store, manifests, ActiveManifest};
 use crate::original_signature::{tst_info, OriginalSignature, TimeStampVersion, COSE_ALG_ES256, SHA256_OID};
 use crate::trust::{eligible_issuers, issuing_path_for, validate_issuing_chain, Purpose, TrustList};
-use crate::zk_signature::{is_canonical_root, proof_len, IssuerTreeRef, ZkSignature, DEFAULT_CURVE};
+use crate::zk_signature::{is_aligned_window, is_canonical_root, proof_len, IssuerTreeRef, ZkSignature, DEFAULT_CURVE};
 use anyhow::{anyhow, bail, Context, Result};
 use ciborium::Value;
 use std::path::PathBuf;
@@ -45,6 +45,18 @@ pub struct HiddenPublicInputs {
     pub time: u64,
     /// The time stamp's SHA-256 message imprint (base64).
     pub imprint: String,
+}
+
+/// The public inputs of the statement hiding the issuer and the time stamp
+/// (I6): the two trees' roots and the window, in place of the time and imprint.
+#[derive(Debug, Clone, Serialize)]
+pub struct HiddenAllPublicInputs {
+    /// The claim (base64).
+    pub claim: String,
+    pub issuer_root: String,
+    pub tsa_root: String,
+    pub t1: u64,
+    pub t2: u64,
 }
 
 /// The prover's inputs: the public ones and the original signature's parts.
@@ -269,12 +281,23 @@ impl Prover {
     /// Prove, returning the proof bytes. `issuers`: the eligible issuers (PEM)
     /// for a hidden-issuer key set.
     pub fn prove(&self, inputs: &StatementInputs, issuers: Option<&Path>) -> Result<Vec<u8>> {
+        self.prove_with(inputs, issuers, None)
+    }
+
+    /// Prove with the hidden-all statement's options: the TSA issuers (PEM)
+    /// and the window's granularity in seconds.
+    pub fn prove_with(&self, inputs: &StatementInputs, issuers: Option<&Path>, tsa: Option<(&Path, u64)>) -> Result<Vec<u8>> {
         let dir = tempfile::tempdir()?;
         let (input, proof) = (dir.path().join("inputs.json"), dir.path().join("proof.bin"));
         std::fs::write(&input, serde_json::to_vec(inputs)?)?;
         let mut args: Vec<&std::ffi::OsStr> = vec!["prove".as_ref(), "--keys".as_ref(), self.keys.as_os_str(), "--input".as_ref(), input.as_os_str(), "--proof".as_ref(), proof.as_os_str()];
         if let Some(issuers) = issuers {
             args.extend(["--issuers".as_ref(), issuers.as_os_str()]);
+        }
+        let window;
+        if let Some((tsa_issuers, granularity)) = tsa {
+            window = granularity.to_string();
+            args.extend(["--tsa-issuers".as_ref(), tsa_issuers.as_os_str(), "--window".as_ref(), window.as_ref()]);
         }
         let out = self.run(&args)?;
         if !out.status.success() {
@@ -304,6 +327,7 @@ impl Prover {
 
 pub const VARIANT_DISCLOSED: &str = "disclosed";
 pub const VARIANT_HIDDEN_ISSUER: &str = "hidden-issuer";
+pub const VARIANT_HIDDEN_ALL: &str = "hidden-all";
 
 /// An issuer tree, as the CLI built it.
 #[derive(Debug, Clone)]
@@ -389,9 +413,17 @@ pub struct Snapshot {
 /// accepted only if it equals the root of a snapshot whose interval contains
 /// the attested time. The asset's list name is a hint and must name that
 /// snapshot, but never selects it.
+///
+/// For hidden time stamps (I6, HIDING-THE-TIME-STAMP.md, T3-T4): the TSA
+/// trust-list snapshots, whose roots are built for time stamping (in the TSA
+/// role), as `snapshots` are always built for claim signing; each snapshot used
+/// must contain the asset's whole window; and an optional maximum window length.
 #[derive(Debug, Clone)]
 pub struct IssuerPolicy {
     pub snapshots: Vec<Snapshot>,
+    pub tsa_snapshots: Vec<Snapshot>,
+    /// The longest window accepted, in seconds (none: any).
+    pub max_time_window: Option<u64>,
 }
 
 /// Which approved snapshot an asset's root matched.
@@ -404,18 +436,24 @@ pub struct HiddenIssuerReport {
 }
 
 impl IssuerPolicy {
-    /// Read a policy file: {"snapshots": [{"name", "trust_list", "from", "until"}]}.
+    /// Read a policy file: {"snapshots": [{"name", "trust_list", "from",
+    /// "until"}], "tsa_snapshots": [...], "max_time_window": seconds}; the
+    /// last two are optional.
     pub fn from_file(path: &Path) -> Result<Self> {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         struct File {
             snapshots: Vec<Snapshot>,
+            #[serde(default)]
+            tsa_snapshots: Vec<Snapshot>,
+            #[serde(default)]
+            max_time_window: Option<u64>,
         }
         let file: File = serde_json::from_slice(&std::fs::read(path).with_context(|| format!("failed to read the issuer policy {}", path.display()))?)
             .with_context(|| format!("malformed issuer policy {}", path.display()))?;
         let base = path.parent().unwrap_or(Path::new("."));
-        let mut snapshots = file.snapshots;
-        for s in &mut snapshots {
+        let (mut snapshots, mut tsa_snapshots) = (file.snapshots, file.tsa_snapshots);
+        for s in snapshots.iter_mut().chain(tsa_snapshots.iter_mut()) {
             if s.until.is_some_and(|until| until <= s.from) {
                 bail!("snapshot {}: until is not after from", s.name);
             }
@@ -424,37 +462,59 @@ impl IssuerPolicy {
         if snapshots.is_empty() {
             bail!("the issuer policy approves no snapshot");
         }
-        Ok(Self { snapshots })
+        if file.max_time_window == Some(0) {
+            bail!("max_time_window must be positive");
+        }
+        Ok(Self { snapshots, tsa_snapshots, max_time_window: file.max_time_window })
     }
 
     /// The snapshot whose root, built by the verifier, is `issuers.root`, and
     /// whose interval contains `time`.
     pub fn approve(&self, prover: &Prover, time: u64, issuers: &IssuerTreeRef) -> Result<HiddenIssuerReport> {
+        self.approve_window(prover, Purpose::ClaimSigning, (time, time + 1), issuers)
+    }
+
+    /// The snapshot, among those for `purpose` (claim signing: `snapshots`;
+    /// time stamping: `tsa_snapshots`), whose root, built by the verifier for
+    /// that purpose, is `tree.root`, and whose interval contains the whole
+    /// window [t1, t2): from <= t1 and t2 <= until. A single time t is the
+    /// window [t, t + 1).
+    pub fn approve_window(&self, prover: &Prover, purpose: Purpose, (t1, t2): (u64, u64), tree_ref: &IssuerTreeRef) -> Result<HiddenIssuerReport> {
+        let (snapshots, what) = match purpose {
+            Purpose::ClaimSigning => (&self.snapshots, "issuer"),
+            Purpose::TimeStamping => (&self.tsa_snapshots, "TSA"),
+        };
+        if snapshots.is_empty() {
+            bail!("the issuer policy approves no {what} snapshot");
+        }
+        let at = if t2 == t1 + 1 { format!("the attested time {t1}") } else { format!("the attested time window [{t1}, {t2})") };
         // Every snapshot is considered, so the result does not depend on their
         // order: accepted only if one matches the root, the time, and the name.
         let (mut outside, mut other_names) = (Vec::new(), Vec::new());
-        for s in &self.snapshots {
-            let tree = issuer_tree(&TrustList::from_file(&s.trust_list)?, prover)?;
-            if tree.root != issuers.root {
+        let dir = tempfile::tempdir()?;
+        for s in snapshots {
+            let tree = purpose_tree(&TrustList::from_file(&s.trust_list)?, purpose, prover, dir.path())?.0;
+            if tree.root != tree_ref.root {
                 continue;
             }
-            if time < s.from || s.until.is_some_and(|until| time >= until) {
+            if t1 < s.from || s.until.is_some_and(|until| t2 > until) {
                 outside.push(s.name.clone());
                 continue;
             }
-            if issuers.list != s.name {
+            if tree_ref.list != s.name {
                 other_names.push(format!("{:?}", s.name));
                 continue;
             }
             return Ok(HiddenIssuerReport { snapshot: s.name.clone(), root: tree.root, anonymity_set: tree.entries });
         }
         if !other_names.is_empty() {
-            bail!("the asset names the trust list {:?}, but its root is that of the approved snapshot(s) {}", issuers.list, other_names.join(", "));
+            let list = if purpose == Purpose::ClaimSigning { "trust list" } else { "TSA trust list" };
+            bail!("the asset names the {list} {:?}, but its root is that of the approved snapshot(s) {}", tree_ref.list, other_names.join(", "));
         }
         if !outside.is_empty() {
-            bail!("the issuer tree root is that of {}, which did not apply at the attested time {time}", outside.join(", "));
+            bail!("the {what} tree root is that of {}, which did not apply at {at}", outside.join(", "));
         }
-        bail!("the issuer tree root is not that of any snapshot the issuer policy approves")
+        bail!("the {what} tree root is not that of any snapshot the issuer policy approves for it")
     }
 }
 
@@ -468,6 +528,8 @@ pub struct AnonymizeReport {
     pub issuing_chain: Vec<Vec<u8>>,
     /// With the issuer hidden: the tree and its size.
     pub hidden: Option<HiddenIssuerReport>,
+    /// With the time stamp hidden too: the TSA tree and its size, and the window.
+    pub hidden_time_stamp: Option<(HiddenIssuerReport, (u64, u64))>,
     pub time: u64,
     /// The claim signature's size, unchanged.
     pub signature_bytes: usize,
@@ -501,6 +563,37 @@ pub fn replace_signature(input: &Path, output: &Path, store: &[u8], manifest: &A
     Ok(())
 }
 
+/// Hiding the time stamp too (I6, HIDING-THE-TIME-STAMP.md): the TSA trust
+/// list, its name for the asset's hint, and the window's granularity.
+#[derive(Debug, Clone)]
+pub struct HideTimeStamp {
+    pub tsa_trust: TrustList,
+    pub list: String,
+    /// The window's length in seconds (aligned to the Unix epoch).
+    pub window: u64,
+}
+
+/// Parse a window length: a number of seconds, or with a unit, `s`, `m`, `h`,
+/// or `d` (for example `1d`, `1h`, `1s`).
+pub fn parse_window(text: &str) -> Result<u64> {
+    let (digits, unit) = match text.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
+        Some((i, _)) => text.split_at(i),
+        None => (text, "s"),
+    };
+    let n: u64 = digits.parse().map_err(|_| anyhow!("malformed window {text:?}"))?;
+    let seconds = match unit {
+        "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        "d" => n * 86_400,
+        _ => bail!("malformed window {text:?} (a number of seconds, or with s, m, h, or d)"),
+    };
+    if seconds == 0 {
+        bail!("the window must be at least a second");
+    }
+    Ok(seconds)
+}
+
 /// Anonymize a signed asset in third-party mode: prove the statement for its
 /// original signature, then replace that signature in place.
 ///
@@ -508,7 +601,12 @@ pub fn replace_signature(input: &Path, output: &Path, store: &[u8], manifest: &A
 /// CA must be on the trust list itself (I2) and eligible (I1), the key set must
 /// be a hidden-issuer one, and the ZK signature carries the root of the tree
 /// over the list's eligible issuers instead of the issuing chain.
-pub fn anonymize(input: &Path, output: &Path, trust: &TrustList, prover: &Prover, hide_issuer: Option<&str>) -> Result<AnonymizeReport> {
+///
+/// `hide_time_stamp` (with `hide_issuer`; I6): the key set must be a
+/// hidden-all one, the TSA's issuing CA must be on the TSA trust list itself
+/// and eligible for time stamping, and the ZK signature carries the TSA tree's
+/// root and the window instead of the token.
+pub fn anonymize(input: &Path, output: &Path, trust: &TrustList, prover: &Prover, hide_issuer: Option<&str>, hide_time_stamp: Option<&HideTimeStamp>) -> Result<AnonymizeReport> {
     let store = manifest_store(input)?;
     let manifest = active_manifest(&store)?;
     let claim = check_claim(&store, &manifest.claim)?;
@@ -518,9 +616,16 @@ pub fn anonymize(input: &Path, output: &Path, trust: &TrustList, prover: &Prover
 
     let variant = prover.variant()?;
     let dir = tempfile::tempdir()?;
+    match (hide_issuer.is_some(), hide_time_stamp.is_some(), variant.as_str()) {
+        (false, false, VARIANT_DISCLOSED) | (true, false, VARIANT_HIDDEN_ISSUER) | (true, true, VARIANT_HIDDEN_ALL) => {}
+        (_, true, _) if hide_issuer.is_none() => bail!("--hide-time-stamp needs --hide-issuer too (one statement hides both)"),
+        (_, _, VARIANT_HIDDEN_ALL) => bail!("the keys in {} are for the statement hiding the issuer and the time stamp; use --hide-issuer and --hide-time-stamp", prover.keys.display()),
+        (_, true, _) => bail!("--hide-time-stamp needs keys for the hidden-all statement (c2pa-zk-gnark setup --statement hidden-all)"),
+        _ => {}
+    }
     let (issuers, hidden, issuers_pem) = match (hide_issuer, variant.as_str()) {
         (None, VARIANT_DISCLOSED) => (None, None, None),
-        (Some(list), VARIANT_HIDDEN_ISSUER) => {
+        (Some(list), VARIANT_HIDDEN_ISSUER | VARIANT_HIDDEN_ALL) => {
             // The validated path ends with the last certificate the asset
             // carries, so its length does not show whether the issuing CA is
             // itself listed: ask the trust list.
@@ -539,31 +644,75 @@ pub fn anonymize(input: &Path, output: &Path, trust: &TrustList, prover: &Prover
     };
     let chain = if issuers.is_some() { Vec::new() } else { issuing_chain.clone() };
 
+    // The hidden time stamp: the TSA's issuing CA directly listed and eligible
+    // for time stamping, the TSA tree, and the window.
+    let tsa_dir = tempfile::tempdir()?;
+    let tsa = match hide_time_stamp {
+        None => None,
+        Some(h) => {
+            let certificates = crate::original_signature::token_certificates(&token)?;
+            let (eligible, _) = eligible_issuers(&h.tsa_trust, Purpose::TimeStamping);
+            // The TSA certificate (the token's end-entity certificate, not
+            // the CAs the token may also carry) must be issued by a listed,
+            // eligible CA: a CA reached through another CA is not enough.
+            let tsa_certificates: Vec<_> = certificates.iter().filter(|c| !crate::trust::is_ca_certificate(c)).collect();
+            if tsa_certificates.len() != 1 {
+                bail!("the time-stamp token carries {} end-entity certificates, not exactly the TSA's", tsa_certificates.len());
+            }
+            let issued_by_listed = eligible.iter().any(|ca| crate::trust::verify_issued_by(tsa_certificates[0], ca).is_ok());
+            if !issued_by_listed {
+                bail!("the time stamp's TSA certificate is not issued by a CA itself on the TSA trust list and eligible for time stamping (HIDING-THE-TIME-STAMP.md, T4)");
+            }
+            let (tree, pem) = purpose_tree(&h.tsa_trust, Purpose::TimeStamping, prover, tsa_dir.path())?;
+            let t = inputs.public.time;
+            let window = (t - t % h.window, t - t % h.window + h.window);
+            if !is_aligned_window(window.0, window.1) {
+                bail!("the window [{}, {}) is not one the format accepts", window.0, window.1);
+            }
+            let report = HiddenIssuerReport { snapshot: h.list.clone(), root: tree.root.clone(), anonymity_set: tree.entries };
+            Some((IssuerTreeRef { root: tree.root, list: h.list.clone() }, report, window, pem, h.window))
+        }
+    };
+
     // The ZK signature must fit the original's space: check before proving.
     let size = manifest.cose_sign1.len();
     let curve = prover.curve()?;
     let expected_len = proof_len(&curve)?;
-    let mut signature = ZkSignature { issuing_chain: chain.clone(), issuers: issuers.clone(), vk_sha256: prover.vk_sha256()?, curve, time_stamp_token: token, proof: vec![0; expected_len] };
+    let mut signature = ZkSignature {
+        issuing_chain: chain.clone(),
+        issuers: issuers.clone(),
+        tsa: tsa.as_ref().map(|t| t.0.clone()),
+        window: tsa.as_ref().map(|t| t.2),
+        vk_sha256: prover.vk_sha256()?,
+        curve,
+        time_stamp_token: if tsa.is_some() { Vec::new() } else { token },
+        proof: vec![0; expected_len],
+    };
     signature.encode_exact(size)?;
     let spare_bytes = size - signature.encode(0, 0).len();
     // The format must allow rewriting the store at the same size: try it with
     // the original signature, also before proving.
     rewrite_asset(input, &store, &manifest, &manifest.cose_sign1)?;
 
-    signature.proof = prover.prove(&inputs, issuers_pem.as_deref())?;
+    signature.proof = prover.prove_with(&inputs, issuers_pem.as_deref(), tsa.as_ref().map(|t| (t.3.as_path(), t.4)))?;
     if signature.proof.len() != expected_len {
         bail!("the proof is {} bytes, not {expected_len}", signature.proof.len());
     }
     // Check the proof before embedding it.
-    let verified = match &issuers {
-        None => prover.verify(&inputs.public, &signature.proof)?,
-        Some(tree) => prover.verify(&hidden_public(&inputs.public, tree), &signature.proof)?,
+    let verified = match (&issuers, &tsa) {
+        (None, _) => prover.verify(&inputs.public, &signature.proof)?,
+        (Some(tree), None) => prover.verify(&hidden_public(&inputs.public, tree), &signature.proof)?,
+        (Some(tree), Some((tsa_tree, _, (t1, t2), _, _))) => prover.verify(
+            &HiddenAllPublicInputs { claim: inputs.public.claim.clone(), issuer_root: tree.root.clone(), tsa_root: tsa_tree.root.clone(), t1: *t1, t2: *t2 },
+            &signature.proof,
+        )?,
     };
     if !verified {
         bail!("the new proof does not verify");
     }
     replace_signature(input, output, &store, &manifest, &signature.encode_exact(size)?)?;
-    Ok(AnonymizeReport { claim, issuing_chain: chain, hidden, time: inputs.public.time, signature_bytes: size, spare_bytes })
+    let hidden_time_stamp = tsa.map(|(_, report, window, _, _)| (report, window));
+    Ok(AnonymizeReport { claim, issuing_chain: chain, hidden, hidden_time_stamp, time: inputs.public.time, signature_bytes: size, spare_bytes })
 }
 
 fn hidden_public(public: &PublicInputs, tree: &IssuerTreeRef) -> HiddenPublicInputs {
@@ -589,6 +738,9 @@ pub struct VerifyReport {
     pub issuer: String,
     /// With the issuer hidden: the approved snapshot the root matched.
     pub hidden: Option<HiddenIssuerReport>,
+    /// With the time stamp hidden too: the approved TSA snapshot, and the
+    /// window the time stamp's time lies in (the time is not disclosed).
+    pub hidden_time_stamp: Option<(HiddenIssuerReport, (u64, u64))>,
     /// The validated path, issuing CA first, ending at the trust anchor.
     pub path: Vec<Vec<u8>>,
     /// The time stamp's attested time (Unix seconds).
@@ -665,7 +817,10 @@ fn c2pa_claim_checks_hidden(asset: &Path, store: &[u8], manifest: &ActiveManifes
 /// proof with public inputs all derived from the asset. With
 /// `expected_issuer`, the issuing CA's subject DN must equal it (disclosed
 /// issuers only).
-pub fn verify(asset: &Path, trust: &TrustList, tsa_trust: &Path, prover: &Prover, expected_issuer: Option<&str>, policy: Option<&IssuerPolicy>) -> Result<VerifyReport> {
+///
+/// `tsa_trust` (the TSA trust anchors, PEM) is needed for assets that disclose
+/// their time stamp; for those that hide it, the policy's TSA snapshots apply.
+pub fn verify(asset: &Path, trust: &TrustList, tsa_trust: Option<&Path>, prover: &Prover, expected_issuer: Option<&str>, policy: Option<&IssuerPolicy>) -> Result<VerifyReport> {
     let store = manifest_store(asset)?;
     let manifest = active_manifest(&store)?;
     let claim = check_claim(&store, &manifest.claim)?;
@@ -678,7 +833,7 @@ pub fn verify(asset: &Path, trust: &TrustList, tsa_trust: &Path, prover: &Prover
     if !checked.proof_verified(prover)? {
         bail!("the proof does not verify for this asset's claim, issuing CA, and time stamp");
     }
-    Ok(VerifyReport { claim, issuer: checked.issuer, hidden: checked.hidden, path: checked.path, time: checked.time, c2pa_success })
+    Ok(VerifyReport { claim, issuer: checked.issuer, hidden: checked.hidden, hidden_time_stamp: checked.hidden_time_stamp, path: checked.path, time: checked.time, c2pa_success })
 }
 
 /// What verifying an ingredient's ZK signature established.
@@ -709,7 +864,7 @@ pub fn verify_ingredient(store: &[u8], label: &str, trust: &TrustList, tsa_trust
         .into_iter()
         .find(|m| m.label == label)
         .ok_or_else(|| anyhow!("no manifest {label} in the store"))?;
-    let checked = verify_zk_signature(&manifest, trust, tsa_trust, prover, None, None)?;
+    let checked = verify_zk_signature(&manifest, trust, Some(tsa_trust), prover, None, None)?;
     if !checked.proof_verified(prover)? {
         bail!("the proof does not verify for the ingredient's claim, issuing CA, and time stamp");
     }
@@ -722,6 +877,7 @@ struct CheckedSignature {
     public: serde_json::Value,
     issuer: String,
     hidden: Option<HiddenIssuerReport>,
+    hidden_time_stamp: Option<(HiddenIssuerReport, (u64, u64))>,
     path: Vec<Vec<u8>>,
     time: u64,
 }
@@ -732,13 +888,21 @@ impl CheckedSignature {
     }
 }
 
-fn verify_zk_signature(manifest: &ActiveManifest, trust: &TrustList, tsa_trust: &Path, prover: &Prover, expected_issuer: Option<&str>, policy: Option<&IssuerPolicy>) -> Result<CheckedSignature> {
+fn verify_zk_signature(manifest: &ActiveManifest, trust: &TrustList, tsa_trust: Option<&Path>, prover: &Prover, expected_issuer: Option<&str>, policy: Option<&IssuerPolicy>) -> Result<CheckedSignature> {
     let signature = ZkSignature::decode(&manifest.cose_sign1)?;
     let variant = prover.variant()?;
-    match (&signature.issuers, variant.as_str()) {
-        (None, VARIANT_DISCLOSED) | (Some(_), VARIANT_HIDDEN_ISSUER) => {}
-        (None, _) => bail!("the asset discloses its issuer, but the keys in {} are for the hidden-issuer statement", prover.keys.display()),
-        (Some(_), _) => bail!("the asset hides its issuer, but the keys in {} are for the disclosed statement", prover.keys.display()),
+    let form = match (&signature.issuers, &signature.tsa) {
+        (None, _) => VARIANT_DISCLOSED,
+        (Some(_), None) => VARIANT_HIDDEN_ISSUER,
+        (Some(_), Some(_)) => VARIANT_HIDDEN_ALL,
+    };
+    if form != variant {
+        let describe = |v: &str| match v {
+            VARIANT_DISCLOSED => "the disclosed statement",
+            VARIANT_HIDDEN_ISSUER => "the hidden-issuer statement",
+            _ => "the statement hiding the issuer and the time stamp",
+        };
+        bail!("the asset is for {}, but the keys in {} are for {}", describe(form), prover.keys.display(), describe(&variant));
     }
     let keys_curve = prover.curve()?;
     if signature.curve != keys_curve {
@@ -748,6 +912,26 @@ fn verify_zk_signature(manifest: &ActiveManifest, trust: &TrustList, tsa_trust: 
         bail!("the proof was made with other keys (verifying key {}), not those in {}", signature.vk_sha256, prover.keys.display());
     }
 
+    if let (Some(issuers), Some(tsa), Some((t1, t2))) = (&signature.issuers, &signature.tsa, signature.window) {
+        // Hidden time stamp (I6): no token to check off-circuit; the proof
+        // shows its time lies in the window, and the policy approves both
+        // roots for the whole window.
+        if expected_issuer.is_some() {
+            bail!("the asset hides its issuer; an expected issuer cannot be checked");
+        }
+        let policy = policy.ok_or_else(|| anyhow!("the asset hides its issuer and time stamp: verifying it needs an issuer policy (--issuer-policy) with TSA snapshots"))?;
+        if let Some(max) = policy.max_time_window {
+            if t2 - t1 > max {
+                bail!("the asset's time window is {} s, longer than the policy's maximum of {max} s", t2 - t1);
+            }
+        }
+        let report = policy.approve_window(prover, Purpose::ClaimSigning, (t1, t2), issuers)?;
+        let tsa_report = policy.approve_window(prover, Purpose::TimeStamping, (t1, t2), tsa)?;
+        let public = serde_json::to_value(HiddenAllPublicInputs { claim: b64(&manifest.claim), issuer_root: issuers.root.clone(), tsa_root: tsa.root.clone(), t1, t2 })?;
+        let issuer = format!("hidden among {} CAs of {}", report.anonymity_set, report.snapshot);
+        return Ok(CheckedSignature { signature, public, issuer, hidden: Some(report), hidden_time_stamp: Some((tsa_report, (t1, t2))), path: Vec::new(), time: t1 });
+    }
+    let tsa_trust = tsa_trust.ok_or_else(|| anyhow!("the asset discloses its time stamp: verifying it needs the TSA trust list (--tsa-trust-list)"))?;
     let info = tst_info(&signature.time_stamp_token)?;
     if info.hash_algorithm_oid != SHA256_OID {
         bail!("the time stamp's imprint is not SHA-256");
@@ -763,7 +947,7 @@ fn verify_zk_signature(manifest: &ActiveManifest, trust: &TrustList, tsa_trust: 
         let report = policy.approve(prover, time, issuers)?;
         let public = serde_json::to_value(HiddenPublicInputs { claim: b64(&manifest.claim), issuer_root: issuers.root.clone(), time, imprint: b64(&info.hashed_message) })?;
         let issuer = format!("hidden among {} CAs of {}", report.anonymity_set, report.snapshot);
-        return Ok(CheckedSignature { signature, public, issuer, hidden: Some(report), path: Vec::new(), time });
+        return Ok(CheckedSignature { signature, public, issuer, hidden: Some(report), hidden_time_stamp: None, path: Vec::new(), time });
     }
     let path = validate_issuing_chain(&signature.issuing_chain, trust, time)?;
     let issuer_certificate = &signature.issuing_chain[0];
@@ -774,5 +958,5 @@ fn verify_zk_signature(manifest: &ActiveManifest, trust: &TrustList, tsa_trust: 
         }
     }
     let public = serde_json::to_value(PublicInputs { claim: b64(&manifest.claim), issuer_certificate: b64(issuer_certificate), time, imprint: b64(&info.hashed_message) })?;
-    Ok(CheckedSignature { signature, public, issuer, hidden: None, path, time })
+    Ok(CheckedSignature { signature, public, issuer, hidden: None, hidden_time_stamp: None, path, time })
 }

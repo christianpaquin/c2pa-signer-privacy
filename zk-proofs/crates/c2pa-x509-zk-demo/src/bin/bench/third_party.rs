@@ -22,7 +22,10 @@
 //! builds the issuer tree over the trust list's eligible issuers (the
 //! anonymizer does so for each asset), prove takes them, package writes the
 //! hidden form of the ZK signature, and verify_cli applies an issuer policy
-//! approving the trust list.
+//! approving the trust list. With --hide-time-stamp too (roadmap I6), the
+//! statement hiding the issuer and the time stamp: prepare also builds the TSA
+//! tree, the window is the time stamp's UTC day, and the policy approves the
+//! TSA trust list as a TSA snapshot.
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
@@ -31,7 +34,7 @@ use std::process::{Command, Stdio};
 
 use c2pa_x509_zk_demo::jumbf::{active_manifest, manifest_store};
 use c2pa_x509_zk_demo::original_signature::OriginalSignature;
-use c2pa_x509_zk_demo::third_party::{check_claim, purpose_tree, replace_signature, statement_inputs, HiddenPublicInputs, Prover, VARIANT_HIDDEN_ISSUER};
+use c2pa_x509_zk_demo::third_party::{check_claim, purpose_tree, replace_signature, statement_inputs, HiddenAllPublicInputs, HiddenPublicInputs, Prover, VARIANT_HIDDEN_ALL, VARIANT_HIDDEN_ISSUER};
 use c2pa_x509_zk_demo::zk_signature::{proof_len, IssuerTreeRef, ZkSignature, DEFAULT_CURVE};
 use c2pa_x509_zk_demo::{issuing_path_for, file_sha256, TrustList};
 
@@ -161,7 +164,8 @@ pub fn phase(name: &str, work_dir: &Path, zk_root: &Path) -> Result<()> {
             let token = original.time_stamp.as_ref().ok_or_else(|| anyhow!("no time stamp"))?.token.clone();
             // The hidden issuer (H4): the tree over the eligible issuers, as
             // the anonymizer builds it for each asset.
-            let issuers = if keys["variant"].as_str() == Some(VARIANT_HIDDEN_ISSUER) {
+            let hidden_all = keys["variant"].as_str() == Some(VARIANT_HIDDEN_ALL);
+            let issuers = if hidden_all || keys["variant"].as_str() == Some(VARIANT_HIDDEN_ISSUER) {
                 let tree = timed(&mut steps, "build_issuer_tree", || {
                     if !trust.is_anchor(&chain[0]) {
                         bail!("the issuing CA is not itself on the trust list (HIDING-THE-ISSUER.md, I2)");
@@ -173,29 +177,51 @@ pub fn phase(name: &str, work_dir: &Path, zk_root: &Path) -> Result<()> {
                 data.insert("issuer_tree_entries".into(), json!(tree.entries));
                 std::fs::write(
                     work_dir.join("policy.json"),
-                    serde_json::to_vec(&json!({ "snapshots": [{ "name": "bench-list", "trust_list": paths.trust_list, "from": 0 }] }))?,
+                    serde_json::to_vec(&json!({
+                        "snapshots": [{ "name": "bench-list", "trust_list": paths.trust_list, "from": 0 }],
+                        "tsa_snapshots": [{ "name": "bench-tsa", "trust_list": paths.tsa_trust_list, "from": 0 }],
+                    }))?,
                 )?;
                 Some(IssuerTreeRef { root: tree.root, list: "bench-list".into() })
             } else {
                 None
             };
+            // The hidden time stamp (I6): the TSA tree, as the anonymizer
+            // builds it for each asset, and the UTC day's window.
+            let (tsa, window) = if hidden_all {
+                let tree = timed(&mut steps, "build_tsa_tree", || {
+                    let gnark = PathBuf::from(std::env::var_os("C2PA_ZK_GNARK").ok_or_else(|| anyhow!("C2PA_ZK_GNARK not set"))?);
+                    let prover = Prover { cli: gnark, keys: paths.keys.clone() };
+                    let tsa_trust = TrustList::from_file(&paths.tsa_trust_list)?;
+                    Ok(purpose_tree(&tsa_trust, c2pa_x509_zk_demo::trust::Purpose::TimeStamping, &prover, work_dir)?.0)
+                })?;
+                data.insert("tsa_tree_entries".into(), json!(tree.entries));
+                let t = inputs.public.time;
+                (Some(IssuerTreeRef { root: tree.root, list: "bench-tsa".into() }), Some((t - t % 86_400, t - t % 86_400 + 86_400)))
+            } else {
+                (None, None)
+            };
+            let token = if tsa.is_some() { Vec::new() } else { token };
             let disclosed_chain = if issuers.is_some() { Vec::new() } else { chain.clone() };
             let size = manifest.cose_sign1.len();
             let spare = timed(&mut steps, "check_size", || {
-                let signature = ZkSignature { issuing_chain: disclosed_chain.clone(), issuers: issuers.clone(), vk_sha256: vk_sha256.clone(), curve: curve.clone(), time_stamp_token: token.clone(), proof: vec![0; proof_len(&curve)?] };
+                let signature = ZkSignature { issuing_chain: disclosed_chain.clone(), issuers: issuers.clone(), tsa: tsa.clone(), window, vk_sha256: vk_sha256.clone(), curve: curve.clone(), time_stamp_token: token.clone(), proof: vec![0; proof_len(&curve)?] };
                 signature.encode_exact(size)?;
                 Ok(size - signature.encode(0, 0).len())
             })?;
             timed(&mut steps, "write_inputs", || {
                 std::fs::write(work_dir.join("inputs.json"), serde_json::to_vec(&inputs)?)?;
-                let public = match &issuers {
-                    None => serde_json::to_vec(&inputs.public)?,
-                    Some(tree) => serde_json::to_vec(&HiddenPublicInputs { claim: inputs.public.claim.clone(), issuer_root: tree.root.clone(), time: inputs.public.time, imprint: inputs.public.imprint.clone() })?,
+                let public = match (&issuers, &tsa, window) {
+                    (None, _, _) => serde_json::to_vec(&inputs.public)?,
+                    (Some(tree), Some(tsa), Some((t1, t2))) => serde_json::to_vec(&HiddenAllPublicInputs { claim: inputs.public.claim.clone(), issuer_root: tree.root.clone(), tsa_root: tsa.root.clone(), t1, t2 })?,
+                    (Some(tree), _, _) => serde_json::to_vec(&HiddenPublicInputs { claim: inputs.public.claim.clone(), issuer_root: tree.root.clone(), time: inputs.public.time, imprint: inputs.public.imprint.clone() })?,
                 };
                 std::fs::write(work_dir.join("public.json"), public)?;
                 let context = json!({
                     "issuing_chain": disclosed_chain.iter().map(|c| super::b64(c)).collect::<Vec<_>>(),
                     "issuers": issuers.as_ref().map(|t| json!({ "root": t.root, "list": t.list })),
+                    "tsa": tsa.as_ref().map(|t| json!({ "root": t.root, "list": t.list })),
+                    "window": window.map(|(t1, t2)| json!([t1, t2])),
                     "vk_sha256": vk_sha256, "curve": curve, "token": super::b64(&token),
                 });
                 Ok(std::fs::write(work_dir.join("context.json"), serde_json::to_vec(&context)?)?)
@@ -225,6 +251,11 @@ pub fn phase(name: &str, work_dir: &Path, zk_root: &Path) -> Result<()> {
                         root: t["root"].as_str().unwrap_or_default().to_string(),
                         list: t["list"].as_str().unwrap_or_default().to_string(),
                     }),
+                    tsa: context["tsa"].as_object().map(|t| IssuerTreeRef {
+                        root: t["root"].as_str().unwrap_or_default().to_string(),
+                        list: t["list"].as_str().unwrap_or_default().to_string(),
+                    }),
+                    window: context["window"].as_array().map(|w| (w[0].as_u64().unwrap_or_default(), w[1].as_u64().unwrap_or_default())),
                     vk_sha256: context["vk_sha256"].as_str().unwrap_or_default().to_string(),
                     curve: context["curve"].as_str().unwrap_or(DEFAULT_CURVE).to_string(),
                     time_stamp_token: decode(&context["token"])?,
@@ -409,6 +440,7 @@ pub fn measure(
     key_loading: KeyLoading,
     curve: &str,
     hide_issuer: bool,
+    hide_time_stamp: bool,
 ) -> Result<Value> {
     let files = key_loading.prover_files();
     let reps = PROVE_REPS;
@@ -440,6 +472,10 @@ pub fn measure(
     if hide_issuer {
         prove_args.extend(["--issuers".as_ref(), issuers_pem.as_os_str()]);
     }
+    let tsa_pem = work_dir.join(c2pa_x509_zk_demo::third_party::eligible_issuers_file(c2pa_x509_zk_demo::trust::Purpose::TimeStamping));
+    if hide_time_stamp {
+        prove_args.extend(["--tsa-issuers".as_ref(), tsa_pem.as_os_str(), "--window".as_ref(), "86400".as_ref()]);
+    }
     let verify_args = ["verify".as_ref(), "--keys".as_ref(), keys.as_os_str(), "--public".as_ref(), public.as_os_str(), "--proof".as_ref(), proof.as_os_str()];
 
     if external.is_none() {
@@ -450,12 +486,13 @@ pub fn measure(
     if keys_given(work_dir, &keys) {
         phases.push(json!({ "name": "setup", "category": "one-time", "skipped": "reused existing keys" }));
     } else {
-        let statement = if hide_issuer { VARIANT_HIDDEN_ISSUER } else { "disclosed" };
+        let statement = if hide_time_stamp { VARIANT_HIDDEN_ALL } else if hide_issuer { VARIANT_HIDDEN_ISSUER } else { "disclosed" };
         phases.push(gnark_phase("setup", "one-time", &mut gnark_cmd(&["setup".as_ref(), "--keys".as_ref(), keys.as_os_str(), "--curve".as_ref(), curve.as_ref(), "--statement".as_ref(), statement.as_ref()]))?);
     }
     let keys_variant = keys_manifest(&keys)?["variant"].as_str().unwrap_or("disclosed").to_string();
-    if hide_issuer != (keys_variant == VARIANT_HIDDEN_ISSUER) {
-        bail!("--hide-issuer {} but the keys in {} are for the {keys_variant} statement", if hide_issuer { "given" } else { "not given" }, keys.display());
+    let expected = if hide_time_stamp { VARIANT_HIDDEN_ALL } else if hide_issuer { VARIANT_HIDDEN_ISSUER } else { "disclosed" };
+    if keys_variant != expected {
+        bail!("the run is for the {expected} statement, but the keys in {} are for the {keys_variant} statement", keys.display());
     }
     run_phase(&mut phases, "prepare", "anonymization", &mut phase_cmd("tp-prepare"))?;
 
@@ -499,7 +536,8 @@ pub fn measure(
             "proof_system": "Groth16 (gnark v0.16.4, native Go witness solving, one BSB22 commitment)",
             "proving_key": { "format": key_loading.format, "point_checks": key_loading.check, "file_sha256_checked": true },
             "curve": manifest["curve"].as_str().unwrap_or(DEFAULT_CURVE),
-            "circuit": if hide_issuer { "gnark/statement HiddenIssuerCircuit (third-party-hidden-issuer/1)" } else { "gnark/statement (third-party/1)" },
+            "circuit": if hide_time_stamp { "gnark/statement HiddenAllCircuit (third-party-hidden/1)" } else if hide_issuer { "gnark/statement HiddenIssuerCircuit (third-party-hidden-issuer/1)" } else { "gnark/statement (third-party/1)" },
+            "time_stamp_hidden": hide_time_stamp,
             "issuer": if hide_issuer { json!({ "hidden": true, "tree": "issuertree format 1 (Poseidon2, depth 8)", "entries": prepare["issuer_tree_entries"] }) } else { json!({ "hidden": false }) },
         },
         "statement": STATEMENT,

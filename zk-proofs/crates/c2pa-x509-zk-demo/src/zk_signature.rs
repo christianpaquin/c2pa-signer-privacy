@@ -18,6 +18,14 @@
 //! tree's root (canonical lowercase hex), "list": the anonymizer's name for
 //! the trust-list snapshot, a hint the verifier never trusts}.
 //!
+//! With the issuer and the time stamp hidden (roadmap I6,
+//! HIDING-THE-TIME-STAMP.md, T6): no `x5chain` and no time-stamp token (the
+//! unprotected header holds only the padding); the statement is
+//! "third-party-hidden/1", and the ZK extension holds "issuers" as above,
+//! "tsa": the TSA tree, in the same form, and "window": [t1, t2], the
+//! half-open window of Unix seconds the token's time lies in, aligned (t1 a
+//! multiple of t2 - t1) and below 2^34.
+//!
 //! Decoding is strict, so the format leaves no room for other data (a signer
 //! certificate, say): exactly one CBOR item, exactly these header fields,
 //! all-zero padding, and a proof of exactly its curve's length (`proof_len`).
@@ -29,6 +37,15 @@ pub const ZK_ALG: i64 = -65538;
 pub const CRIT_LABEL: &str = "c2pa-x509-zk";
 pub const STATEMENT: &str = "third-party/1";
 pub const STATEMENT_HIDDEN_ISSUER: &str = "third-party-hidden-issuer/1";
+pub const STATEMENT_HIDDEN_ALL: &str = "third-party-hidden/1";
+/// The window's endpoints are below 2^WINDOW_BITS (the circuit's bound).
+pub const WINDOW_BITS: u32 = 34;
+
+/// Whether [t1, t2) is a window the format accepts: non-empty, below
+/// 2^WINDOW_BITS, and aligned (t1 a multiple of its length).
+pub fn is_aligned_window(t1: u64, t2: u64) -> bool {
+    t1 < t2 && t2 < (1 << WINDOW_BITS) && t1 % (t2 - t1) == 0
+}
 /// The issuer tree format the hidden-issuer statement uses (gnark/issuertree).
 pub const ISSUER_TREE_FORMAT: u64 = 1;
 pub const TIME_STAMP_LABEL: &str = "c2pa-x509-zk-tst";
@@ -69,11 +86,15 @@ pub struct ZkSignature {
     pub issuing_chain: Vec<Vec<u8>>,
     /// The issuer tree, when the issuer is hidden (H4).
     pub issuers: Option<IssuerTreeRef>,
+    /// The TSA tree, when the time stamp is hidden too (I6).
+    pub tsa: Option<IssuerTreeRef>,
+    /// The window [t1, t2) of the hidden time stamp (I6).
+    pub window: Option<(u64, u64)>,
     /// SHA-256 of the verifying key (hex), identifying the circuit and keys.
     pub vk_sha256: String,
     /// The proof system's curve ("bn254" or "bls12-381"; roadmap E7).
     pub curve: String,
-    /// The original RFC 3161 time-stamp token (`sigTst2`).
+    /// The original RFC 3161 time-stamp token (`sigTst2`); empty when hidden.
     pub time_stamp_token: Vec<u8>,
     pub proof: Vec<u8>,
 }
@@ -122,21 +143,31 @@ impl ZkSignature {
     }
 
     fn encode_with_chain(&self, chain: &[Vec<u8>], pad: usize, pad2: usize) -> Vec<u8> {
-        let statement = if self.issuers.is_some() { STATEMENT_HIDDEN_ISSUER } else { STATEMENT };
+        let statement = match (&self.issuers, &self.tsa) {
+            (_, Some(_)) => STATEMENT_HIDDEN_ALL,
+            (Some(_), None) => STATEMENT_HIDDEN_ISSUER,
+            (None, None) => STATEMENT,
+        };
+        let tree = |t: &IssuerTreeRef| {
+            Value::Map(vec![
+                (text("format"), Value::Integer(ISSUER_TREE_FORMAT.into())),
+                (text("root"), text(&t.root)),
+                (text("list"), text(&t.list)),
+            ])
+        };
         let mut ext = vec![(text("statement"), text(statement)), (text("vk"), text(&self.vk_sha256))];
         // Written only for other curves, so BN254 signatures are unchanged.
         if self.curve != DEFAULT_CURVE {
             ext.push((text("curve"), text(&self.curve)));
         }
         if let Some(issuers) = &self.issuers {
-            ext.push((
-                text("issuers"),
-                Value::Map(vec![
-                    (text("format"), Value::Integer(ISSUER_TREE_FORMAT.into())),
-                    (text("root"), text(&issuers.root)),
-                    (text("list"), text(&issuers.list)),
-                ]),
-            ));
+            ext.push((text("issuers"), tree(issuers)));
+        }
+        if let Some(tsa) = &self.tsa {
+            ext.push((text("tsa"), tree(tsa)));
+        }
+        if let Some((t1, t2)) = self.window {
+            ext.push((text("window"), Value::Array(vec![Value::Integer(t1.into()), Value::Integer(t2.into())])));
         }
         let mut protected = vec![
             (Value::Integer(1.into()), Value::Integer(ZK_ALG.into())),
@@ -151,11 +182,13 @@ impl ZkSignature {
             text("tstTokens"),
             Value::Array(vec![Value::Map(vec![(text("val"), Value::Bytes(self.time_stamp_token.clone()))])]),
         )]);
-        let unprotected = Value::Map(vec![
-            (text(TIME_STAMP_LABEL), time_stamp),
-            (text("pad"), Value::Bytes(vec![0; pad])),
-            (text("pad2"), Value::Bytes(vec![0; pad2])),
-        ]);
+        let mut unprotected = Vec::new();
+        if self.tsa.is_none() {
+            unprotected.push((text(TIME_STAMP_LABEL), time_stamp));
+        }
+        unprotected.push((text("pad"), Value::Bytes(vec![0; pad])));
+        unprotected.push((text("pad2"), Value::Bytes(vec![0; pad2])));
+        let unprotected = Value::Map(unprotected);
         let signature = [&[FORMAT_VERSION][..], &self.proof].concat();
         cbor(&Value::Tag(
             COSE_SIGN1_TAG,
@@ -209,7 +242,7 @@ impl ZkSignature {
             && map_get(&header, &text(CRIT_LABEL))
                 .and_then(Value::as_map)
                 .and_then(|ext| map_get(ext, &text("statement")))
-                .is_some_and(|s| *s == text(STATEMENT) || *s == text(STATEMENT_HIDDEN_ISSUER))
+                .is_some_and(|s| *s == text(STATEMENT) || *s == text(STATEMENT_HIDDEN_ISSUER) || *s == text(STATEMENT_HIDDEN_ALL))
     }
 
     /// Parse a third-party ZK signature; fails for any other `COSE_Sign1`.
@@ -245,33 +278,58 @@ impl ZkSignature {
             bail!("the ZK extension is not marked critical");
         }
         let ext = map_get(&header, &text(CRIT_LABEL)).and_then(Value::as_map).ok_or_else(|| anyhow!("no ZK extension"))?;
-        only_keys(ext, &[text("statement"), text("vk"), text("curve"), text("issuers")], "ZK extension")?;
+        only_keys(ext, &[text("statement"), text("vk"), text("curve"), text("issuers"), text("tsa"), text("window")], "ZK extension")?;
         let curve = match map_get(ext, &text("curve")) {
             None => DEFAULT_CURVE.to_string(),
             Some(Value::Text(c)) if c != DEFAULT_CURVE => c.clone(),
             Some(_) => bail!("malformed curve field (BN254 is written by omission)"),
         };
-        let hidden = match map_get(ext, &text("statement")) {
-            Some(s) if *s == text(STATEMENT) => false,
-            Some(s) if *s == text(STATEMENT_HIDDEN_ISSUER) => true,
-            _ => bail!("not a third-party ZK signature (statement is not {STATEMENT} or {STATEMENT_HIDDEN_ISSUER})"),
+        // The statement fixes the form: (issuer hidden, time stamp hidden).
+        let (hidden, hidden_time_stamp) = match map_get(ext, &text("statement")) {
+            Some(s) if *s == text(STATEMENT) => (false, false),
+            Some(s) if *s == text(STATEMENT_HIDDEN_ISSUER) => (true, false),
+            Some(s) if *s == text(STATEMENT_HIDDEN_ALL) => (true, true),
+            _ => bail!("not a third-party ZK signature (statement is not {STATEMENT}, {STATEMENT_HIDDEN_ISSUER}, or {STATEMENT_HIDDEN_ALL})"),
+        };
+        let tree_ref = |value: &Value, what: &str| -> Result<IssuerTreeRef> {
+            let map = value.as_map().ok_or_else(|| anyhow!("{what} is not a map"))?;
+            only_keys(map, &[text("format"), text("root"), text("list")], what)?;
+            if map_get(map, &text("format")) != Some(&Value::Integer(ISSUER_TREE_FORMAT.into())) {
+                bail!("unsupported {what} tree format (expected {ISSUER_TREE_FORMAT})");
+            }
+            let root = map_get(map, &text("root")).and_then(Value::as_text).ok_or_else(|| anyhow!("no {what} tree root"))?;
+            if !is_canonical_root(root) {
+                bail!("the {what} tree root is not canonical lowercase hex");
+            }
+            let list = map_get(map, &text("list")).and_then(Value::as_text).ok_or_else(|| anyhow!("no {what} trust-list name"))?;
+            Ok(IssuerTreeRef { root: root.to_string(), list: list.to_string() })
         };
         let issuers = match (hidden, map_get(ext, &text("issuers"))) {
             (false, None) => None,
             (false, Some(_)) => bail!("issuers given for the disclosed statement"),
-            (true, None) => bail!("no issuers for the hidden-issuer statement"),
+            (true, None) => bail!("no issuers for a hidden-issuer statement"),
+            (true, Some(value)) => Some(tree_ref(value, "issuers")?),
+        };
+        let tsa = match (hidden_time_stamp, map_get(ext, &text("tsa"))) {
+            (false, None) => None,
+            (false, Some(_)) => bail!("a TSA tree given for a statement with a disclosed time stamp"),
+            (true, None) => bail!("no TSA tree for the hidden-time-stamp statement"),
+            (true, Some(value)) => Some(tree_ref(value, "tsa")?),
+        };
+        let window = match (hidden_time_stamp, map_get(ext, &text("window"))) {
+            (false, None) => None,
+            (false, Some(_)) => bail!("a window given for a statement with a disclosed time stamp"),
+            (true, None) => bail!("no window for the hidden-time-stamp statement"),
             (true, Some(value)) => {
-                let map = value.as_map().ok_or_else(|| anyhow!("issuers is not a map"))?;
-                only_keys(map, &[text("format"), text("root"), text("list")], "issuers")?;
-                if map_get(map, &text("format")) != Some(&Value::Integer(ISSUER_TREE_FORMAT.into())) {
-                    bail!("unsupported issuer tree format (expected {ISSUER_TREE_FORMAT})");
+                let bounds = value.as_array().ok_or_else(|| anyhow!("the window is not an array"))?;
+                let [Value::Integer(t1), Value::Integer(t2)] = bounds.as_slice() else {
+                    bail!("the window is not two integers");
+                };
+                let (t1, t2) = (u64::try_from(*t1).map_err(|_| anyhow!("the window's start is not a Unix time"))?, u64::try_from(*t2).map_err(|_| anyhow!("the window's end is not a Unix time"))?);
+                if !is_aligned_window(t1, t2) {
+                    bail!("the window [{t1}, {t2}) is not an aligned window of Unix seconds below 2^{WINDOW_BITS}");
                 }
-                let root = map_get(map, &text("root")).and_then(Value::as_text).ok_or_else(|| anyhow!("no issuer tree root"))?;
-                if !is_canonical_root(root) {
-                    bail!("the issuer tree root is not canonical lowercase hex");
-                }
-                let list = map_get(map, &text("list")).and_then(Value::as_text).ok_or_else(|| anyhow!("no trust-list name"))?;
-                Some(IssuerTreeRef { root: root.to_string(), list: list.to_string() })
+                Some((t1, t2))
             }
         };
         let vk_sha256 = map_get(ext, &text("vk")).and_then(Value::as_text).ok_or_else(|| anyhow!("no verifying-key hash"))?.to_string();
@@ -293,20 +351,27 @@ impl ZkSignature {
                 chain
             }
         };
-        let time_stamp = map_get(&unprotected, &text(TIME_STAMP_LABEL)).and_then(Value::as_map).ok_or_else(|| anyhow!("no time stamp"))?;
-        only_keys(time_stamp, &[text("tstTokens")], "time-stamp header")?;
-        let tokens = map_get(time_stamp, &text("tstTokens"))
-            .and_then(Value::as_array)
-            .ok_or_else(|| anyhow!("no time stamp"))?;
-        let [token] = tokens.as_slice() else {
-            bail!("the time-stamp header must hold exactly one token");
+        let time_stamp_token = match (hidden_time_stamp, map_get(&unprotected, &text(TIME_STAMP_LABEL))) {
+            (true, Some(_)) => bail!("a time-stamp token in a hidden-time-stamp signature"),
+            (true, None) => Vec::new(),
+            (false, None) => bail!("no time stamp"),
+            (false, Some(time_stamp)) => {
+                let time_stamp = time_stamp.as_map().ok_or_else(|| anyhow!("no time stamp"))?;
+                only_keys(time_stamp, &[text("tstTokens")], "time-stamp header")?;
+                let tokens = map_get(time_stamp, &text("tstTokens"))
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| anyhow!("no time stamp"))?;
+                let [token] = tokens.as_slice() else {
+                    bail!("the time-stamp header must hold exactly one token");
+                };
+                let token = token.as_map().ok_or_else(|| anyhow!("malformed time-stamp token"))?;
+                only_keys(token, &[text("val")], "time-stamp token")?;
+                map_get(token, &text("val"))
+                    .and_then(Value::as_bytes)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("time-stamp token has no val"))?
+            }
         };
-        let token = token.as_map().ok_or_else(|| anyhow!("malformed time-stamp token"))?;
-        only_keys(token, &[text("val")], "time-stamp token")?;
-        let time_stamp_token = map_get(token, &text("val"))
-            .and_then(Value::as_bytes)
-            .cloned()
-            .ok_or_else(|| anyhow!("time-stamp token has no val"))?;
         let (&version, proof) = signature.split_first().ok_or_else(|| anyhow!("empty signature"))?;
         if version != FORMAT_VERSION {
             bail!("unsupported ZK signature format version {version}");
@@ -315,7 +380,7 @@ impl ZkSignature {
         if proof.len() != expected {
             bail!("the proof is {} bytes; format version {FORMAT_VERSION} on {curve} has {expected}", proof.len());
         }
-        Ok(Self { issuing_chain, issuers, vk_sha256, curve, time_stamp_token, proof: proof.to_vec() })
+        Ok(Self { issuing_chain, issuers, tsa, window, vk_sha256, curve, time_stamp_token, proof: proof.to_vec() })
     }
 }
 
@@ -327,6 +392,8 @@ mod tests {
         ZkSignature {
             issuing_chain: vec![vec![0x30; 733]],
             issuers: None,
+            tsa: None,
+            window: None,
             vk_sha256: "ab".repeat(32),
             curve: DEFAULT_CURVE.into(),
             time_stamp_token: vec![0x30; 2000],
@@ -533,5 +600,78 @@ mod tests {
         // ever given to c2pa, never written to an output.
         assert!(ZkSignature::decode(&copy).is_err());
         assert_eq!(z.encode_exact(size).unwrap().len(), size);
+    }
+
+    fn hidden_all() -> ZkSignature {
+        ZkSignature {
+            tsa: Some(IssuerTreeRef { root: "4d5e6f".into(), list: "c2pa-tsa@a95f2c4".into() }),
+            window: Some((1_794_355_200, 1_794_441_600)), // 2026-11-11, a UTC day
+            time_stamp_token: Vec::new(),
+            ..hidden()
+        }
+    }
+
+    /// Re-encode `cose` with its unprotected header changed by `f`.
+    fn with_unprotected(cose: &[u8], f: impl FnOnce(&mut Vec<(Value, Value)>)) -> Vec<u8> {
+        let Value::Tag(tag, inner) = single_item(cose).unwrap() else { panic!() };
+        let Value::Array(mut fields) = *inner else { panic!() };
+        let Value::Map(mut unprotected) = fields[1].clone() else { panic!() };
+        f(&mut unprotected);
+        fields[1] = Value::Map(unprotected);
+        cbor(&Value::Tag(tag, Box::new(Value::Array(fields))))
+    }
+
+    #[test]
+    fn hidden_all_round_trips_without_x5chain_or_token() {
+        let z = hidden_all();
+        let cose = z.encode(4, 1);
+        assert!(ZkSignature::is_declared(&cose));
+        assert_eq!(ZkSignature::decode(&cose).unwrap(), z);
+        let Value::Tag(_, inner) = single_item(&cose).unwrap() else { panic!() };
+        let unprotected = inner.as_array().unwrap()[1].as_map().unwrap().clone();
+        assert!(map_get(&unprotected, &text(TIME_STAMP_LABEL)).is_none(), "time-stamp label written");
+        // The token's space becomes padding: shorter than the hidden-issuer form by the token.
+        assert!(z.encode(0, 0).len() + 1900 < hidden().encode(0, 0).len());
+    }
+
+    #[test]
+    fn hidden_all_form_does_not_mix() {
+        let all = hidden_all().encode(0, 0);
+        let issuer_only = hidden().encode(0, 0);
+        let token = Value::Map(vec![(text("tstTokens"), Value::Array(vec![Value::Map(vec![(text("val"), Value::Bytes(vec![0x30; 10]))])]))]);
+        let tree = Value::Map(vec![(text("format"), Value::Integer(1.into())), (text("root"), text("1")), (text("list"), text("x"))]);
+        for (name, cose) in [
+            ("a token in the hidden-all form", with_unprotected(&all, |u| u.insert(0, (text(TIME_STAMP_LABEL), token.clone())))),
+            ("an x5chain in the hidden-all form", with_header(&all, |h| h.insert(2, (Value::Integer(33.into()), Value::Array(vec![Value::Bytes(vec![0x30; 10])]))))),
+            ("no TSA tree", with_ext(&all, |e| e.retain(|(k, _)| *k != text("tsa")))),
+            ("no window", with_ext(&all, |e| e.retain(|(k, _)| *k != text("window")))),
+            ("no issuers", with_ext(&all, |e| e.retain(|(k, _)| *k != text("issuers")))),
+            ("a TSA tree in the hidden-issuer form", with_ext(&issuer_only, |e| e.push((text("tsa"), tree.clone())))),
+            ("a window in the hidden-issuer form", with_ext(&issuer_only, |e| e.push((text("window"), Value::Array(vec![Value::Integer(0.into()), Value::Integer(1.into())]))))),
+        ] {
+            assert!(ZkSignature::decode(&cose).is_err(), "{name}: accepted");
+        }
+    }
+
+    #[test]
+    fn windows_are_aligned_and_bounded() {
+        let day = 86_400u64;
+        let t = 1_794_355_200u64; // a UTC midnight
+        for (t1, t2, ok) in [
+            (t, t + day, true),
+            (t + 3600, t + 7200, true),         // an hour
+            (t + 5, t + 6, true),               // a second
+            (t + 1, t + day + 1, false),        // a day, not aligned
+            (t, t, false),                      // empty
+            (t + day, t, false),                // reversed
+            (0, 1 << WINDOW_BITS, false),       // beyond 2^34
+        ] {
+            assert_eq!(is_aligned_window(t1, t2), ok, "[{t1}, {t2})");
+            let cose = with_ext(&hidden_all().encode(0, 0), |e| {
+                let (_, w) = e.iter_mut().find(|(k, _)| *k == text("window")).unwrap();
+                *w = Value::Array(vec![Value::Integer(t1.into()), Value::Integer(t2.into())]);
+            });
+            assert_eq!(ZkSignature::decode(&cose).is_ok(), ok, "[{t1}, {t2}) in a signature");
+        }
     }
 }

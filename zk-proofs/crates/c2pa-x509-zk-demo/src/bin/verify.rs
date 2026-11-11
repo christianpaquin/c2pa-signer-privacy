@@ -280,7 +280,7 @@ fn third_party(args: &Args) -> Result<()> {
     use anyhow::anyhow;
     println!("=== C2PA X.509 ZK Proof Verifier (third-party mode) ===\n");
     let trust = TrustList::from_file(&args.trust_list)?;
-    let tsa_trust = args.tsa_trust_list.as_ref().ok_or_else(|| anyhow!("third-party assets need --tsa-trust-list"))?;
+    let tsa_trust = args.tsa_trust_list.as_deref();
     let keys = args.keys.clone().ok_or_else(|| anyhow!("third-party assets need --keys (a directory from c2pa-zk-gnark setup)"))?;
     let cli = match &args.gnark {
         Some(cli) => cli.clone(),
@@ -289,10 +289,17 @@ fn third_party(args: &Args) -> Result<()> {
     let policy = args.issuer_policy.as_deref().map(c2pa_x509_zk_demo::third_party::IssuerPolicy::from_file).transpose()?;
     let report = c2pa_x509_zk_demo::third_party::verify(&args.input, &trust, tsa_trust, &c2pa_x509_zk_demo::third_party::Prover { cli, keys }, args.issuer.as_deref(), policy.as_ref())?;
     println!("✅ Valid: the claim was signed by a certificate for C2PA claim signing,");
-    println!("   issued by {}, valid at the time-stamped time {} (Unix).", report.issuer, report.time);
+    match &report.hidden_time_stamp {
+        None => println!("   issued by {}, valid at the time-stamped time {} (Unix).", report.issuer, report.time),
+        Some((h, (t1, t2))) => {
+            println!("   issued by {}, valid at the time-stamped time,", report.issuer);
+            println!("   which lies in [{t1}, {t2}) (Unix); the exact time is not disclosed.");
+            println!("   Time stamp: by a TSA hidden among {} CAs of {} (approved TSA snapshot, root {}).", h.anonymity_set, h.snapshot, h.root);
+        }
+    }
     match &report.hidden {
         None => println!("   Issuing path: {} certificate(s) to the trust list; time stamp trusted.", report.path.len()),
-        Some(h) => println!("   Issuer tree: approved snapshot {} (root {}); time stamp trusted.", h.snapshot, h.root),
+        Some(h) => println!("   Issuer tree: approved snapshot {} (root {}); time stamp {}.", h.snapshot, h.root, if report.hidden_time_stamp.is_some() { "proven in the circuit" } else { "trusted" }),
     }
     println!("   Claim checks (c2pa): {}", report.c2pa_success.join(", "));
     println!("   Visible: {} | assertions: {}", report.claim.claim_generator, report.claim.assertions.join(", "));

@@ -315,6 +315,8 @@ fn replaced_with_placeholder(fixture: &Fixture) -> PathBuf {
     let signature = ZkSignature {
         issuing_chain: vec![std::fs::read(fixture.pki("issuing-ca.der")).unwrap(), std::fs::read(fixture.pki("root.der")).unwrap()],
         issuers: None,
+        tsa: None,
+        window: None,
         vk_sha256: "00".repeat(32),
         curve: DEFAULT_CURVE.into(),
         time_stamp_token: original.time_stamp.unwrap().token,
@@ -369,7 +371,7 @@ fn verifier_checks_trust_time_stamp_and_binding_before_the_proof() {
     let trust = c2pa_x509_zk_demo::TrustList::from_file(&fixture.pki("trust-list.pem")).unwrap();
     let tsa = fixture.pki("tsa-trust-list.pem");
     let verify = |asset: &Path, trust: &c2pa_x509_zk_demo::TrustList, tsa: &Path, prover: &Prover| {
-        third_party::verify(asset, trust, tsa, prover, None, None).unwrap_err().to_string()
+        third_party::verify(asset, trust, Some(tsa), prover, None, None).unwrap_err().to_string()
     };
     assert!(third_party::is_third_party(&output) && !third_party::is_third_party(&fixture.signed()));
 
@@ -395,9 +397,9 @@ fn verifier_checks_trust_time_stamp_and_binding_before_the_proof() {
 
     // An expected issuer: a mismatch is rejected before the proof, a match reaches it.
     let issuer = c2pa_x509_zk_demo::extract_subject_dn(&std::fs::read(fixture.pki("issuing-ca.der")).unwrap()).unwrap();
-    let err = third_party::verify(&output, &trust, &tsa, &prover, Some("CN=Unrelated Expected Issuer"), None).unwrap_err().to_string();
+    let err = third_party::verify(&output, &trust, Some(&tsa), &prover, Some("CN=Unrelated Expected Issuer"), None).unwrap_err().to_string();
     assert!(err.contains("not the expected"), "{err}");
-    let err = third_party::verify(&output, &trust, &tsa, &prover, Some(&issuer), None).unwrap_err().to_string();
+    let err = third_party::verify(&output, &trust, Some(&tsa), &prover, Some(&issuer), None).unwrap_err().to_string();
     assert!(err.contains("proof does not verify"), "{err}");
 
     // A signature carrying extra data (here the signer certificate after the
@@ -587,10 +589,15 @@ use c2pa_x509_zk_demo::TrustList;
 /// reports every proof invalid. Reaching the proof check shows that every
 /// check before it passed.
 fn hidden_stand_in(dir: &Path) -> Prover {
-    let keys = dir.join("hidden-keys");
+    stand_in_for(dir, "hidden-issuer")
+}
+
+/// The stand-in CLI with keys for the given statement variant.
+fn stand_in_for(dir: &Path, variant: &str) -> Prover {
+    let keys = dir.join(format!("{variant}-keys"));
     std::fs::create_dir_all(&keys).unwrap();
-    std::fs::write(keys.join("keys.json"), serde_json::json!({ "variant": "hidden-issuer", "sha256": { "statement.vk": "00".repeat(32) } }).to_string()).unwrap();
-    let cli = dir.join("gnark-hidden-stand-in.sh");
+    std::fs::write(keys.join("keys.json"), serde_json::json!({ "variant": variant, "sha256": { "statement.vk": "00".repeat(32) } }).to_string()).unwrap();
+    let cli = dir.join(format!("gnark-{variant}-stand-in.sh"));
     std::fs::write(&cli, r#"#!/bin/sh
 case "$1" in
   tree)
@@ -619,6 +626,8 @@ fn hidden_with_placeholder(fixture: &Fixture, prover: &Prover, list: &Path, name
     let signature = ZkSignature {
         issuing_chain: vec![],
         issuers: Some(IssuerTreeRef { root: tree.root, list: name.into() }),
+        tsa: None,
+        window: None,
         vk_sha256: "00".repeat(32),
         curve: DEFAULT_CURVE.into(),
         time_stamp_token: original.time_stamp.unwrap().token,
@@ -631,7 +640,7 @@ fn hidden_with_placeholder(fixture: &Fixture, prover: &Prover, list: &Path, name
 }
 
 fn policy(snapshots: Vec<(&str, PathBuf, u64, Option<u64>)>) -> IssuerPolicy {
-    IssuerPolicy { snapshots: snapshots.into_iter().map(|(name, trust_list, from, until)| Snapshot { name: name.into(), trust_list, from, until }).collect() }
+    IssuerPolicy { tsa_snapshots: Vec::new(), max_time_window: None, snapshots: snapshots.into_iter().map(|(name, trust_list, from, until)| Snapshot { name: name.into(), trust_list, from, until }).collect() }
 }
 
 /// The verifier's issuer policy decides, never the asset: a root must be one
@@ -648,7 +657,7 @@ fn hidden_issuer_verification_follows_the_verifiers_policy() {
     let asset = hidden_with_placeholder(&fixture, &prover, &list, "fixture-list");
     let t = third_party::statement_inputs(&fixture.signed(), &trust).unwrap().public.time;
     let verify = |asset: &Path, policy: Option<&IssuerPolicy>, expected: Option<&str>| {
-        third_party::verify(asset, &trust, &tsa, &prover, expected, policy).unwrap_err().to_string()
+        third_party::verify(asset, &trust, Some(&tsa), &prover, expected, policy).unwrap_err().to_string()
     };
 
     // Every check passes up to the proof (which the stand-in reports invalid).
@@ -680,7 +689,7 @@ fn hidden_issuer_verification_follows_the_verifiers_policy() {
 
     // Keys for the disclosed statement refuse a hidden-issuer asset.
     let disclosed = stand_in_prover(fixture.dir.path(), &"00".repeat(32));
-    let err = third_party::verify(&asset, &trust, &tsa, &disclosed, None, Some(&approved)).unwrap_err().to_string();
+    let err = third_party::verify(&asset, &trust, Some(&tsa), &disclosed, None, Some(&approved)).unwrap_err().to_string();
     assert!(err.contains("keys in") && err.contains("disclosed statement"), "{err}");
 }
 
@@ -769,7 +778,7 @@ fn issuer_policy_does_not_depend_on_snapshot_order() {
     let tsa = fixture.pki("tsa-trust-list.pem");
     let list = fixture.pki("trust-list.pem");
     let asset = hidden_with_placeholder(&fixture, &prover, &list, "fixture-list");
-    let verify = |policy: &IssuerPolicy| third_party::verify(&asset, &trust, &tsa, &prover, None, Some(policy)).unwrap_err().to_string();
+    let verify = |policy: &IssuerPolicy| third_party::verify(&asset, &trust, Some(&tsa), &prover, None, Some(policy)).unwrap_err().to_string();
     let named = |a: &str, b: &str| policy(vec![(a, list.clone(), 0, None), (b, list.clone(), 0, None)]);
     for policy in [named("other-approved-name", "fixture-list"), named("fixture-list", "other-approved-name")] {
         let err = verify(&policy);
@@ -804,9 +813,9 @@ fn hidden_issuer_keeps_the_c2pa_claim_checks() {
     bytes[idat + 40] ^= 1;
     let changed = fixture.dir.path().join("hidden-changed.png");
     std::fs::write(&changed, bytes).unwrap();
-    let err = third_party::verify(&changed, &trust, &tsa, &prover, None, Some(&approved)).unwrap_err().to_string();
+    let err = third_party::verify(&changed, &trust, Some(&tsa), &prover, None, Some(&approved)).unwrap_err().to_string();
     assert!(err.contains("c2pa") && !err.contains("the proof does not verify"), "{err}");
-    let err = third_party::verify(&asset, &trust, &tsa, &prover, None, Some(&approved)).unwrap_err().to_string();
+    let err = third_party::verify(&asset, &trust, Some(&tsa), &prover, None, Some(&approved)).unwrap_err().to_string();
     assert!(err.contains("the proof does not verify"), "intact asset: {err}");
 
     // Nothing of the CA chain is written: neither the issuing CA nor the root.
@@ -817,6 +826,236 @@ fn hidden_issuer_keeps_the_c2pa_claim_checks() {
     }
 }
 
+// ---- I6: the hidden time stamp ------------------------------------------------
+
+/// The mirror fixture anonymized with the issuer and the time stamp hidden,
+/// as the anonymizer writes it, with a placeholder proof: the roots of the
+/// trees over `list` (claim signing) and `tsa_list` (time stamping), named
+/// `name` and `tsa_name`, and the UTC day's window.
+fn hidden_all_with_placeholder(fixture: &Fixture, prover: &Prover, list: &Path, tsa_list: &Path, name: &str, tsa_name: &str) -> (PathBuf, (u64, u64)) {
+    use c2pa_x509_zk_demo::trust::Purpose;
+    let store = manifest_store(&fixture.signed()).unwrap();
+    let manifest = active_manifest(&store).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let issuers = third_party::purpose_tree(&TrustList::from_file(list).unwrap(), Purpose::ClaimSigning, prover, dir.path()).unwrap().0;
+    let tsa = third_party::purpose_tree(&TrustList::from_file(tsa_list).unwrap(), Purpose::TimeStamping, prover, dir.path()).unwrap().0;
+    let trust = TrustList::from_file(&fixture.pki("trust-list.pem")).unwrap();
+    let t = third_party::statement_inputs(&fixture.signed(), &trust).unwrap().public.time;
+    let window = (t - t % 86_400, t - t % 86_400 + 86_400);
+    let signature = ZkSignature {
+        issuing_chain: vec![],
+        issuers: Some(IssuerTreeRef { root: issuers.root, list: name.into() }),
+        tsa: Some(IssuerTreeRef { root: tsa.root, list: tsa_name.into() }),
+        window: Some(window),
+        vk_sha256: "00".repeat(32),
+        curve: DEFAULT_CURVE.into(),
+        time_stamp_token: Vec::new(),
+        proof: vec![0x5a; proof_len(DEFAULT_CURVE).unwrap()],
+    };
+    let cose = signature.encode_exact(manifest.cose_sign1.len()).unwrap();
+    let output = fixture.dir.path().join(format!("hidden-all-{name}-{tsa_name}.png"));
+    third_party::replace_signature(&fixture.signed(), &output, &store, &manifest, &cose).unwrap();
+    (output, window)
+}
+
+type Snap<'a> = (&'a str, PathBuf, u64, Option<u64>);
+
+fn policy_all(snapshots: Vec<Snap>, tsa_snapshots: Vec<Snap>, max_time_window: Option<u64>) -> IssuerPolicy {
+    let snap = |v: Vec<Snap>| v.into_iter().map(|(name, trust_list, from, until)| Snapshot { name: name.into(), trust_list, from, until }).collect();
+    IssuerPolicy { snapshots: snap(snapshots), tsa_snapshots: snap(tsa_snapshots), max_time_window }
+}
+
+/// The verifier's policy for hidden time stamps (HIDING-THE-TIME-STAMP.md,
+/// T3-T4): both roots approved by the verifier, each built for its purpose,
+/// from snapshots containing the whole window; the asset's names are hints.
+#[test]
+fn hidden_all_verification_follows_the_policy() {
+    let fixture = Fixture::new(true, true);
+    let other = Fixture::new(true, true);
+    let prover = stand_in_for(fixture.dir.path(), "hidden-all");
+    let trust = TrustList::from_file(&fixture.pki("trust-list.pem")).unwrap();
+    let (list, tsa_list) = (fixture.pki("trust-list.pem"), fixture.pki("tsa-trust-list.pem"));
+    let (asset, (t1, t2)) = hidden_all_with_placeholder(&fixture, &prover, &list, &tsa_list, "fixture-list", "fixture-tsa");
+    // No TSA trust list is given: the time stamp is checked in the proof.
+    let verify = |policy: Option<&IssuerPolicy>| third_party::verify(&asset, &trust, None, &prover, None, policy).unwrap_err().to_string();
+    let issuers = || vec![("fixture-list", list.clone(), 0, None)];
+
+    let approved = policy_all(issuers(), vec![("fixture-tsa", tsa_list.clone(), 0, None)], None);
+    let err = verify(Some(&approved));
+    assert!(err.contains("the proof does not verify"), "{err}");
+
+    for (name, policy, reason) in [
+        ("no policy", None, "needs an issuer policy"),
+        ("no TSA snapshots", Some(policy_all(issuers(), vec![], None)), "approves no TSA snapshot"),
+        // The signer list, filtered and hashed for time stamping, is another root.
+        ("a TSA snapshot of the signer list", Some(policy_all(issuers(), vec![("fixture-tsa", list.clone(), 0, None)], None)), "TSA tree root is not that of any snapshot"),
+        ("another PKI's TSA list", Some(policy_all(issuers(), vec![("fixture-tsa", other.pki("tsa-trust-list.pem"), 0, None)], None)), "TSA tree root is not that of any snapshot"),
+        // The issuer root is checked against issuer snapshots only.
+        ("the issuer list as a TSA snapshot and the TSA list as an issuer one", Some(policy_all(vec![("fixture-list", tsa_list.clone(), 0, None)], vec![("fixture-tsa", list.clone(), 0, None)], None)), "issuer tree root is not that of any snapshot"),
+        ("a TSA snapshot from after t1", Some(policy_all(issuers(), vec![("fixture-tsa", tsa_list.clone(), t1 + 1, None)], None)), "did not apply at the attested time window"),
+        ("a TSA snapshot replaced inside the window", Some(policy_all(issuers(), vec![("fixture-tsa", tsa_list.clone(), 0, Some(t2 - 1))], None)), "did not apply at the attested time window"),
+        ("an issuer snapshot replaced inside the window", Some(policy_all(vec![("fixture-list", list.clone(), 0, Some(t2 - 1))], vec![("fixture-tsa", tsa_list.clone(), 0, None)], None)), "did not apply at the attested time window"),
+        ("a TSA list of another name", Some(policy_all(issuers(), vec![("another-tsa", tsa_list.clone(), 0, None)], None)), "names the TSA trust list"),
+        ("a maximum window of an hour", Some(policy_all(issuers(), vec![("fixture-tsa", tsa_list.clone(), 0, None)], Some(3600))), "longer than the policy's maximum"),
+    ] {
+        let err = verify(policy.as_ref());
+        assert!(err.contains(reason), "{name}: {err}");
+    }
+
+    // Windows ending exactly at a snapshot's end are covered (half-open).
+    let at_expiry = policy_all(vec![("fixture-list", list.clone(), 0, Some(t2))], vec![("fixture-tsa", tsa_list.clone(), t1, Some(t2))], Some(86_400));
+    let err = verify(Some(&at_expiry));
+    assert!(err.contains("the proof does not verify"), "a window ending at the snapshots' end: {err}");
+
+    // Keys for the other statements refuse a hidden-all asset.
+    for variant in ["hidden-issuer", "disclosed"] {
+        let keys = stand_in_for(fixture.dir.path(), variant);
+        let err = third_party::verify(&asset, &trust, None, &keys, None, Some(&approved)).unwrap_err().to_string();
+        assert!(err.contains("the statement hiding the issuer and the time stamp, but the keys"), "{variant}: {err}");
+    }
+}
+
+/// The output carries no token: neither the token's bytes, the TSA's
+/// certificates, nor its serial number; the c2pa checks still run on the
+/// placeholder copy.
+#[test]
+fn hidden_all_output_carries_no_token() {
+    let fixture = Fixture::new(true, true);
+    let prover = stand_in_for(fixture.dir.path(), "hidden-all");
+    let (asset, _) = hidden_all_with_placeholder(&fixture, &prover, &fixture.pki("trust-list.pem"), &fixture.pki("tsa-trust-list.pem"), "fixture-list", "fixture-tsa");
+    let token = fixture.original().time_stamp.unwrap().token;
+    let after = std::fs::read(&asset).unwrap();
+    let mut needles = vec![("the token", token.clone())];
+    for name in ["tsa.der", "tsa-ca.der", "tsa-root.der", "issuing-ca.der", "root.der"] {
+        needles.push((name, std::fs::read(fixture.pki(name)).unwrap()));
+    }
+    // The token's TSTInfo carries the serial number; its first 40 bytes do.
+    let tst = &token[token.len() / 2..token.len() / 2 + 40];
+    needles.push(("a part of the token", tst.to_vec()));
+    for (what, needle) in needles {
+        assert!(!after.windows(needle.len()).any(|w| w == needle.as_slice()), "{what} found in the output");
+    }
+    let trust = TrustList::from_file(&fixture.pki("trust-list.pem")).unwrap();
+    let approved = policy_all(vec![("fixture-list", fixture.pki("trust-list.pem"), 0, None)], vec![("fixture-tsa", fixture.pki("tsa-trust-list.pem"), 0, None)], None);
+    let mut bytes = after.clone();
+    let idat = bytes.windows(4).position(|w| w == b"IDAT").unwrap();
+    bytes[idat + 40] ^= 1;
+    let changed = fixture.dir.path().join("hidden-all-changed.png");
+    std::fs::write(&changed, bytes).unwrap();
+    let err = third_party::verify(&changed, &trust, None, &prover, None, Some(&approved)).unwrap_err().to_string();
+    assert!(err.contains("c2pa") && !err.contains("the proof does not verify"), "{err}");
+}
+
+/// The anonymizer's refusals with the time stamp hidden, all before proving.
+#[test]
+fn hidden_all_anonymizer_refusals() {
+    use c2pa_x509_zk_demo::third_party::HideTimeStamp;
+    let fixture = Fixture::new(true, true);
+    let all = stand_in_for(fixture.dir.path(), "hidden-all");
+    let issuer_only = hidden_stand_in(fixture.dir.path());
+    let trust = TrustList::from_file(&fixture.pki("trust-list.pem")).unwrap();
+    let hide = |tsa_list: &str| HideTimeStamp { tsa_trust: TrustList::from_file(&fixture.pki(tsa_list)).unwrap(), list: "fixture-tsa".into(), window: 86_400 };
+    let out = fixture.dir.path().join("out-all.png");
+    let anonymize = |prover: &Prover, hide_issuer: Option<&str>, h: Option<&HideTimeStamp>| third_party::anonymize(&fixture.signed(), &out, &trust, prover, hide_issuer, h).unwrap_err().to_string();
+
+    let err = anonymize(&all, Some("fixture-list"), None);
+    assert!(err.contains("use --hide-issuer and --hide-time-stamp"), "{err}");
+    let err = anonymize(&issuer_only, Some("fixture-list"), Some(&hide("tsa-trust-list.pem")));
+    assert!(err.contains("needs keys for the hidden-all statement"), "{err}");
+    let err = anonymize(&all, None, Some(&hide("tsa-trust-list.pem")));
+    assert!(err.contains("needs --hide-issuer too"), "{err}");
+    // The TSA CA must itself be listed (the root alone is not enough), and
+    // eligible for time stamping (the signer list's CAs are not the TSA's issuers).
+    for list in ["tsa-root.pem", "trust-list.pem"] {
+        let err = anonymize(&all, Some("fixture-list"), Some(&hide(list)));
+        assert!(err.contains("not issued by a CA itself on the TSA trust list"), "{list}: {err}");
+    }
+    assert!(!out.exists());
+
+    // Window lengths.
+    use c2pa_x509_zk_demo::third_party::parse_window;
+    assert_eq!(parse_window("1d").unwrap(), 86_400);
+    assert_eq!(parse_window("1h").unwrap(), 3600);
+    assert_eq!(parse_window("1s").unwrap(), 1);
+    assert_eq!(parse_window("90").unwrap(), 90);
+    for bad in ["0", "0d", "1w", "", "d", "-1d"] {
+        assert!(parse_window(bad).is_err(), "{bad:?}");
+    }
+}
+
+/// I6 end to end with real proofs: anonymize with the issuer and the time
+/// stamp hidden, verify under a policy with TSA snapshots, and check that no
+/// token or CA certificate is written. Needs hidden-all keys (`c2pa-zk-gnark
+/// setup --statement hidden-all`) in $C2PA_ZK_HIDDEN_ALL_KEYS (default
+/// target/gnark-keys-hidden-all) and the CLI.
+#[test]
+#[ignore = "needs hidden-all gnark keys and the CLI; proves for ~2 min"]
+fn hidden_all_end_to_end() {
+    let keys = std::env::var_os("C2PA_ZK_HIDDEN_ALL_KEYS").map(PathBuf::from).unwrap_or_else(|| zk_root().join("target/gnark-keys-hidden-all"));
+    let gnark = zk_root().join("target/c2pa-zk-gnark");
+    assert!(keys.join("keys.json").exists() && gnark.exists(), "run c2pa-zk-gnark setup --statement hidden-all --keys {} first", keys.display());
+
+    let fixture = Fixture::new(true, true);
+    let other = Fixture::new(true, true);
+    let output = fixture.dir.path().join("anonymized-all.png");
+    Command::cargo_bin("c2pa-x509-zk-anonymizer")
+        .unwrap()
+        .arg("--third-party").arg("--hide-issuer").arg("fixture-list")
+        .arg("--hide-time-stamp").arg("fixture-tsa").arg("--tsa-trust-list").arg(fixture.pki("tsa-trust-list.pem"))
+        .arg("--keys").arg(&keys).arg("--gnark").arg(&gnark)
+        .arg("--input").arg(fixture.signed()).arg("--output").arg(&output)
+        .arg("--trust-list").arg(fixture.pki("trust-list.pem"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("hidden among the 2 eligible TSA CAs of fixture-tsa"));
+
+    let write_policy = |name: &str, tsa_list: PathBuf| {
+        let path = fixture.dir.path().join(format!("policy-all-{name}.json"));
+        std::fs::write(&path, serde_json::json!({
+            "snapshots": [{ "name": "fixture-list", "trust_list": fixture.pki("trust-list.pem"), "from": 0 }],
+            "tsa_snapshots": [{ "name": "fixture-tsa", "trust_list": tsa_list, "from": 0 }],
+            "max_time_window": 86_400,
+        }).to_string()).unwrap();
+        path
+    };
+    let approved = write_policy("approved", fixture.pki("tsa-trust-list.pem"));
+    let unrelated = write_policy("unrelated", other.pki("tsa-trust-list.pem"));
+    let verify = |asset: &Path, policy: &Path| {
+        // No --tsa-trust-list: the time stamp is checked in the proof.
+        Command::cargo_bin("c2pa-x509-zk-verify").unwrap()
+            .arg("--input").arg(asset)
+            .arg("--trust-list").arg(fixture.pki("trust-list.pem"))
+            .arg("--keys").arg(&keys).arg("--gnark").arg(&gnark)
+            .arg("--issuer-policy").arg(policy)
+            .assert()
+    };
+    verify(&output, &approved).success().stdout(predicates::str::contains("Valid")).stdout(predicates::str::contains("the exact time is not disclosed"));
+    verify(&output, &unrelated).failure().stderr(predicates::str::contains("TSA tree root is not that of any snapshot"));
+
+    // Nothing of the token, the TSA, the CAs, or the signer is in the output.
+    let after = std::fs::read(&output).unwrap();
+    let original = fixture.original();
+    let token = original.time_stamp.clone().unwrap().token;
+    let mut needles = vec![("the token", token.clone()), ("the signer certificate", original.signer_certificate().unwrap().to_vec()), ("the original signature", original.signature.clone())];
+    for name in ["tsa.der", "tsa-ca.der", "tsa-root.der", "issuing-ca.der", "root.der"] {
+        needles.push((name, std::fs::read(fixture.pki(name)).unwrap()));
+    }
+    for (what, needle) in needles {
+        assert!(!after.windows(needle.len()).any(|w| w == needle.as_slice()), "{what} found in the output");
+    }
+
+    // A changed claim byte is rejected by the proof.
+    let store = manifest_store(&output).unwrap();
+    let manifest = active_manifest(&store).unwrap();
+    let claim_at = after.windows(manifest.claim.len()).position(|w| w == manifest.claim.as_slice()).unwrap();
+    let name_at = claim_at + manifest.claim.windows(8).position(|w| w == b"c2pa-x50").unwrap();
+    let mut changed = after.clone();
+    changed[name_at] = b'C';
+    let tampered = fixture.dir.path().join("hidden-all-claim-changed.png");
+    std::fs::write(&tampered, changed).unwrap();
+    verify(&tampered, &approved).failure().stderr(predicates::str::contains("proof does not verify"));
+}
+
 /// The anonymizer's refusals with the issuer hidden, all before proving.
 #[test]
 fn hidden_issuer_anonymizer_refusals() {
@@ -825,7 +1064,7 @@ fn hidden_issuer_anonymizer_refusals() {
     let disclosed = stand_in_prover(fixture.dir.path(), &"00".repeat(32));
     let trust = TrustList::from_file(&fixture.pki("trust-list.pem")).unwrap();
     let out = fixture.dir.path().join("out.png");
-    let anonymize = |trust: &TrustList, prover: &Prover, hide: Option<&str>| third_party::anonymize(&fixture.signed(), &out, trust, prover, hide).unwrap_err().to_string();
+    let anonymize = |trust: &TrustList, prover: &Prover, hide: Option<&str>| third_party::anonymize(&fixture.signed(), &out, trust, prover, hide, None).unwrap_err().to_string();
 
     let err = anonymize(&trust, &disclosed, Some("fixture-list"));
     assert!(err.contains("needs keys for the hidden-issuer statement"), "{err}");

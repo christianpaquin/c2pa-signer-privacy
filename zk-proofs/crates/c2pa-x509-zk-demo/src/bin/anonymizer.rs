@@ -75,6 +75,22 @@ struct Args {
     #[arg(long, value_name = "LIST_NAME", requires = "third_party")]
     hide_issuer: Option<String>,
 
+    /// Third-party mode, with --hide-issuer: hide the time stamp too (roadmap
+    /// I6; needs keys from `c2pa-zk-gnark setup --statement hidden-all` and
+    /// --tsa-trust-list). The value names the TSA trust list in the output, as
+    /// a hint for verifiers.
+    #[arg(long, value_name = "TSA_LIST_NAME", requires_all = ["hide_issuer", "tsa_trust_list"])]
+    hide_time_stamp: Option<String>,
+
+    /// With --hide-time-stamp: the TSA trust list (PEM or C2PA JSON)
+    #[arg(long)]
+    tsa_trust_list: Option<PathBuf>,
+
+    /// With --hide-time-stamp: the published time window, aligned to the Unix
+    /// epoch: seconds, or with s, m, h, or d (default 1d, UTC days)
+    #[arg(long, default_value = "1d", requires = "hide_time_stamp")]
+    time_window: String,
+
     /// Key directory from `c2pa-zk-gnark setup` (third-party mode)
     #[arg(long)]
     keys: Option<PathBuf>,
@@ -309,13 +325,27 @@ fn third_party(args: &Args) -> Result<()> {
     let trust = TrustList::from_file(&args.trust_list)?;
     let prover = gnark_prover(args.keys.as_ref(), args.gnark.as_ref())?;
     println!("Proving the original signature of {:?} (this takes a few minutes)...", args.input);
-    let report = anonymize(&args.input, &args.output, &trust, &prover, args.hide_issuer.as_deref())?;
+    let hide_time_stamp = match &args.hide_time_stamp {
+        None => None,
+        Some(list) => Some(c2pa_x509_zk_demo::third_party::HideTimeStamp {
+            tsa_trust: TrustList::from_file(args.tsa_trust_list.as_ref().ok_or_else(|| anyhow!("--hide-time-stamp needs --tsa-trust-list"))?)?,
+            list: list.clone(),
+            window: c2pa_x509_zk_demo::third_party::parse_window(&args.time_window)?,
+        }),
+    };
+    let report = anonymize(&args.input, &args.output, &trust, &prover, args.hide_issuer.as_deref(), hide_time_stamp.as_ref())?;
     println!("\n✅ Anonymized asset written to {:?}", args.output);
     match &report.hidden {
         None => println!("   Issuing CA: {}", c2pa_x509_zk_demo::extract_subject_dn(&report.issuing_chain[0])?),
         Some(h) => println!("   Issuing CA: hidden among the {} eligible CAs of {} (issuer tree root {})", h.anonymity_set, h.snapshot, h.root),
     }
-    println!("   Time stamp: {} (Unix)", report.time);
+    match &report.hidden_time_stamp {
+        None => println!("   Time stamp: {} (Unix)", report.time),
+        Some((h, (t1, t2))) => {
+            println!("   Time stamp: hidden; its time lies in [{t1}, {t2}) (Unix), shown as this window only");
+            println!("   TSA: hidden among the {} eligible TSA CAs of {} (TSA tree root {})", h.anonymity_set, h.snapshot, h.root);
+        }
+    }
     println!("   Claim signature: {} bytes, replaced in place ({} spare)", report.signature_bytes, report.spare_bytes);
     println!("\nStill visible and authenticated by the claim:");
     println!("   Claim generator: {}", report.claim.claim_generator);

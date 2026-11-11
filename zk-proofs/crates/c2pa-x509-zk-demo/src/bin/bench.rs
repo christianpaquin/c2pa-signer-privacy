@@ -144,6 +144,10 @@ enum Cmd {
         /// --statement hidden-issuer, or --keys from it), the issuer tree built per asset, and the verifier's policy
         #[arg(long)]
         hide_issuer: bool,
+        /// Third-party only, with --hide-issuer: hide the time stamp too (roadmap I6): the hidden-all
+        /// statement, both trees built per asset, a one-day window, and TSA snapshots in the verifier's policy
+        #[arg(long, requires = "hide_issuer")]
+        hide_time_stamp: bool,
     },
     /// Measure loading the proving key in each encoding, loader, and level of checking
     PkLoad {
@@ -194,7 +198,7 @@ enum Cmd {
 
 fn main() -> Result<()> {
     match Args::parse().command {
-        Cmd::Run { work_dir, circuits_dir, reuse_build, keep, out, proving_key, variant, gnark, asset, trust_list, tsa_trust_list, keys, pk_format, pk_check, curve, hide_issuer } => {
+        Cmd::Run { work_dir, circuits_dir, reuse_build, keep, out, proving_key, variant, gnark, asset, trust_list, tsa_trust_list, keys, pk_format, pk_check, curve, hide_issuer, hide_time_stamp } => {
             if variant != "third-party" && (asset.is_some() || keys.is_some() || hide_issuer) {
                 bail!("--asset, --keys, and --hide-issuer apply to --variant third-party");
             }
@@ -205,7 +209,7 @@ fn main() -> Result<()> {
                 if keys.is_none() && key_loading.format != "compressed" {
                     bail!("--pk-format {} needs --keys with converted keys (c2pa-zk-gnark convert-pk)", key_loading.format);
                 }
-                Some(ThirdParty { gnark: std::fs::canonicalize(&gnark)?, external, keys, key_loading, curve, hide_issuer })
+                Some(ThirdParty { gnark: std::fs::canonicalize(&gnark)?, external, keys, key_loading, curve, hide_issuer, hide_time_stamp })
             } else {
                 None
             };
@@ -592,6 +596,7 @@ struct ThirdParty {
     key_loading: third_party::KeyLoading,
     curve: String,
     hide_issuer: bool,
+    hide_time_stamp: bool,
 }
 
 /// `third_party`: measure the third-party variant instead of V0.
@@ -618,7 +623,7 @@ fn run(
     // Captured before any phase runs, so later edits to the tree are not attributed to this run.
     let environment = environment(&zk_root);
     let record = match &third_party {
-        Some(tp) => third_party::measure(&exe, &zk_root, &work_dir, &tp.gnark, environment, tp.external.as_ref(), tp.keys.as_deref(), tp.key_loading, &tp.curve, tp.hide_issuer)?,
+        Some(tp) => third_party::measure(&exe, &zk_root, &work_dir, &tp.gnark, environment, tp.external.as_ref(), tp.keys.as_deref(), tp.key_loading, &tp.curve, tp.hide_issuer, tp.hide_time_stamp)?,
         None => measure(&exe, &zk_root, &work_dir, &circuits_dir, reuse_build, environment, proving_key)?,
     };
 

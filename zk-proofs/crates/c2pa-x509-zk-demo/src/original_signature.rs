@@ -251,6 +251,28 @@ pub fn time_stamp_token_from_response(response: &[u8]) -> Result<Vec<u8>> {
     Ok(rest.to_vec())
 }
 
+/// The certificates a time-stamp token (CMS SignedData) carries, DER, in
+/// order; none if it carries none.
+pub fn token_certificates(token: &[u8]) -> Result<Vec<Vec<u8>>> {
+    const SEQUENCE: u8 = 0x30;
+    let (content_info, _) = der_expect(token, SEQUENCE)?;
+    let (_content_type, rest) = der_expect(content_info, 0x06)?;
+    let (explicit, _) = der_expect(rest, 0xa0)?;
+    let (signed_data, _) = der_expect(explicit, SEQUENCE)?;
+    let (_version, rest) = der_expect(signed_data, 0x02)?;
+    let (_digest_algorithms, rest) = der_expect(rest, 0x31)?;
+    let (_encap, rest) = der_expect(rest, SEQUENCE)?;
+    let Ok((certificates, _)) = der_expect(rest, 0xa0) else { return Ok(Vec::new()) };
+    let mut out = Vec::new();
+    let mut cur = certificates;
+    while !cur.is_empty() {
+        let (_, rest) = der_expect(cur, SEQUENCE)?;
+        out.push(cur[..cur.len() - rest.len()].to_vec());
+        cur = rest;
+    }
+    Ok(out)
+}
+
 /// The `TSTInfo` of an RFC 3161 `TimeStampToken`: ContentInfo → [0] SignedData
 /// → encapContentInfo → [0] OCTET STRING → TSTInfo. The token's CMS signature
 /// is not checked here; c2pa (and, in E2b, the verifier) validates it.

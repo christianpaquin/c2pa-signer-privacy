@@ -349,6 +349,22 @@ fn check_ca(cert: &Certificate, at: Option<u64>, cas_below: usize, purpose: Purp
     Ok(())
 }
 
+/// Whether a certificate is a CA certificate (basic constraints with cA TRUE).
+/// Unparsable certificates are not.
+pub fn is_ca_certificate(der: &[u8]) -> bool {
+    use const_oid::db::rfc5280::ID_CE_BASIC_CONSTRAINTS;
+    use x509_cert::ext::pkix::BasicConstraints;
+    let Ok(cert) = parse(der) else { return false };
+    cert.tbs_certificate
+        .extensions
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .find(|e| e.extn_id == ID_CE_BASIC_CONSTRAINTS)
+        .and_then(|e| BasicConstraints::from_der(e.extn_value.as_bytes()).ok())
+        .is_some_and(|bc| bc.ca)
+}
+
 /// The trust list's certificates eligible as hidden issuers for `purpose`
 /// (roadmap H4, HIDING-THE-ISSUER.md, I1; for TSA issuers, I6,
 /// HIDING-THE-TIME-STAMP.md, T4), and the reasons the others are not: the CA

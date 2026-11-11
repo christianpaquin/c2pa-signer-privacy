@@ -140,6 +140,10 @@ enum Cmd {
         /// Third-party only: the curve for new keys (bn254, bls12-381); with --keys, the keys' own curve applies
         #[arg(long, default_value = "bn254", value_parser = ["bn254", "bls12-381"])]
         curve: String,
+        /// Third-party only: hide the issuing CA (roadmap H4): the hidden-issuer statement (setup with
+        /// --statement hidden-issuer, or --keys from it), the issuer tree built per asset, and the verifier's policy
+        #[arg(long)]
+        hide_issuer: bool,
     },
     /// Measure loading the proving key in each encoding, loader, and level of checking
     PkLoad {
@@ -190,9 +194,9 @@ enum Cmd {
 
 fn main() -> Result<()> {
     match Args::parse().command {
-        Cmd::Run { work_dir, circuits_dir, reuse_build, keep, out, proving_key, variant, gnark, asset, trust_list, tsa_trust_list, keys, pk_format, pk_check, curve } => {
-            if variant != "third-party" && (asset.is_some() || keys.is_some()) {
-                bail!("--asset and --keys apply to --variant third-party");
+        Cmd::Run { work_dir, circuits_dir, reuse_build, keep, out, proving_key, variant, gnark, asset, trust_list, tsa_trust_list, keys, pk_format, pk_check, curve, hide_issuer } => {
+            if variant != "third-party" && (asset.is_some() || keys.is_some() || hide_issuer) {
+                bail!("--asset, --keys, and --hide-issuer apply to --variant third-party");
             }
             let third_party = if variant == "third-party" {
                 let external = asset.map(|asset| third_party::External { asset, trust_list: trust_list.unwrap(), tsa_trust_list: tsa_trust_list.unwrap() });
@@ -201,7 +205,7 @@ fn main() -> Result<()> {
                 if keys.is_none() && key_loading.format != "compressed" {
                     bail!("--pk-format {} needs --keys with converted keys (c2pa-zk-gnark convert-pk)", key_loading.format);
                 }
-                Some(ThirdParty { gnark: std::fs::canonicalize(&gnark)?, external, keys, key_loading, curve })
+                Some(ThirdParty { gnark: std::fs::canonicalize(&gnark)?, external, keys, key_loading, curve, hide_issuer })
             } else {
                 None
             };
@@ -587,6 +591,7 @@ struct ThirdParty {
     keys: Option<PathBuf>,
     key_loading: third_party::KeyLoading,
     curve: String,
+    hide_issuer: bool,
 }
 
 /// `third_party`: measure the third-party variant instead of V0.
@@ -613,7 +618,7 @@ fn run(
     // Captured before any phase runs, so later edits to the tree are not attributed to this run.
     let environment = environment(&zk_root);
     let record = match &third_party {
-        Some(tp) => third_party::measure(&exe, &zk_root, &work_dir, &tp.gnark, environment, tp.external.as_ref(), tp.keys.as_deref(), tp.key_loading, &tp.curve)?,
+        Some(tp) => third_party::measure(&exe, &zk_root, &work_dir, &tp.gnark, environment, tp.external.as_ref(), tp.keys.as_deref(), tp.key_loading, &tp.curve, tp.hide_issuer)?,
         None => measure(&exe, &zk_root, &work_dir, &circuits_dir, reuse_build, environment, proving_key)?,
     };
 

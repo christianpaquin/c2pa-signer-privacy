@@ -12,6 +12,12 @@
 //! - Payload `nil` (detached); signature: a format version byte, then the
 //!   proof. Every public input of the proof is derived by the verifier.
 //!
+//! With the issuer hidden (roadmap H4, HIDING-THE-ISSUER.md, I5): no
+//! `x5chain`; the statement is "third-party-hidden-issuer/1", and the ZK
+//! extension adds "issuers": {"format": the tree format, "root": the issuer
+//! tree's root (canonical lowercase hex), "list": the anonymizer's name for
+//! the trust-list snapshot, a hint the verifier never trusts}.
+//!
 //! Decoding is strict, so the format leaves no room for other data (a signer
 //! certificate, say): exactly one CBOR item, exactly these header fields,
 //! all-zero padding, and a proof of exactly its curve's length (`proof_len`).
@@ -22,6 +28,9 @@ use ciborium::Value;
 pub const ZK_ALG: i64 = -65538;
 pub const CRIT_LABEL: &str = "c2pa-x509-zk";
 pub const STATEMENT: &str = "third-party/1";
+pub const STATEMENT_HIDDEN_ISSUER: &str = "third-party-hidden-issuer/1";
+/// The issuer tree format the hidden-issuer statement uses (gnark/issuertree).
+pub const ISSUER_TREE_FORMAT: u64 = 1;
 pub const TIME_STAMP_LABEL: &str = "c2pa-x509-zk-tst";
 pub const FORMAT_VERSION: u8 = 1;
 /// The default curve; signatures without a "curve" field use it.
@@ -39,11 +48,27 @@ pub fn proof_len(curve: &str) -> Result<usize> {
 }
 const COSE_SIGN1_TAG: u64 = 18;
 
+/// The issuer tree a hidden-issuer proof is made against.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IssuerTreeRef {
+    /// The tree's root, canonical lowercase hex.
+    pub root: String,
+    /// The anonymizer's name for the trust-list snapshot: a hint only.
+    pub list: String,
+}
+
+/// Whether `root` is canonical lowercase hex: no prefix, no leading zeros.
+pub fn is_canonical_root(root: &str) -> bool {
+    root == "0" || (!root.is_empty() && !root.starts_with('0') && root.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+}
+
 /// The third-party ZK signature's contents.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ZkSignature {
-    /// The issuing CA chain, issuing CA first.
+    /// The issuing CA chain, issuing CA first; empty when the issuer is hidden.
     pub issuing_chain: Vec<Vec<u8>>,
+    /// The issuer tree, when the issuer is hidden (H4).
+    pub issuers: Option<IssuerTreeRef>,
     /// SHA-256 of the verifying key (hex), identifying the circuit and keys.
     pub vk_sha256: String,
     /// The proof system's curve ("bn254" or "bls12-381"; roadmap E7).
@@ -93,22 +118,35 @@ fn map_get<'a>(map: &'a [(Value, Value)], key: &Value) -> Option<&'a Value> {
 impl ZkSignature {
     /// The tagged `COSE_Sign1` with padding fields of the given lengths.
     pub fn encode(&self, pad: usize, pad2: usize) -> Vec<u8> {
-        let protected = Value::Map(vec![
+        self.encode_with_chain(&self.issuing_chain, pad, pad2)
+    }
+
+    fn encode_with_chain(&self, chain: &[Vec<u8>], pad: usize, pad2: usize) -> Vec<u8> {
+        let statement = if self.issuers.is_some() { STATEMENT_HIDDEN_ISSUER } else { STATEMENT };
+        let mut ext = vec![(text("statement"), text(statement)), (text("vk"), text(&self.vk_sha256))];
+        // Written only for other curves, so BN254 signatures are unchanged.
+        if self.curve != DEFAULT_CURVE {
+            ext.push((text("curve"), text(&self.curve)));
+        }
+        if let Some(issuers) = &self.issuers {
+            ext.push((
+                text("issuers"),
+                Value::Map(vec![
+                    (text("format"), Value::Integer(ISSUER_TREE_FORMAT.into())),
+                    (text("root"), text(&issuers.root)),
+                    (text("list"), text(&issuers.list)),
+                ]),
+            ));
+        }
+        let mut protected = vec![
             (Value::Integer(1.into()), Value::Integer(ZK_ALG.into())),
             (Value::Integer(2.into()), Value::Array(vec![text(CRIT_LABEL)])),
-            (Value::Integer(33.into()), Value::Array(self.issuing_chain.iter().cloned().map(Value::Bytes).collect())),
-            (
-                text(CRIT_LABEL),
-                {
-                    let mut ext = vec![(text("statement"), text(STATEMENT)), (text("vk"), text(&self.vk_sha256))];
-                    // Written only for other curves, so BN254 signatures are unchanged.
-                    if self.curve != DEFAULT_CURVE {
-                        ext.push((text("curve"), text(&self.curve)));
-                    }
-                    Value::Map(ext)
-                },
-            ),
-        ]);
+        ];
+        if !chain.is_empty() {
+            protected.push((Value::Integer(33.into()), Value::Array(chain.iter().cloned().map(Value::Bytes).collect())));
+        }
+        protected.push((text(CRIT_LABEL), Value::Map(ext)));
+        let protected = Value::Map(protected);
         let time_stamp = Value::Map(vec![(
             text("tstTokens"),
             Value::Array(vec![Value::Map(vec![(text("val"), Value::Bytes(self.time_stamp_token.clone()))])]),
@@ -130,7 +168,20 @@ impl ZkSignature {
     /// upward is reachable (a single field skips sizes where a CBOR length
     /// header grows).
     pub fn encode_exact(&self, size: usize) -> Result<Vec<u8>> {
-        let unpadded = self.encode(0, 0).len();
+        self.encode_exact_with_chain(&self.issuing_chain, size)
+    }
+
+    /// For validating a hidden-issuer asset's claim with c2pa (I5): this
+    /// signature with `x5chain` holding `placeholder` instead of nothing, at
+    /// exactly `size` bytes. c2pa-rs does not read a manifest whose signature
+    /// has no `x5chain`; the placeholder identifies no one, and is never
+    /// written to an output.
+    pub fn encode_for_validation(&self, placeholder: &[u8], size: usize) -> Result<Vec<u8>> {
+        self.encode_exact_with_chain(&[placeholder.to_vec()], size)
+    }
+
+    fn encode_exact_with_chain(&self, chain: &[Vec<u8>], size: usize) -> Result<Vec<u8>> {
+        let unpadded = self.encode_with_chain(chain, 0, 0).len();
         let Some(room) = size.checked_sub(unpadded) else {
             bail!("the ZK signature needs {unpadded} bytes, but the original signature has only {size}");
         };
@@ -138,7 +189,7 @@ impl ZkSignature {
             // A pad of n bytes adds n plus its length header (0, 1, or 2 bytes
             // beyond the empty one), so the right length is just below the room.
             for pad in (room.saturating_sub(pad2 + 4)..=room).rev() {
-                let encoded = self.encode(pad, pad2);
+                let encoded = self.encode_with_chain(chain, pad, pad2);
                 if encoded.len() == size {
                     return Ok(encoded);
                 }
@@ -158,7 +209,7 @@ impl ZkSignature {
             && map_get(&header, &text(CRIT_LABEL))
                 .and_then(Value::as_map)
                 .and_then(|ext| map_get(ext, &text("statement")))
-                == Some(&text(STATEMENT))
+                .is_some_and(|s| *s == text(STATEMENT) || *s == text(STATEMENT_HIDDEN_ISSUER))
     }
 
     /// Parse a third-party ZK signature; fails for any other `COSE_Sign1`.
@@ -194,25 +245,54 @@ impl ZkSignature {
             bail!("the ZK extension is not marked critical");
         }
         let ext = map_get(&header, &text(CRIT_LABEL)).and_then(Value::as_map).ok_or_else(|| anyhow!("no ZK extension"))?;
-        only_keys(ext, &[text("statement"), text("vk"), text("curve")], "ZK extension")?;
+        only_keys(ext, &[text("statement"), text("vk"), text("curve"), text("issuers")], "ZK extension")?;
         let curve = match map_get(ext, &text("curve")) {
             None => DEFAULT_CURVE.to_string(),
             Some(Value::Text(c)) if c != DEFAULT_CURVE => c.clone(),
             Some(_) => bail!("malformed curve field (BN254 is written by omission)"),
         };
-        if map_get(ext, &text("statement")) != Some(&text(STATEMENT)) {
-            bail!("not a third-party ZK signature (statement is not {STATEMENT})");
-        }
+        let hidden = match map_get(ext, &text("statement")) {
+            Some(s) if *s == text(STATEMENT) => false,
+            Some(s) if *s == text(STATEMENT_HIDDEN_ISSUER) => true,
+            _ => bail!("not a third-party ZK signature (statement is not {STATEMENT} or {STATEMENT_HIDDEN_ISSUER})"),
+        };
+        let issuers = match (hidden, map_get(ext, &text("issuers"))) {
+            (false, None) => None,
+            (false, Some(_)) => bail!("issuers given for the disclosed statement"),
+            (true, None) => bail!("no issuers for the hidden-issuer statement"),
+            (true, Some(value)) => {
+                let map = value.as_map().ok_or_else(|| anyhow!("issuers is not a map"))?;
+                only_keys(map, &[text("format"), text("root"), text("list")], "issuers")?;
+                if map_get(map, &text("format")) != Some(&Value::Integer(ISSUER_TREE_FORMAT.into())) {
+                    bail!("unsupported issuer tree format (expected {ISSUER_TREE_FORMAT})");
+                }
+                let root = map_get(map, &text("root")).and_then(Value::as_text).ok_or_else(|| anyhow!("no issuer tree root"))?;
+                if !is_canonical_root(root) {
+                    bail!("the issuer tree root is not canonical lowercase hex");
+                }
+                let list = map_get(map, &text("list")).and_then(Value::as_text).ok_or_else(|| anyhow!("no trust-list name"))?;
+                Some(IssuerTreeRef { root: root.to_string(), list: list.to_string() })
+            }
+        };
         let vk_sha256 = map_get(ext, &text("vk")).and_then(Value::as_text).ok_or_else(|| anyhow!("no verifying-key hash"))?.to_string();
-        let issuing_chain = map_get(&header, &Value::Integer(33.into()))
-            .and_then(Value::as_array)
-            .ok_or_else(|| anyhow!("no x5chain"))?
-            .iter()
-            .map(|c| c.as_bytes().cloned().ok_or_else(|| anyhow!("x5chain entry is not a byte string")))
-            .collect::<Result<Vec<_>>>()?;
-        if issuing_chain.is_empty() {
-            bail!("x5chain is empty");
-        }
+        let x5chain = map_get(&header, &Value::Integer(33.into()));
+        let issuing_chain = match (hidden, x5chain) {
+            (true, Some(_)) => bail!("an x5chain in a hidden-issuer signature"),
+            (true, None) => Vec::new(),
+            (false, None) => bail!("no x5chain"),
+            (false, Some(chain)) => {
+                let chain = chain
+                    .as_array()
+                    .ok_or_else(|| anyhow!("x5chain is not an array"))?
+                    .iter()
+                    .map(|c| c.as_bytes().cloned().ok_or_else(|| anyhow!("x5chain entry is not a byte string")))
+                    .collect::<Result<Vec<_>>>()?;
+                if chain.is_empty() {
+                    bail!("x5chain is empty");
+                }
+                chain
+            }
+        };
         let time_stamp = map_get(&unprotected, &text(TIME_STAMP_LABEL)).and_then(Value::as_map).ok_or_else(|| anyhow!("no time stamp"))?;
         only_keys(time_stamp, &[text("tstTokens")], "time-stamp header")?;
         let tokens = map_get(time_stamp, &text("tstTokens"))
@@ -235,7 +315,7 @@ impl ZkSignature {
         if proof.len() != expected {
             bail!("the proof is {} bytes; format version {FORMAT_VERSION} on {curve} has {expected}", proof.len());
         }
-        Ok(Self { issuing_chain, vk_sha256, curve, time_stamp_token, proof: proof.to_vec() })
+        Ok(Self { issuing_chain, issuers, vk_sha256, curve, time_stamp_token, proof: proof.to_vec() })
     }
 }
 
@@ -246,6 +326,7 @@ mod tests {
     fn sample() -> ZkSignature {
         ZkSignature {
             issuing_chain: vec![vec![0x30; 733]],
+            issuers: None,
             vk_sha256: "ab".repeat(32),
             curve: DEFAULT_CURVE.into(),
             time_stamp_token: vec![0x30; 2000],
@@ -361,5 +442,96 @@ mod tests {
         let mut empty_chain = z;
         empty_chain.issuing_chain.clear();
         assert!(ZkSignature::decode(&empty_chain.encode(0, 0)).is_err());
+    }
+
+    fn hidden() -> ZkSignature {
+        ZkSignature {
+            issuing_chain: vec![],
+            issuers: Some(IssuerTreeRef { root: "1a2b3c".into(), list: "c2pa-official@a95f2c4".into() }),
+            ..sample()
+        }
+    }
+
+    /// Re-encode `cose` with its protected header changed by `f`.
+    fn with_header(cose: &[u8], f: impl FnOnce(&mut Vec<(Value, Value)>)) -> Vec<u8> {
+        let Value::Tag(tag, inner) = single_item(cose).unwrap() else { panic!() };
+        let Value::Array(mut fields) = *inner else { panic!() };
+        let Value::Bytes(p) = &fields[0] else { panic!() };
+        let Value::Map(mut header) = single_item(p).unwrap() else { panic!() };
+        f(&mut header);
+        fields[0] = Value::Bytes(cbor(&Value::Map(header)));
+        cbor(&Value::Tag(tag, Box::new(Value::Array(fields))))
+    }
+
+    fn with_ext(cose: &[u8], f: impl FnOnce(&mut Vec<(Value, Value)>)) -> Vec<u8> {
+        with_header(cose, |header| {
+            let (_, Value::Map(ext)) = header.iter_mut().find(|(k, _)| *k == text(CRIT_LABEL)).unwrap() else { panic!() };
+            f(ext);
+        })
+    }
+
+    fn with_issuers(cose: &[u8], f: impl FnOnce(&mut Vec<(Value, Value)>)) -> Vec<u8> {
+        with_ext(cose, |ext| {
+            let (_, Value::Map(issuers)) = ext.iter_mut().find(|(k, _)| *k == text("issuers")).unwrap() else { panic!() };
+            f(issuers);
+        })
+    }
+
+    #[test]
+    fn hidden_issuer_round_trips_without_x5chain() {
+        let z = hidden();
+        let cose = z.encode(4, 1);
+        assert!(ZkSignature::is_declared(&cose));
+        assert_eq!(ZkSignature::decode(&cose).unwrap(), z);
+        let Value::Tag(_, inner) = single_item(&cose).unwrap() else { panic!() };
+        let Value::Bytes(p) = &inner.as_array().unwrap()[0] else { panic!() };
+        assert!(map_get(single_item(p).unwrap().as_map().unwrap(), &Value::Integer(33.into())).is_none(), "x5chain written");
+        // The hidden form is shorter than the disclosed one by the chain.
+        assert!(z.encode(0, 0).len() + 600 < sample().encode(0, 0).len()); // the 733-byte chain, less the tree reference
+    }
+
+    #[test]
+    fn hidden_and_disclosed_forms_do_not_mix() {
+        let hidden = hidden().encode(0, 0);
+        let disclosed = sample().encode(0, 0);
+        let chain = Value::Array(vec![Value::Bytes(vec![0x30; 10])]);
+        for (name, cose) in [
+            ("an x5chain in the hidden form", with_header(&hidden, |h| h.insert(2, (Value::Integer(33.into()), chain.clone())))),
+            ("no issuers in the hidden form", with_ext(&hidden, |e| e.retain(|(k, _)| *k != text("issuers")))),
+            ("issuers in the disclosed form", with_ext(&disclosed, |e| e.push((text("issuers"), Value::Map(vec![]))))),
+            ("no x5chain in the disclosed form", with_header(&disclosed, |h| h.retain(|(k, _)| *k != Value::Integer(33.into())))),
+            ("another tree format", with_issuers(&hidden, |i| i[0].1 = Value::Integer(2.into()))),
+            ("an unexpected issuers field", with_issuers(&hidden, |i| i.push((text("ca"), text("x"))))),
+            ("no root", with_issuers(&hidden, |i| i.retain(|(k, _)| *k != text("root")))),
+            ("no list", with_issuers(&hidden, |i| i.retain(|(k, _)| *k != text("list")))),
+        ] {
+            assert!(ZkSignature::decode(&cose).is_err(), "{name}: accepted");
+        }
+    }
+
+    #[test]
+    fn issuer_roots_have_one_form() {
+        for good in ["0", "1", "1a2b3c", "30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000000"] {
+            assert!(is_canonical_root(good), "{good}");
+            let cose = with_issuers(&hidden().encode(0, 0), |i| i[1].1 = text(good));
+            assert!(ZkSignature::decode(&cose).is_ok(), "{good}");
+        }
+        for bad in ["", "01a", "1A2B", "0x1a", "-1", "1a 2b", "g1"] {
+            assert!(!is_canonical_root(bad), "{bad}");
+            let cose = with_issuers(&hidden().encode(0, 0), |i| i[1].1 = text(bad));
+            assert!(ZkSignature::decode(&cose).is_err(), "{bad:?} accepted");
+        }
+    }
+
+    #[test]
+    fn validation_copy_carries_the_placeholder_at_the_same_size() {
+        let z = hidden();
+        let size = sample().encode(50, 0).len();
+        let copy = z.encode_for_validation(&[0x30; 400], size).unwrap();
+        assert_eq!(copy.len(), size);
+        // Not a valid hidden-issuer signature (it has an x5chain): it is only
+        // ever given to c2pa, never written to an output.
+        assert!(ZkSignature::decode(&copy).is_err());
+        assert_eq!(z.encode_exact(size).unwrap().len(), size);
     }
 }

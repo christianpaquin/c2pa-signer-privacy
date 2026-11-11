@@ -314,6 +314,7 @@ fn replaced_with_placeholder(fixture: &Fixture) -> PathBuf {
     let original = OriginalSignature::from_manifest(manifest.clone()).unwrap();
     let signature = ZkSignature {
         issuing_chain: vec![std::fs::read(fixture.pki("issuing-ca.der")).unwrap(), std::fs::read(fixture.pki("root.der")).unwrap()],
+        issuers: None,
         vk_sha256: "00".repeat(32),
         curve: DEFAULT_CURVE.into(),
         time_stamp_token: original.time_stamp.unwrap().token,
@@ -368,7 +369,7 @@ fn verifier_checks_trust_time_stamp_and_binding_before_the_proof() {
     let trust = c2pa_x509_zk_demo::TrustList::from_file(&fixture.pki("trust-list.pem")).unwrap();
     let tsa = fixture.pki("tsa-trust-list.pem");
     let verify = |asset: &Path, trust: &c2pa_x509_zk_demo::TrustList, tsa: &Path, prover: &Prover| {
-        third_party::verify(asset, trust, tsa, prover, None).unwrap_err().to_string()
+        third_party::verify(asset, trust, tsa, prover, None, None).unwrap_err().to_string()
     };
     assert!(third_party::is_third_party(&output) && !third_party::is_third_party(&fixture.signed()));
 
@@ -394,9 +395,9 @@ fn verifier_checks_trust_time_stamp_and_binding_before_the_proof() {
 
     // An expected issuer: a mismatch is rejected before the proof, a match reaches it.
     let issuer = c2pa_x509_zk_demo::extract_subject_dn(&std::fs::read(fixture.pki("issuing-ca.der")).unwrap()).unwrap();
-    let err = third_party::verify(&output, &trust, &tsa, &prover, Some("CN=Unrelated Expected Issuer")).unwrap_err().to_string();
+    let err = third_party::verify(&output, &trust, &tsa, &prover, Some("CN=Unrelated Expected Issuer"), None).unwrap_err().to_string();
     assert!(err.contains("not the expected"), "{err}");
-    let err = third_party::verify(&output, &trust, &tsa, &prover, Some(&issuer)).unwrap_err().to_string();
+    let err = third_party::verify(&output, &trust, &tsa, &prover, Some(&issuer), None).unwrap_err().to_string();
     assert!(err.contains("proof does not verify"), "{err}");
 
     // A signature carrying extra data (here the signer certificate after the
@@ -573,6 +574,283 @@ fn real_asset_end_to_end() {
     let tampered = dir.path().join(format!("tampered.{ext}"));
     std::fs::write(&tampered, changed).unwrap();
     verify(&tampered).failure().stderr(predicates::str::contains("proof does not verify"));
+}
+
+// ---- H4: the hidden issuer ------------------------------------------------------
+
+use c2pa_x509_zk_demo::third_party::{IssuerPolicy, Snapshot};
+use c2pa_x509_zk_demo::zk_signature::IssuerTreeRef;
+use c2pa_x509_zk_demo::TrustList;
+
+/// A stand-in CLI for the hidden-issuer statement: `tree` gives the issuers
+/// file's SHA-256 as the root (deterministic, as the real tree is), `verify`
+/// reports every proof invalid. Reaching the proof check shows that every
+/// check before it passed.
+fn hidden_stand_in(dir: &Path) -> Prover {
+    let keys = dir.join("hidden-keys");
+    std::fs::create_dir_all(&keys).unwrap();
+    std::fs::write(keys.join("keys.json"), serde_json::json!({ "variant": "hidden-issuer", "sha256": { "statement.vk": "00".repeat(32) } }).to_string()).unwrap();
+    let cli = dir.join("gnark-hidden-stand-in.sh");
+    std::fs::write(&cli, r#"#!/bin/sh
+case "$1" in
+  tree)
+    while [ $# -gt 0 ]; do [ "$1" = "--issuers" ] && f="$2"; shift; done
+    root=$(sha256sum "$f" | cut -c1-64 | sed 's/^0*//')
+    n=$(grep -c 'BEGIN CERTIFICATE' "$f")
+    printf '{"root": "%s", "entries": [' "$root"; i=1; while [ $i -le $n ]; do [ $i -gt 1 ] && printf ','; printf '{}'; i=$((i+1)); done; printf ']}
+' ;;
+  verify) echo 'proof is INVALID' >&2; exit 1 ;;
+  *) echo "unexpected $1" >&2; exit 2 ;;
+esac
+"#).unwrap();
+    std::fs::set_permissions(&cli, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    Prover { cli, keys }
+}
+
+/// The mirror fixture anonymized with the issuer hidden, as the anonymizer
+/// writes it, with a placeholder proof: the root of the tree over `list`'s
+/// eligible issuers, named `name`.
+fn hidden_with_placeholder(fixture: &Fixture, prover: &Prover, list: &Path, name: &str) -> PathBuf {
+    let store = manifest_store(&fixture.signed()).unwrap();
+    let manifest = active_manifest(&store).unwrap();
+    let original = OriginalSignature::from_manifest(manifest.clone()).unwrap();
+    let tree = third_party::issuer_tree(&TrustList::from_file(list).unwrap(), prover).unwrap();
+    let signature = ZkSignature {
+        issuing_chain: vec![],
+        issuers: Some(IssuerTreeRef { root: tree.root, list: name.into() }),
+        vk_sha256: "00".repeat(32),
+        curve: DEFAULT_CURVE.into(),
+        time_stamp_token: original.time_stamp.unwrap().token,
+        proof: vec![0x5a; proof_len(DEFAULT_CURVE).unwrap()],
+    };
+    let cose = signature.encode_exact(manifest.cose_sign1.len()).unwrap();
+    let output = fixture.dir.path().join(format!("hidden-{name}.png"));
+    third_party::replace_signature(&fixture.signed(), &output, &store, &manifest, &cose).unwrap();
+    output
+}
+
+fn policy(snapshots: Vec<(&str, PathBuf, u64, Option<u64>)>) -> IssuerPolicy {
+    IssuerPolicy { snapshots: snapshots.into_iter().map(|(name, trust_list, from, until)| Snapshot { name: name.into(), trust_list, from, until }).collect() }
+}
+
+/// The verifier's issuer policy decides, never the asset: a root must be one
+/// the verifier built from an approved snapshot whose interval contains the
+/// attested time, and the asset's list name must name that snapshot.
+#[test]
+fn hidden_issuer_verification_follows_the_verifiers_policy() {
+    let fixture = Fixture::new(true, true);
+    let other = Fixture::new(true, true);
+    let prover = hidden_stand_in(fixture.dir.path());
+    let trust = TrustList::from_file(&fixture.pki("trust-list.pem")).unwrap();
+    let tsa = fixture.pki("tsa-trust-list.pem");
+    let list = fixture.pki("trust-list.pem");
+    let asset = hidden_with_placeholder(&fixture, &prover, &list, "fixture-list");
+    let t = third_party::statement_inputs(&fixture.signed(), &trust).unwrap().public.time;
+    let verify = |asset: &Path, policy: Option<&IssuerPolicy>, expected: Option<&str>| {
+        third_party::verify(asset, &trust, &tsa, &prover, expected, policy).unwrap_err().to_string()
+    };
+
+    // Every check passes up to the proof (which the stand-in reports invalid).
+    let approved = policy(vec![("fixture-list", list.clone(), t, None)]);
+    let err = verify(&asset, Some(&approved), None);
+    assert!(err.contains("the proof does not verify"), "{err}");
+
+    for (name, policy, expected, reason) in [
+        ("no policy", None, None, "needs an issuer policy"),
+        ("an expected issuer", Some(approved.clone()), Some("CN=Anything"), "an expected issuer cannot be checked"),
+        ("another list only", Some(policy(vec![("fixture-list", other.pki("trust-list.pem"), 0, None)])), None, "not that of any snapshot"),
+        ("t before the snapshot applied", Some(policy(vec![("fixture-list", list.clone(), t + 1, None)])), None, "did not apply at the attested time"),
+        ("t after the snapshot was replaced", Some(policy(vec![("fixture-list", list.clone(), 0, Some(t))])), None, "did not apply at the attested time"),
+        ("the list name of another snapshot", Some(policy(vec![("another-name", list.clone(), 0, None)])), None, "names the trust list"),
+    ] {
+        let err = verify(&asset, policy.as_ref(), expected);
+        assert!(err.contains(reason), "{name}: {err}");
+    }
+
+    // A subset is approved only as its own snapshot: an asset proved against
+    // the subset's root (here, the issuing CA alone) is accepted under a
+    // policy approving that subset, not under one approving the full list.
+    let subset = fixture.pki("issuing-ca.pem");
+    let subset_asset = hidden_with_placeholder(&fixture, &prover, &subset, "fixture-subset");
+    let err = verify(&subset_asset, Some(&policy(vec![("fixture-list", list.clone(), 0, None)])), None);
+    assert!(err.contains("not that of any snapshot"), "{err}");
+    let err = verify(&subset_asset, Some(&policy(vec![("fixture-list", list.clone(), 0, None), ("fixture-subset", subset.clone(), 0, None)])), None);
+    assert!(err.contains("the proof does not verify"), "{err}");
+
+    // Keys for the disclosed statement refuse a hidden-issuer asset.
+    let disclosed = stand_in_prover(fixture.dir.path(), &"00".repeat(32));
+    let err = third_party::verify(&asset, &trust, &tsa, &disclosed, None, Some(&approved)).unwrap_err().to_string();
+    assert!(err.contains("keys in") && err.contains("disclosed statement"), "{err}");
+}
+
+/// A policy file's snapshots reject unknown fields: a misspelled `until`
+/// must not turn an expiring approval into an indefinite one. Omitting
+/// `until` on purpose is still accepted.
+#[test]
+fn issuer_policy_rejects_unknown_snapshot_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, snapshot: serde_json::Value| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, serde_json::json!({ "snapshots": [snapshot] }).to_string()).unwrap();
+        path
+    };
+    let typo = write("typo.json", serde_json::json!({ "name": "historical-list", "trust_list": "list.pem", "from": 0, "untill": 100 }));
+    let err = format!("{:#}", IssuerPolicy::from_file(&typo).unwrap_err());
+    assert!(err.contains("untill"), "{err}");
+    let current = write("current.json", serde_json::json!({ "name": "current-list", "trust_list": "list.pem", "from": 0 }));
+    assert!(IssuerPolicy::from_file(&current).unwrap().snapshots[0].until.is_none());
+}
+
+/// Snapshots with the same root (for example, lists differing only in
+/// certificates the tree leaves out) and overlapping periods: the asset is
+/// accepted under the one it names, in either order, and refused if it names
+/// neither.
+#[test]
+fn issuer_policy_does_not_depend_on_snapshot_order() {
+    let fixture = Fixture::new(true, true);
+    let prover = hidden_stand_in(fixture.dir.path());
+    let trust = TrustList::from_file(&fixture.pki("trust-list.pem")).unwrap();
+    let tsa = fixture.pki("tsa-trust-list.pem");
+    let list = fixture.pki("trust-list.pem");
+    let asset = hidden_with_placeholder(&fixture, &prover, &list, "fixture-list");
+    let verify = |policy: &IssuerPolicy| third_party::verify(&asset, &trust, &tsa, &prover, None, Some(policy)).unwrap_err().to_string();
+    let named = |a: &str, b: &str| policy(vec![(a, list.clone(), 0, None), (b, list.clone(), 0, None)]);
+    for policy in [named("other-approved-name", "fixture-list"), named("fixture-list", "other-approved-name")] {
+        let err = verify(&policy);
+        assert!(err.contains("the proof does not verify"), "{err}");
+    }
+    let err = verify(&named("other-approved-name", "yet-another-name"));
+    assert!(err.contains("names the trust list"), "{err}");
+}
+
+/// Without x5chain, c2pa-rs does not read the manifest; the verifier still
+/// checks the claim's assertions and hard binding, on a copy carrying the
+/// placeholder certificate (HIDING-THE-ISSUER.md, I5).
+#[test]
+fn hidden_issuer_keeps_the_c2pa_claim_checks() {
+    let fixture = Fixture::new(true, true);
+    let prover = hidden_stand_in(fixture.dir.path());
+    let trust = TrustList::from_file(&fixture.pki("trust-list.pem")).unwrap();
+    let tsa = fixture.pki("tsa-trust-list.pem");
+    let list = fixture.pki("trust-list.pem");
+    let asset = hidden_with_placeholder(&fixture, &prover, &list, "fixture-list");
+    let approved = policy(vec![("fixture-list", list, 0, None)]);
+
+    // Directly, c2pa cannot read the asset at all.
+    let err = third_party::c2pa_claim_checks(&asset).unwrap_err().to_string();
+    assert!(err.contains("signing certificate chain"), "{err}");
+
+    // A byte of the image changed (inside the PNG's image data, covered by
+    // the hard binding): the placeholder copy's c2pa check catches it before
+    // the proof.
+    let mut bytes = std::fs::read(&asset).unwrap();
+    let idat = bytes.windows(4).position(|w| w == b"IDAT").unwrap();
+    bytes[idat + 40] ^= 1;
+    let changed = fixture.dir.path().join("hidden-changed.png");
+    std::fs::write(&changed, bytes).unwrap();
+    let err = third_party::verify(&changed, &trust, &tsa, &prover, None, Some(&approved)).unwrap_err().to_string();
+    assert!(err.contains("c2pa") && !err.contains("the proof does not verify"), "{err}");
+    let err = third_party::verify(&asset, &trust, &tsa, &prover, None, Some(&approved)).unwrap_err().to_string();
+    assert!(err.contains("the proof does not verify"), "intact asset: {err}");
+
+    // Nothing of the CA chain is written: neither the issuing CA nor the root.
+    let after = std::fs::read(&asset).unwrap();
+    for name in ["issuing-ca.der", "root.der"] {
+        let cert = std::fs::read(fixture.pki(name)).unwrap();
+        assert!(!after.windows(cert.len()).any(|w| w == cert.as_slice()), "{name} in the output");
+    }
+}
+
+/// The anonymizer's refusals with the issuer hidden, all before proving.
+#[test]
+fn hidden_issuer_anonymizer_refusals() {
+    let fixture = Fixture::new(true, true);
+    let hidden = hidden_stand_in(fixture.dir.path());
+    let disclosed = stand_in_prover(fixture.dir.path(), &"00".repeat(32));
+    let trust = TrustList::from_file(&fixture.pki("trust-list.pem")).unwrap();
+    let out = fixture.dir.path().join("out.png");
+    let anonymize = |trust: &TrustList, prover: &Prover, hide: Option<&str>| third_party::anonymize(&fixture.signed(), &out, trust, prover, hide).unwrap_err().to_string();
+
+    let err = anonymize(&trust, &disclosed, Some("fixture-list"));
+    assert!(err.contains("needs keys for the hidden-issuer statement"), "{err}");
+    let err = anonymize(&trust, &hidden, None);
+    assert!(err.contains("use --hide-issuer"), "{err}");
+    // The issuing CA must itself be on the list (I2): with the root alone as
+    // the trust list, the path has two certificates.
+    let root_only = TrustList::from_file(&fixture.pki("root.pem")).unwrap();
+    let err = anonymize(&root_only, &hidden, Some("root-only"));
+    assert!(err.contains("not itself on the trust list"), "{err}");
+    assert!(!out.exists());
+}
+
+/// H4 end to end with real proofs: anonymize with the issuer hidden, verify
+/// under an issuer policy, and check that no CA certificate is written. Needs
+/// hidden-issuer keys (`c2pa-zk-gnark setup --statement hidden-issuer`) in
+/// $C2PA_ZK_HIDDEN_KEYS (default target/gnark-keys-hidden) and the CLI.
+#[test]
+#[ignore = "needs hidden-issuer gnark keys and the CLI; proves for ~1.5 min"]
+fn hidden_issuer_end_to_end() {
+    let keys = std::env::var_os("C2PA_ZK_HIDDEN_KEYS").map(PathBuf::from).unwrap_or_else(|| zk_root().join("target/gnark-keys-hidden"));
+    let gnark = zk_root().join("target/c2pa-zk-gnark");
+    assert!(keys.join("keys.json").exists() && gnark.exists(), "run c2pa-zk-gnark setup --statement hidden-issuer --keys {} first", keys.display());
+
+    let fixture = Fixture::new(true, true);
+    let other = Fixture::new(true, true);
+    let output = fixture.dir.path().join("anonymized.png");
+    Command::cargo_bin("c2pa-x509-zk-anonymizer")
+        .unwrap()
+        .arg("--third-party").arg("--hide-issuer").arg("fixture-list")
+        .arg("--keys").arg(&keys).arg("--gnark").arg(&gnark)
+        .arg("--input").arg(fixture.signed()).arg("--output").arg(&output)
+        .arg("--trust-list").arg(fixture.pki("trust-list.pem"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("hidden among the 2 eligible CAs of fixture-list"));
+
+    let write_policy = |name: &str, list: PathBuf| {
+        let path = fixture.dir.path().join(format!("policy-{name}.json"));
+        std::fs::write(&path, serde_json::json!({ "snapshots": [{ "name": "fixture-list", "trust_list": list, "from": 0 }] }).to_string()).unwrap();
+        path
+    };
+    let approved = write_policy("approved", fixture.pki("trust-list.pem"));
+    let unrelated = write_policy("unrelated", other.pki("trust-list.pem"));
+    let verify = |asset: &Path, policy: Option<&Path>| {
+        let mut cmd = Command::cargo_bin("c2pa-x509-zk-verify").unwrap();
+        cmd.arg("--input").arg(asset)
+            .arg("--trust-list").arg(fixture.pki("trust-list.pem"))
+            .arg("--tsa-trust-list").arg(fixture.pki("tsa-trust-list.pem"))
+            .arg("--keys").arg(&keys).arg("--gnark").arg(&gnark);
+        if let Some(policy) = policy {
+            cmd.arg("--issuer-policy").arg(policy);
+        }
+        cmd.assert()
+    };
+    verify(&output, Some(&approved)).success().stdout(predicates::str::contains("Valid")).stdout(predicates::str::contains("hidden among 2 CAs of fixture-list"));
+    verify(&output, None).failure().stderr(predicates::str::contains("needs an issuer policy"));
+    verify(&output, Some(&unrelated)).failure().stderr(predicates::str::contains("not that of any snapshot"));
+
+    // Neither CA certificate, nor anything of the signer, is in the output.
+    let after = std::fs::read(&output).unwrap();
+    let original = fixture.original();
+    for (what, needle) in [
+        ("issuing CA", std::fs::read(fixture.pki("issuing-ca.der")).unwrap()),
+        ("root", std::fs::read(fixture.pki("root.der")).unwrap()),
+        ("signer certificate", original.signer_certificate().unwrap().to_vec()),
+        ("original signature", original.signature.clone()),
+    ] {
+        assert!(!after.windows(needle.len()).any(|w| w == needle.as_slice()), "{what} found in the output");
+    }
+
+    // A changed claim byte is rejected by the proof.
+    let store = manifest_store(&output).unwrap();
+    let manifest = active_manifest(&store).unwrap();
+    let claim_at = after.windows(manifest.claim.len()).position(|w| w == manifest.claim.as_slice()).unwrap();
+    let name_at = claim_at + manifest.claim.windows(8).position(|w| w == b"c2pa-x50").unwrap();
+    let mut changed = after.clone();
+    changed[name_at] = b'C';
+    let tampered = fixture.dir.path().join("hidden-claim-changed.png");
+    std::fs::write(&tampered, changed).unwrap();
+    verify(&tampered, Some(&approved)).failure().stderr(predicates::str::contains("proof does not verify"));
 }
 
 // ---- E8: an anonymized asset as an ingredient ---------------------------------

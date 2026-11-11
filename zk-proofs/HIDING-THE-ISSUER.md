@@ -1,6 +1,6 @@
 # H4: Hiding the Issuing CA
 
-**Status: adopted (PR #34), as an opt-in experiment; being implemented.** The tree (format version 1) and the hidden-issuer statement are in the gnark prover ([`issuertree`](gnark/issuertree/), [`statement/hidden.go`](gnark/statement/hidden.go)); the anonymizer, the verifier's policy, and the measurement are next. This note designs [roadmap H4](README.md#h4-hiding-the-issuing-ca), as [E2a](THIRD-PARTY-STATEMENT.md) did for the third-party statement. Each choice is listed under [Decisions for review](#decisions-for-review) with its default.
+**Status: adopted (PR #34) and implemented, as an opt-in** (the core, I1–I5 and I7): the tree (format version 1) and the hidden-issuer statement in the gnark prover ([`issuertree`](gnark/issuertree/), [`statement/hidden.go`](gnark/statement/hidden.go)); `--hide-issuer` in the anonymizer, `--issuer-policy` in the verifier ([`third_party.rs`](crates/c2pa-x509-zk-demo/src/third_party.rs)). Measured: no cost beyond noise per asset; on the official trust list, the issuer is hidden among 28 P-384 CAs from 18 organizations ([FEASIBILITY.md](FEASIBILITY.md#h4-hiding-the-issuing-ca)). The hidden token (I6) and unlisted intermediates (I2) remain. This note designs [roadmap H4](README.md#h4-hiding-the-issuing-ca), as [E2a](THIRD-PARTY-STATEMENT.md) did for the third-party statement. Each choice is listed under [Decisions for review](#decisions-for-review) with its default.
 
 ## The problem
 

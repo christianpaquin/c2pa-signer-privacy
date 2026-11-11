@@ -68,6 +68,13 @@ struct Args {
     #[arg(long)]
     third_party: bool,
 
+    /// Third-party mode: hide the issuing CA among the trust list's eligible
+    /// CAs (roadmap H4; needs keys from `c2pa-zk-gnark setup --statement
+    /// hidden-issuer`). The value names the trust list in the output, as a
+    /// hint for verifiers (for example "c2pa-official@a95f2c4").
+    #[arg(long, value_name = "LIST_NAME", requires = "third_party")]
+    hide_issuer: Option<String>,
+
     /// Key directory from `c2pa-zk-gnark setup` (third-party mode)
     #[arg(long)]
     keys: Option<PathBuf>,
@@ -302,9 +309,12 @@ fn third_party(args: &Args) -> Result<()> {
     let trust = TrustList::from_file(&args.trust_list)?;
     let prover = gnark_prover(args.keys.as_ref(), args.gnark.as_ref())?;
     println!("Proving the original signature of {:?} (this takes a few minutes)...", args.input);
-    let report = anonymize(&args.input, &args.output, &trust, &prover)?;
+    let report = anonymize(&args.input, &args.output, &trust, &prover, args.hide_issuer.as_deref())?;
     println!("\n✅ Anonymized asset written to {:?}", args.output);
-    println!("   Issuing CA: {}", c2pa_x509_zk_demo::extract_subject_dn(&report.issuing_chain[0])?);
+    match &report.hidden {
+        None => println!("   Issuing CA: {}", c2pa_x509_zk_demo::extract_subject_dn(&report.issuing_chain[0])?),
+        Some(h) => println!("   Issuing CA: hidden among the {} eligible CAs of {} (issuer tree root {})", h.anonymity_set, h.snapshot, h.root),
+    }
     println!("   Time stamp: {} (Unix)", report.time);
     println!("   Claim signature: {} bytes, replaced in place ({} spare)", report.signature_bytes, report.spare_bytes);
     println!("\nStill visible and authenticated by the claim:");

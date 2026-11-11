@@ -9,8 +9,8 @@
 
 use crate::jumbf::{active_assertions, active_manifest, manifest_count, manifest_store, manifests, ActiveManifest};
 use crate::original_signature::{tst_info, OriginalSignature, TimeStampVersion, COSE_ALG_ES256, SHA256_OID};
-use crate::trust::{issuing_path_for, validate_issuing_chain, TrustList};
-use crate::zk_signature::{proof_len, ZkSignature, DEFAULT_CURVE};
+use crate::trust::{eligible_issuers, issuing_path_for, validate_issuing_chain, TrustList};
+use crate::zk_signature::{is_canonical_root, proof_len, IssuerTreeRef, ZkSignature, DEFAULT_CURVE};
 use anyhow::{anyhow, bail, Context, Result};
 use ciborium::Value;
 use std::path::PathBuf;
@@ -27,6 +27,20 @@ pub struct PublicInputs {
     pub claim: String,
     /// The issuing CA certificate, DER (base64).
     pub issuer_certificate: String,
+    /// The time stamp's attested time, Unix seconds.
+    pub time: u64,
+    /// The time stamp's SHA-256 message imprint (base64).
+    pub imprint: String,
+}
+
+/// The public inputs of the hidden-issuer statement (H4): the issuer tree's
+/// root in place of the issuing CA's certificate.
+#[derive(Debug, Clone, Serialize)]
+pub struct HiddenPublicInputs {
+    /// The claim (base64).
+    pub claim: String,
+    /// The issuer tree's root, canonical lowercase hex.
+    pub issuer_root: String,
     /// The time stamp's attested time, Unix seconds.
     pub time: u64,
     /// The time stamp's SHA-256 message imprint (base64).
@@ -67,8 +81,9 @@ pub fn statement_inputs(asset: &Path, trust: &TrustList) -> Result<StatementInpu
     Ok(prepare(&OriginalSignature::from_asset(asset)?, trust)?.0)
 }
 
-/// The prover's inputs, and the validated issuing path (issuing CA first,
-/// ending at the trust anchor) at the time stamp's time.
+/// The prover's inputs, and the validated issuing path at the time stamp's
+/// time: issuing CA first, up to the first trust anchor among the asset's
+/// certificates (a trust anchor reached only by signature is not included).
 fn prepare(original: &OriginalSignature, trust: &TrustList) -> Result<(StatementInputs, Vec<Vec<u8>>)> {
     if original.alg != COSE_ALG_ES256 {
         bail!("claim signature alg {} is not ES256, the only one the statement supports", original.alg);
@@ -214,24 +229,54 @@ impl Prover {
         Ok(curve)
     }
 
+    /// The key set's statement: "disclosed" (also when absent) or
+    /// "hidden-issuer" (H4).
+    pub fn variant(&self) -> Result<String> {
+        Ok(self.manifest()?["variant"].as_str().unwrap_or(VARIANT_DISCLOSED).to_string())
+    }
+
+    /// The issuer tree over the eligible certificates in `issuers` (PEM),
+    /// built by the CLI with the key set's curve.
+    pub fn tree(&self, issuers: &Path) -> Result<IssuerTree> {
+        let curve = self.curve()?;
+        let out = self.run(&["tree".as_ref(), "--issuers".as_ref(), issuers.as_os_str(), "--curve".as_ref(), curve.as_ref()])?;
+        if !out.status.success() {
+            bail!("building the issuer tree failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+        let tree: serde_json::Value = serde_json::from_slice(&out.stdout).context("the CLI's tree output is not JSON")?;
+        let root = tree["root"].as_str().ok_or_else(|| anyhow!("the CLI's tree has no root"))?.to_string();
+        if !is_canonical_root(&root) {
+            bail!("the CLI's tree root is not canonical hex");
+        }
+        let entries = tree["entries"].as_array().map_or(0, Vec::len);
+        Ok(IssuerTree { root, entries })
+    }
+
     fn run(&self, args: &[&std::ffi::OsStr]) -> Result<std::process::Output> {
         Command::new(&self.cli).args(args).output().with_context(|| format!("failed to run {}", self.cli.display()))
     }
 
-    /// Prove, returning the proof bytes.
-    pub fn prove(&self, inputs: &StatementInputs) -> Result<Vec<u8>> {
+    /// Prove, returning the proof bytes. `issuers`: the eligible issuers (PEM)
+    /// for a hidden-issuer key set.
+    pub fn prove(&self, inputs: &StatementInputs, issuers: Option<&Path>) -> Result<Vec<u8>> {
         let dir = tempfile::tempdir()?;
         let (input, proof) = (dir.path().join("inputs.json"), dir.path().join("proof.bin"));
         std::fs::write(&input, serde_json::to_vec(inputs)?)?;
-        let out = self.run(&["prove".as_ref(), "--keys".as_ref(), self.keys.as_os_str(), "--input".as_ref(), input.as_os_str(), "--proof".as_ref(), proof.as_os_str()])?;
+        let mut args: Vec<&std::ffi::OsStr> = vec!["prove".as_ref(), "--keys".as_ref(), self.keys.as_os_str(), "--input".as_ref(), input.as_os_str(), "--proof".as_ref(), proof.as_os_str()];
+        if let Some(issuers) = issuers {
+            args.extend(["--issuers".as_ref(), issuers.as_os_str()]);
+        }
+        let out = self.run(&args)?;
         if !out.status.success() {
             bail!("proving failed: {}", String::from_utf8_lossy(&out.stderr).trim());
         }
         Ok(std::fs::read(proof)?)
     }
 
-    /// Verify a proof against public inputs: Ok(true) valid, Ok(false) invalid.
-    pub fn verify(&self, public: &PublicInputs, proof: &[u8]) -> Result<bool> {
+    /// Verify a proof against public inputs (PublicInputs, or
+    /// HiddenPublicInputs for a hidden-issuer key set): Ok(true) valid,
+    /// Ok(false) invalid.
+    pub fn verify(&self, public: &impl Serialize, proof: &[u8]) -> Result<bool> {
         let dir = tempfile::tempdir()?;
         let (input, proof_path) = (dir.path().join("public.json"), dir.path().join("proof.bin"));
         std::fs::write(&input, serde_json::to_vec(public)?)?;
@@ -245,14 +290,145 @@ impl Prover {
     }
 }
 
+// ---- The hidden issuer (H4) ------------------------------------------------------
+
+pub const VARIANT_DISCLOSED: &str = "disclosed";
+pub const VARIANT_HIDDEN_ISSUER: &str = "hidden-issuer";
+
+/// An issuer tree, as the CLI built it.
+#[derive(Debug, Clone)]
+pub struct IssuerTree {
+    pub root: String,
+    /// Its leaves (distinct CA keys and validity periods): the anonymity set.
+    pub entries: usize,
+}
+
+/// The eligible issuers of a trust list (`eligible_issuers`), written as PEM
+/// into `dir`, for the CLI.
+pub fn eligible_issuers_pem(trust: &TrustList, dir: &Path) -> Result<PathBuf> {
+    let (eligible, _) = eligible_issuers(trust);
+    if eligible.is_empty() {
+        bail!("no certificate of the trust list is eligible as a hidden issuer");
+    }
+    let mut pem = String::new();
+    for der in &eligible {
+        pem.push_str("-----BEGIN CERTIFICATE-----\n");
+        for line in b64(der).as_bytes().chunks(64) {
+            pem.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
+            pem.push('\n');
+        }
+        pem.push_str("-----END CERTIFICATE-----\n");
+    }
+    let path = dir.join("eligible-issuers.pem");
+    std::fs::write(&path, pem)?;
+    Ok(path)
+}
+
+/// The issuer tree over a trust list's eligible issuers, as the verifier and
+/// the anonymizer build it.
+pub fn issuer_tree(trust: &TrustList, prover: &Prover) -> Result<IssuerTree> {
+    let dir = tempfile::tempdir()?;
+    prover.tree(&eligible_issuers_pem(trust, dir.path())?)
+}
+
+/// A trust-list snapshot the verifier approves for hidden issuers, with the
+/// interval during which it applied: `from` ≤ t < `until` (Unix seconds; no
+/// `until` while it is current).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)] // a misspelled "until" must not make an approval indefinite
+pub struct Snapshot {
+    pub name: String,
+    /// The snapshot's trust list (PEM or C2PA JSON), relative to the policy file.
+    pub trust_list: PathBuf,
+    pub from: u64,
+    pub until: Option<u64>,
+}
+
+/// The verifier's policy for hidden issuers (HIDING-THE-ISSUER.md, I4): the
+/// snapshots, or subsets, whose roots it approves. The verifier builds each
+/// root itself from the snapshot's eligible issuers; an asset's root is
+/// accepted only if it equals the root of a snapshot whose interval contains
+/// the attested time. The asset's list name is a hint and must name that
+/// snapshot, but never selects it.
+#[derive(Debug, Clone)]
+pub struct IssuerPolicy {
+    pub snapshots: Vec<Snapshot>,
+}
+
+/// Which approved snapshot an asset's root matched.
+#[derive(Debug, Clone)]
+pub struct HiddenIssuerReport {
+    pub snapshot: String,
+    pub root: String,
+    /// The number of CAs the issuer is hidden among.
+    pub anonymity_set: usize,
+}
+
+impl IssuerPolicy {
+    /// Read a policy file: {"snapshots": [{"name", "trust_list", "from", "until"}]}.
+    pub fn from_file(path: &Path) -> Result<Self> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct File {
+            snapshots: Vec<Snapshot>,
+        }
+        let file: File = serde_json::from_slice(&std::fs::read(path).with_context(|| format!("failed to read the issuer policy {}", path.display()))?)
+            .with_context(|| format!("malformed issuer policy {}", path.display()))?;
+        let base = path.parent().unwrap_or(Path::new("."));
+        let mut snapshots = file.snapshots;
+        for s in &mut snapshots {
+            if s.until.is_some_and(|until| until <= s.from) {
+                bail!("snapshot {}: until is not after from", s.name);
+            }
+            s.trust_list = base.join(&s.trust_list);
+        }
+        if snapshots.is_empty() {
+            bail!("the issuer policy approves no snapshot");
+        }
+        Ok(Self { snapshots })
+    }
+
+    /// The snapshot whose root, built by the verifier, is `issuers.root`, and
+    /// whose interval contains `time`.
+    pub fn approve(&self, prover: &Prover, time: u64, issuers: &IssuerTreeRef) -> Result<HiddenIssuerReport> {
+        // Every snapshot is considered, so the result does not depend on their
+        // order: accepted only if one matches the root, the time, and the name.
+        let (mut outside, mut other_names) = (Vec::new(), Vec::new());
+        for s in &self.snapshots {
+            let tree = issuer_tree(&TrustList::from_file(&s.trust_list)?, prover)?;
+            if tree.root != issuers.root {
+                continue;
+            }
+            if time < s.from || s.until.is_some_and(|until| time >= until) {
+                outside.push(s.name.clone());
+                continue;
+            }
+            if issuers.list != s.name {
+                other_names.push(format!("{:?}", s.name));
+                continue;
+            }
+            return Ok(HiddenIssuerReport { snapshot: s.name.clone(), root: tree.root, anonymity_set: tree.entries });
+        }
+        if !other_names.is_empty() {
+            bail!("the asset names the trust list {:?}, but its root is that of the approved snapshot(s) {}", issuers.list, other_names.join(", "));
+        }
+        if !outside.is_empty() {
+            bail!("the issuer tree root is that of {}, which did not apply at the attested time {time}", outside.join(", "));
+        }
+        bail!("the issuer tree root is not that of any snapshot the issuer policy approves")
+    }
+}
+
 // ---- Anonymize ------------------------------------------------------------------
 
 /// What the anonymizer did and what stays visible.
 #[derive(Debug, Clone)]
 pub struct AnonymizeReport {
     pub claim: ClaimReport,
-    /// The issuing chain embedded in x5chain.
+    /// The issuing chain embedded in x5chain (empty with the issuer hidden).
     pub issuing_chain: Vec<Vec<u8>>,
+    /// With the issuer hidden: the tree and its size.
+    pub hidden: Option<HiddenIssuerReport>,
     pub time: u64,
     /// The claim signature's size, unchanged.
     pub signature_bytes: usize,
@@ -288,7 +464,12 @@ pub fn replace_signature(input: &Path, output: &Path, store: &[u8], manifest: &A
 
 /// Anonymize a signed asset in third-party mode: prove the statement for its
 /// original signature, then replace that signature in place.
-pub fn anonymize(input: &Path, output: &Path, trust: &TrustList, prover: &Prover) -> Result<AnonymizeReport> {
+///
+/// `hide_issuer`: the trust list's name for the asset's hint (H4): the issuing
+/// CA must be on the trust list itself (I2) and eligible (I1), the key set must
+/// be a hidden-issuer one, and the ZK signature carries the root of the tree
+/// over the list's eligible issuers instead of the issuing chain.
+pub fn anonymize(input: &Path, output: &Path, trust: &TrustList, prover: &Prover, hide_issuer: Option<&str>) -> Result<AnonymizeReport> {
     let store = manifest_store(input)?;
     let manifest = active_manifest(&store)?;
     let claim = check_claim(&store, &manifest.claim)?;
@@ -296,27 +477,59 @@ pub fn anonymize(input: &Path, output: &Path, trust: &TrustList, prover: &Prover
     let (inputs, issuing_chain) = prepare(&original, trust)?;
     let token = original.time_stamp.as_ref().map(|t| t.token.clone()).ok_or_else(|| anyhow!("no time stamp"))?;
 
+    let variant = prover.variant()?;
+    let dir = tempfile::tempdir()?;
+    let (issuers, hidden, issuers_pem) = match (hide_issuer, variant.as_str()) {
+        (None, VARIANT_DISCLOSED) => (None, None, None),
+        (Some(list), VARIANT_HIDDEN_ISSUER) => {
+            // The validated path ends with the last certificate the asset
+            // carries, so its length does not show whether the issuing CA is
+            // itself listed: ask the trust list.
+            if !trust.is_anchor(&issuing_chain[0]) {
+                bail!("the issuing CA is not itself on the trust list; hiding the issuer needs a directly listed CA (HIDING-THE-ISSUER.md, I2)");
+            }
+            if !eligible_issuers(trust).0.contains(&issuing_chain[0]) {
+                bail!("the issuing CA is not eligible as a hidden issuer (HIDING-THE-ISSUER.md, I1)");
+            }
+            let pem = eligible_issuers_pem(trust, dir.path())?;
+            let tree = prover.tree(&pem)?;
+            let report = HiddenIssuerReport { snapshot: list.to_string(), root: tree.root.clone(), anonymity_set: tree.entries };
+            (Some(IssuerTreeRef { root: tree.root, list: list.to_string() }), Some(report), Some(pem))
+        }
+        (None, _) => bail!("the keys in {} are for the hidden-issuer statement; use --hide-issuer", prover.keys.display()),
+        (Some(_), _) => bail!("--hide-issuer needs keys for the hidden-issuer statement (c2pa-zk-gnark setup --statement hidden-issuer)"),
+    };
+    let chain = if issuers.is_some() { Vec::new() } else { issuing_chain.clone() };
+
     // The ZK signature must fit the original's space: check before proving.
     let size = manifest.cose_sign1.len();
     let curve = prover.curve()?;
     let expected_len = proof_len(&curve)?;
-    let mut signature = ZkSignature { issuing_chain: issuing_chain.clone(), vk_sha256: prover.vk_sha256()?, curve, time_stamp_token: token, proof: vec![0; expected_len] };
+    let mut signature = ZkSignature { issuing_chain: chain.clone(), issuers: issuers.clone(), vk_sha256: prover.vk_sha256()?, curve, time_stamp_token: token, proof: vec![0; expected_len] };
     signature.encode_exact(size)?;
     let spare_bytes = size - signature.encode(0, 0).len();
     // The format must allow rewriting the store at the same size: try it with
     // the original signature, also before proving.
     rewrite_asset(input, &store, &manifest, &manifest.cose_sign1)?;
 
-    signature.proof = prover.prove(&inputs)?;
+    signature.proof = prover.prove(&inputs, issuers_pem.as_deref())?;
     if signature.proof.len() != expected_len {
         bail!("the proof is {} bytes, not {expected_len}", signature.proof.len());
     }
     // Check the proof before embedding it.
-    if !prover.verify(&inputs.public, &signature.proof)? {
+    let verified = match &issuers {
+        None => prover.verify(&inputs.public, &signature.proof)?,
+        Some(tree) => prover.verify(&hidden_public(&inputs.public, tree), &signature.proof)?,
+    };
+    if !verified {
         bail!("the new proof does not verify");
     }
     replace_signature(input, output, &store, &manifest, &signature.encode_exact(size)?)?;
-    Ok(AnonymizeReport { claim, issuing_chain, time: inputs.public.time, signature_bytes: size, spare_bytes })
+    Ok(AnonymizeReport { claim, issuing_chain: chain, hidden, time: inputs.public.time, signature_bytes: size, spare_bytes })
+}
+
+fn hidden_public(public: &PublicInputs, tree: &IssuerTreeRef) -> HiddenPublicInputs {
+    HiddenPublicInputs { claim: public.claim.clone(), issuer_root: tree.root.clone(), time: public.time, imprint: public.imprint.clone() }
 }
 
 // ---- Verify ---------------------------------------------------------------------
@@ -333,8 +546,11 @@ pub fn is_third_party(asset: &Path) -> bool {
 #[derive(Debug, Clone)]
 pub struct VerifyReport {
     pub claim: ClaimReport,
-    /// The issuing CA's subject.
+    /// The issuing CA's subject (with the issuer hidden, a description of the
+    /// set it is hidden in).
     pub issuer: String,
+    /// With the issuer hidden: the approved snapshot the root matched.
+    pub hidden: Option<HiddenIssuerReport>,
     /// The validated path, issuing CA first, ending at the trust anchor.
     pub path: Vec<Vec<u8>>,
     /// The time stamp's attested time (Unix seconds).
@@ -387,20 +603,44 @@ pub fn c2pa_claim_checks(asset: &Path) -> Result<Vec<String>> {
     Ok(success)
 }
 
-/// Verify a third-party anonymized asset: the issuing chain and time stamp
+/// The placeholder certificate the c2pa checks of a hidden-issuer asset use
+/// (HIDING-THE-ISSUER.md, I5): self-signed, identifying no one, never written
+/// to an output. c2pa-rs does not read a manifest whose signature has no
+/// `x5chain`.
+const HIDDEN_ISSUER_PLACEHOLDER: &[u8] = include_bytes!("hidden-issuer-placeholder.der");
+
+/// The c2pa checks of a hidden-issuer asset: on a local copy whose ZK
+/// signature carries the placeholder certificate in `x5chain`, at the same
+/// size, so the claim's assertions and hard binding are validated as for the
+/// disclosed form (only the signature's own codes are ignored).
+fn c2pa_claim_checks_hidden(asset: &Path, store: &[u8], manifest: &ActiveManifest, signature: &ZkSignature) -> Result<Vec<String>> {
+    let cose = signature.encode_for_validation(HIDDEN_ISSUER_PLACEHOLDER, manifest.cose_sign1.len())?;
+    let dir = tempfile::tempdir()?;
+    let copy = dir.path().join(asset.file_name().ok_or_else(|| anyhow!("no file name"))?);
+    std::fs::write(&copy, rewrite_asset(asset, store, manifest, &cose)?)?;
+    c2pa_claim_checks(&copy)
+}
+
+/// Verify a third-party anonymized asset: the issuing chain (or, with the
+/// issuer hidden, the issuer tree's root against `policy`) and the time stamp
 /// off-circuit, the claim's assertions and hard binding with c2pa, and the
 /// proof with public inputs all derived from the asset. With
-/// `expected_issuer`, the issuing CA's subject DN must equal it.
-pub fn verify(asset: &Path, trust: &TrustList, tsa_trust: &Path, prover: &Prover, expected_issuer: Option<&str>) -> Result<VerifyReport> {
+/// `expected_issuer`, the issuing CA's subject DN must equal it (disclosed
+/// issuers only).
+pub fn verify(asset: &Path, trust: &TrustList, tsa_trust: &Path, prover: &Prover, expected_issuer: Option<&str>, policy: Option<&IssuerPolicy>) -> Result<VerifyReport> {
     let store = manifest_store(asset)?;
     let manifest = active_manifest(&store)?;
     let claim = check_claim(&store, &manifest.claim)?;
-    let checked = verify_zk_signature(&manifest, trust, tsa_trust, prover, expected_issuer)?;
-    let c2pa_success = c2pa_claim_checks(asset)?;
+    let checked = verify_zk_signature(&manifest, trust, tsa_trust, prover, expected_issuer, policy)?;
+    let c2pa_success = if checked.signature.issuers.is_some() {
+        c2pa_claim_checks_hidden(asset, &store, &manifest, &checked.signature)?
+    } else {
+        c2pa_claim_checks(asset)?
+    };
     if !checked.proof_verified(prover)? {
         bail!("the proof does not verify for this asset's claim, issuing CA, and time stamp");
     }
-    Ok(VerifyReport { claim, issuer: checked.issuer, path: checked.path, time: checked.time, c2pa_success })
+    Ok(VerifyReport { claim, issuer: checked.issuer, hidden: checked.hidden, path: checked.path, time: checked.time, c2pa_success })
 }
 
 /// What verifying an ingredient's ZK signature established.
@@ -431,7 +671,7 @@ pub fn verify_ingredient(store: &[u8], label: &str, trust: &TrustList, tsa_trust
         .into_iter()
         .find(|m| m.label == label)
         .ok_or_else(|| anyhow!("no manifest {label} in the store"))?;
-    let checked = verify_zk_signature(&manifest, trust, tsa_trust, prover, None)?;
+    let checked = verify_zk_signature(&manifest, trust, tsa_trust, prover, None, None)?;
     if !checked.proof_verified(prover)? {
         bail!("the proof does not verify for the ingredient's claim, issuing CA, and time stamp");
     }
@@ -441,8 +681,9 @@ pub fn verify_ingredient(store: &[u8], label: &str, trust: &TrustList, tsa_trust
 /// The checks of a ZK signature that do not depend on the asset's content.
 struct CheckedSignature {
     signature: ZkSignature,
-    public: PublicInputs,
+    public: serde_json::Value,
     issuer: String,
+    hidden: Option<HiddenIssuerReport>,
     path: Vec<Vec<u8>>,
     time: u64,
 }
@@ -453,8 +694,14 @@ impl CheckedSignature {
     }
 }
 
-fn verify_zk_signature(manifest: &ActiveManifest, trust: &TrustList, tsa_trust: &Path, prover: &Prover, expected_issuer: Option<&str>) -> Result<CheckedSignature> {
+fn verify_zk_signature(manifest: &ActiveManifest, trust: &TrustList, tsa_trust: &Path, prover: &Prover, expected_issuer: Option<&str>, policy: Option<&IssuerPolicy>) -> Result<CheckedSignature> {
     let signature = ZkSignature::decode(&manifest.cose_sign1)?;
+    let variant = prover.variant()?;
+    match (&signature.issuers, variant.as_str()) {
+        (None, VARIANT_DISCLOSED) | (Some(_), VARIANT_HIDDEN_ISSUER) => {}
+        (None, _) => bail!("the asset discloses its issuer, but the keys in {} are for the hidden-issuer statement", prover.keys.display()),
+        (Some(_), _) => bail!("the asset hides its issuer, but the keys in {} are for the disclosed statement", prover.keys.display()),
+    }
     let keys_curve = prover.curve()?;
     if signature.curve != keys_curve {
         bail!("the proof is on {}, but the keys in {} are for {keys_curve}", signature.curve, prover.keys.display());
@@ -470,6 +717,16 @@ fn verify_zk_signature(manifest: &ActiveManifest, trust: &TrustList, tsa_trust: 
     let time = generalized_time_unix(&info.gen_time)?;
     verify_time_stamp(&signature.time_stamp_token, &info.hashed_message, tsa_trust, time)?;
 
+    if let Some(issuers) = &signature.issuers {
+        if expected_issuer.is_some() {
+            bail!("the asset hides its issuer; an expected issuer cannot be checked");
+        }
+        let policy = policy.ok_or_else(|| anyhow!("the asset hides its issuer: verifying it needs an issuer policy (--issuer-policy)"))?;
+        let report = policy.approve(prover, time, issuers)?;
+        let public = serde_json::to_value(HiddenPublicInputs { claim: b64(&manifest.claim), issuer_root: issuers.root.clone(), time, imprint: b64(&info.hashed_message) })?;
+        let issuer = format!("hidden among {} CAs of {}", report.anonymity_set, report.snapshot);
+        return Ok(CheckedSignature { signature, public, issuer, hidden: Some(report), path: Vec::new(), time });
+    }
     let path = validate_issuing_chain(&signature.issuing_chain, trust, time)?;
     let issuer_certificate = &signature.issuing_chain[0];
     let issuer = crate::extract_subject_dn(issuer_certificate)?;
@@ -478,6 +735,6 @@ fn verify_zk_signature(manifest: &ActiveManifest, trust: &TrustList, tsa_trust: 
             bail!("the issuing CA is {issuer}, not the expected {expected}");
         }
     }
-    let public = PublicInputs { claim: b64(&manifest.claim), issuer_certificate: b64(issuer_certificate), time, imprint: b64(&info.hashed_message) };
-    Ok(CheckedSignature { signature, public, issuer, path, time })
+    let public = serde_json::to_value(PublicInputs { claim: b64(&manifest.claim), issuer_certificate: b64(issuer_certificate), time, imprint: b64(&info.hashed_message) })?;
+    Ok(CheckedSignature { signature, public, issuer, hidden: None, path, time })
 }

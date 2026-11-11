@@ -14,8 +14,11 @@
 # digitalSignature and nonRepudiation; EKU emailProtection and C2PA claim
 # signing; an OCSP and CA-issuers AIA), and a test time-stamp authority:
 #   tsa-root.{pem,der,key}      TSA root (P-384)
-#   tsa.{pem,der,key}           TSA certificate (P-384, timeStamping EKU)
-#   tsa-trust-list.pem          TSA trust anchors: the TSA root
+#   tsa-ca.{pem,der,key}        TSA issuing CA (P-384, pathlen:0, timeStamping
+#                               EKU; itself a TSA trust anchor)
+#   tsa.{pem,der,key}           TSA certificate (P-256, critical timeStamping
+#                               EKU), issued by the TSA issuing CA (ECDSA-SHA384)
+#   tsa-trust-list.pem          TSA trust anchors: the TSA root and issuing CA
 #
 # Writes to OUT_DIR (default: fixtures/pki, gitignored):
 #   root.{pem,der,key}          root CA
@@ -159,28 +162,43 @@ print(json.dumps({"LoTE": {
 }}, indent=2))
 PY
 
-# Time-stamp authority (mirror profile): its own root, as on the C2PA TSA
-# trust list, and a certificate with the critical timeStamping EKU.
+# Time-stamp authority (mirror profile), as a real device photo's time stamp:
+# a root, a P-384 issuing CA (itself on the TSA trust list) with the
+# timeStamping EKU, and a P-256 TSA certificate with the critical timeStamping
+# EKU, issued with ECDSA-SHA384: the same shape as the signer's chain.
 if $MIRROR; then
     openssl ecparam -genkey -name $CA_CURVE -noout -out tsa-root.key
     openssl req -x509 -new -key tsa-root.key $CA_DIGEST -days 3650 -out tsa-root.pem \
         -subj "/C=US/O=${NAME} PKI/CN=${NAME} TSA Root CA" -extensions v3_ca \
         -config <(printf '[req]\ndistinguished_name=dn\n[dn]\n[v3_ca]\n'; cat root.ext)
-    openssl ecparam -genkey -name $CA_CURVE -noout -out tsa.key
-    openssl req -new -key tsa.key -out tsa.csr -subj "/C=US/O=${NAME} PKI/CN=${NAME} Time Stamping Authority"
-    cat > tsa.ext <<EOF
-basicConstraints=critical,CA:FALSE
-keyUsage=critical,digitalSignature
-extendedKeyUsage=critical,timeStamping
+    openssl ecparam -genkey -name $CA_CURVE -noout -out tsa-ca.key
+    openssl req -new -key tsa-ca.key -out tsa-ca.csr -subj "/C=US/O=${NAME} PKI/CN=${NAME} Time-Stamping CA"
+    cat > tsa-ca.ext <<EOF
+basicConstraints=critical,CA:TRUE,pathlen:0
+keyUsage=critical,keyCertSign,cRLSign
+extendedKeyUsage=timeStamping
+certificatePolicies=1.3.6.1.4.1.62558.1.1
 subjectKeyIdentifier=hash
 authorityKeyIdentifier=keyid:always
 EOF
-    openssl x509 -req -in tsa.csr -CA tsa-root.pem -CAkey tsa-root.key -CAcreateserial \
-        $CA_DIGEST -days 1825 -extfile tsa.ext -out tsa.pem
-    for c in tsa-root tsa; do
+    openssl x509 -req -in tsa-ca.csr -CA tsa-root.pem -CAkey tsa-root.key -CAcreateserial \
+        $CA_DIGEST -days 1825 -extfile tsa-ca.ext -out tsa-ca.pem
+    openssl ecparam -genkey -name prime256v1 -noout -out tsa.key
+    openssl req -new -key tsa.key -out tsa.csr -subj "/C=US/O=${NAME} PKI/CN=${NAME} Time Stamping Authority"
+    cat > tsa.ext <<EOF
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,nonRepudiation
+extendedKeyUsage=critical,timeStamping
+certificatePolicies=1.3.6.1.4.1.62558.1.1
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid:always
+EOF
+    openssl x509 -req -in tsa.csr -CA tsa-ca.pem -CAkey tsa-ca.key -CAcreateserial \
+        $CA_DIGEST -days 825 -extfile tsa.ext -out tsa.pem
+    for c in tsa-root tsa-ca tsa; do
         openssl x509 -in "$c.pem" -outform DER -out "$c.der"
     done
-    cp tsa-root.pem tsa-trust-list.pem
+    cat tsa-root.pem tsa-ca.pem > tsa-trust-list.pem
 fi
 
 rm -f ./*.csr ./*.srl ./*.ext

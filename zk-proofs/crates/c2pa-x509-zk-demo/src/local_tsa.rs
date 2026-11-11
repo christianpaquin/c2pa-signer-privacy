@@ -24,20 +24,25 @@ pub struct LocalTsa {
 
 impl LocalTsa {
     /// An RFC 3161 `TimeStampResp` (DER) over `message`, with a SHA-256
-    /// message imprint and the TSA certificate included.
+    /// message imprint and the TSA certificate included, followed by the TSA's
+    /// issuing CA when a `tsa-ca.pem` sits next to the certificate (as real
+    /// tokens carry it; the mirror PKI writes one).
     pub fn time_stamp(&self, message: &[u8]) -> Result<Vec<u8>> {
         let dir = tempfile::tempdir()?;
         let path = |name: &str| dir.path().join(name);
         std::fs::write(path("message.bin"), message)?;
         std::fs::write(path("serial"), "01\n")?;
+        let cert = std::fs::canonicalize(&self.cert)?;
+        let chain = cert.parent().map(|d| d.join("tsa-ca.pem")).filter(|p| p.exists());
+        let certs = chain.map(|p| format!("certs = {}\n", p.display())).unwrap_or_default();
         std::fs::write(
             path("tsa.cnf"),
             format!(
-                "[tsa]\ndefault_tsa = local\n[local]\nserial = {}\nsigner_cert = {}\nsigner_key = {}\n\
+                "[tsa]\ndefault_tsa = local\n[local]\nserial = {}\nsigner_cert = {}\nsigner_key = {}\n{certs}\
                  signer_digest = sha256\ndefault_policy = 1.3.6.1.4.1.4146.2.3\ndigests = sha256, sha384\n\
                  accuracy = secs:1\ness_cert_id_alg = sha256\n",
                 path("serial").display(),
-                std::fs::canonicalize(&self.cert)?.display(),
+                cert.display(),
                 std::fs::canonicalize(&self.key)?.display(),
             ),
         )?;

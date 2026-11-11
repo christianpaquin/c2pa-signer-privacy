@@ -683,6 +683,35 @@ fn hidden_issuer_verification_follows_the_verifiers_policy() {
     assert!(err.contains("keys in") && err.contains("disclosed statement"), "{err}");
 }
 
+/// The mirror fixture's time stamp has the real profile (I6,
+/// HIDING-THE-TIME-STAMP.md): a P-256 TSA certificate issued by a listed
+/// P-384 TSA CA, both carried in the token, the root not; the TSA CA is
+/// eligible for time stamping, not for claim signing.
+#[test]
+fn mirror_time_stamp_has_the_real_profile() {
+    use c2pa_x509_zk_demo::trust::{eligible_issuers, Purpose};
+    let fixture = Fixture::new(true, true);
+    let token = fixture.original().time_stamp.unwrap().token;
+    let has = |name: &str| {
+        let cert = std::fs::read(fixture.pki(name)).unwrap();
+        token.windows(cert.len()).any(|w| w == cert.as_slice())
+    };
+    assert!(has("tsa.der") && has("tsa-ca.der") && !has("tsa-root.der"));
+
+    // The algorithms: a P-256 TSA key, a P-384 TSA CA key, ECDSA-SHA384 between them.
+    let parse = |name: &str| x509_cert::Certificate::from_der(&std::fs::read(fixture.pki(name)).unwrap()).unwrap();
+    let (tsa_cert, tsa_ca_cert) = (parse("tsa.der"), parse("tsa-ca.der"));
+    assert_eq!(key_curve(&tsa_cert), const_oid::db::rfc5912::SECP_256_R_1);
+    assert_eq!(key_curve(&tsa_ca_cert), const_oid::db::rfc5912::SECP_384_R_1);
+    assert_eq!(tsa_cert.signature_algorithm.oid, const_oid::db::rfc5912::ECDSA_WITH_SHA_384);
+
+    let tsa_ca = std::fs::read(fixture.pki("tsa-ca.der")).unwrap();
+    let tsa_trust = TrustList::from_file(&fixture.pki("tsa-trust-list.pem")).unwrap();
+    assert!(tsa_trust.is_anchor(&tsa_ca));
+    assert!(eligible_issuers(&tsa_trust, Purpose::TimeStamping).0.contains(&tsa_ca));
+    assert!(!eligible_issuers(&tsa_trust, Purpose::ClaimSigning).0.contains(&tsa_ca));
+}
+
 /// A policy file's snapshots reject unknown fields: a misspelled `until`
 /// must not turn an expiring approval into an indefinite one. Omitting
 /// `until` on purpose is still accepted.

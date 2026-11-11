@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"math/big"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -216,7 +217,7 @@ func TestAssignHiddenRefusesACANotInTheTree(t *testing.T) {
 	if _, err := AssignHidden(f.in, treeWith(t, ecc.BN254), testSizes); err == nil {
 		t.Fatal("assigned with an issuing CA missing from the tree")
 	}
-	if _, err := AssignHiddenPublic(HiddenPublic{Claim: f.in.Claim, Root: "not hex", Time: f.in.Time, Imprint: f.in.Imprint}, testSizes); err == nil {
+	if _, err := AssignHiddenPublic(HiddenPublic{Claim: f.in.Claim, Root: "not hex", Time: f.in.Time, Imprint: f.in.Imprint}, testSizes, ecc.BN254); err == nil {
 		t.Fatal("accepted a root that is not hex")
 	}
 }
@@ -241,7 +242,7 @@ func TestHiddenIssuerGroth16ProofVerifies(t *testing.T) {
 		t.Fatal(err)
 	}
 	verify := func(root string) error {
-		pub, err := AssignHiddenPublic(HiddenPublic{Claim: f.in.Claim, Root: root, Time: f.in.Time, Imprint: f.in.Imprint}, testSizes)
+		pub, err := AssignHiddenPublic(HiddenPublic{Claim: f.in.Claim, Root: root, Time: f.in.Time, Imprint: f.in.Imprint}, testSizes, ecc.BN254)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -287,4 +288,40 @@ func singleEntryTree(t *testing.T, curve ecc.ID, ca issuertree.CA) (*big.Int, is
 		t.Fatal(err)
 	}
 	return root, p
+}
+
+// A root has exactly one accepted form: canonical lowercase hex below the
+// scalar field modulus. R + modulus would otherwise be reduced to R, an alias.
+func TestRootsHaveOneForm(t *testing.T) {
+	forEachCurve(t, func(t *testing.T, curve ecc.ID) {
+		f := newFixture(t, fixtureOptions{})
+		root := treeWith(t, curve, f.in.IssuerCert).Root()
+		mod := curve.ScalarField()
+		pub := func(text string) error {
+			_, err := AssignHiddenPublic(HiddenPublic{Claim: f.in.Claim, Root: text, Time: f.in.Time, Imprint: f.in.Imprint}, testSizes, curve)
+			return err
+		}
+		for name, text := range map[string]string{
+			"the root":            root.Text(16),
+			"zero":                "0",
+			"the modulus minus 1": new(big.Int).Sub(mod, big.NewInt(1)).Text(16),
+		} {
+			if err := pub(text); err != nil {
+				t.Errorf("%s refused: %v", name, err)
+			}
+		}
+		for name, text := range map[string]string{
+			"the modulus":               mod.Text(16),
+			"the root plus the modulus": new(big.Int).Add(root, mod).Text(16),
+			"a leading zero":            "0" + root.Text(16),
+			"uppercase":                 strings.ToUpper(root.Text(16)),
+			"a 0x prefix":               "0x" + root.Text(16),
+			"negative":                  "-" + root.Text(16),
+			"empty":                     "",
+		} {
+			if err := pub(text); err == nil {
+				t.Errorf("%s accepted", name)
+			}
+		}
+	})
 }

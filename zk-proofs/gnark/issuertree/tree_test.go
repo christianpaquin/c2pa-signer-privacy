@@ -4,8 +4,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"math/big"
 	"testing"
 	"time"
@@ -132,5 +134,56 @@ func TestHashRejectsOutOfFieldElements(t *testing.T) {
 	}
 	if _, err := h.Hash(big.NewInt(-1)); err == nil {
 		t.Fatal("a negative element was accepted")
+	}
+}
+
+// Certificates with the same key and validity but other differences (here
+// the serial number) share one leaf, and every one of them proves, in either
+// input order, with the same root.
+func TestEquivalentCertificatesShareALeafAndAllProve(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nb, na := time.Now().Add(-time.Hour).Truncate(time.Second), time.Now().Add(time.Hour).Truncate(time.Second)
+	var twins [][]byte
+	for serial := int64(1); serial <= 2; serial++ {
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(serial), Subject: pkix.Name{CommonName: "Twin CA"},
+			NotBefore: nb, NotAfter: na, IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		twins = append(twins, der)
+	}
+	others := cas(t, 2)
+	var roots []*big.Int
+	for _, order := range [][][]byte{
+		{twins[0], twins[1], others[0], others[1]},
+		{others[1], twins[1], others[0], twins[0]},
+	} {
+		tree, _, err := Build(ecc.BN254, order)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(tree.Entries) != 3 {
+			t.Fatalf("%d entries; the twins should share one leaf", len(tree.Entries))
+		}
+		for i, der := range twins {
+			sum := sha256.Sum256(der)
+			p, err := tree.Prove(hex.EncodeToString(sum[:]))
+			if err != nil {
+				t.Fatalf("twin %d does not prove: %v", i, err)
+			}
+			if root, _ := tree.Verify(p); root.Cmp(tree.Root()) != 0 {
+				t.Fatalf("twin %d's proof does not recompute the root", i)
+			}
+		}
+		roots = append(roots, tree.Root())
+	}
+	if roots[0].Cmp(roots[1]) != 0 {
+		t.Fatal("the root depends on input order")
 	}
 }

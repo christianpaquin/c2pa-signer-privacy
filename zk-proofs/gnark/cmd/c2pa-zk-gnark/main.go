@@ -275,9 +275,9 @@ func printTree(issuers, curveName string) error {
 		return err
 	}
 	type entry struct {
-		CertSHA256 string `json:"cert_sha256"`
-		NotBefore  int64  `json:"not_before"`
-		NotAfter   int64  `json:"not_after"`
+		CertSHA256s []string `json:"cert_sha256s"` // every certificate with this leaf
+		NotBefore   int64    `json:"not_before"`
+		NotAfter    int64    `json:"not_after"`
 	}
 	out := struct {
 		FormatVersion int      `json:"format_version"`
@@ -288,7 +288,7 @@ func printTree(issuers, curveName string) error {
 		Skipped       []string `json:"skipped"`
 	}{FormatVersion: issuertree.FormatVersion, Curve: curveName, KeyType: "P-384", Root: tree.Root().Text(16), Entries: []entry{}, Skipped: append([]string{}, skipped...)}
 	for _, e := range tree.Entries {
-		out.Entries = append(out.Entries, entry{e.CertSHA256, e.NotBefore, e.NotAfter})
+		out.Entries = append(out.Entries, entry{e.CertSHA256s, e.NotBefore, e.NotAfter})
 	}
 	data, _ := json.MarshalIndent(out, "", "  ")
 	fmt.Println(string(data))
@@ -528,7 +528,7 @@ func verify(dir, publicPath, proofPath string) error {
 		if err := readJSON(publicPath, &pub); err != nil {
 			return err
 		}
-		if assigned, err = statement.AssignHiddenPublic(pub, m.Sizes); err != nil {
+		if assigned, err = statement.AssignHiddenPublic(pub, m.Sizes, m.curve()); err != nil {
 			return err
 		}
 	} else {

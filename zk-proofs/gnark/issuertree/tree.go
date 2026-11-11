@@ -109,6 +109,15 @@ type CA struct {
 	CertSHA256 string
 }
 
+// Entry is a leaf of the tree: its CA, and every supplied certificate with
+// that key and validity (certificates differing in other fields, such as the
+// serial number, give the same leaf).
+type Entry struct {
+	CA
+	// The SHA-256 of each certificate with this leaf, sorted.
+	CertSHA256s []string
+}
+
 // LeafInputs are the leaf's hash inputs, in order.
 func LeafInputs(ca CA) []*big.Int {
 	x, y := Limbs128(ca.X), Limbs128(ca.Y)
@@ -141,8 +150,10 @@ func FromCertificate(der []byte) (CA, error) {
 type Tree struct {
 	hasher *Hasher
 	// Entries in leaf order (sorted by leaf hash), without the padding.
-	Entries []CA
+	Entries []Entry
 	levels  [][]*big.Int
+	// The leaf index of every supplied certificate, by SHA-256.
+	index map[string]int
 }
 
 // Build builds the tree over the given certificates' CA entries. Certificates
@@ -153,12 +164,13 @@ func Build(curve ecc.ID, certificates [][]byte) (*Tree, []string, error) {
 		return nil, nil, err
 	}
 	type leaf struct {
-		ca   CA
-		hash *big.Int
+		ca    CA
+		hash  *big.Int
+		certs map[string]bool
 	}
-	var leaves []leaf
+	var leaves []*leaf
 	var skipped []string
-	seen := map[string]bool{}
+	byHash := map[string]*leaf{}
 	for _, der := range certificates {
 		ca, err := FromCertificate(der)
 		if err != nil {
@@ -169,11 +181,13 @@ func Build(curve ecc.ID, certificates [][]byte) (*Tree, []string, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		if seen[v.String()] {
-			continue // the same key and validity, listed twice
+		if l, ok := byHash[v.String()]; ok {
+			l.certs[ca.CertSHA256] = true // the same key and validity: one leaf
+			continue
 		}
-		seen[v.String()] = true
-		leaves = append(leaves, leaf{ca, v})
+		l := &leaf{ca, v, map[string]bool{ca.CertSHA256: true}}
+		byHash[v.String()] = l
+		leaves = append(leaves, l)
 	}
 	if len(leaves) > Capacity {
 		return nil, nil, fmt.Errorf("%d eligible certificates; tree format %d holds at most %d", len(leaves), FormatVersion, Capacity)
@@ -184,15 +198,25 @@ func Build(curve ecc.ID, certificates [][]byte) (*Tree, []string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	t := &Tree{hasher: h}
+	t := &Tree{hasher: h, index: map[string]int{}}
 	level := make([]*big.Int, Capacity)
 	for i := range level {
-		if i < len(leaves) {
-			level[i] = leaves[i].hash
-			t.Entries = append(t.Entries, leaves[i].ca)
-		} else {
+		if i >= len(leaves) {
 			level[i] = empty
+			continue
 		}
+		l := leaves[i]
+		level[i] = l.hash
+		e := Entry{CA: l.ca}
+		for c := range l.certs {
+			e.CertSHA256s = append(e.CertSHA256s, c)
+			t.index[c] = i
+		}
+		sort.Strings(e.CertSHA256s)
+		// The entry's CA names its first certificate in sorted order, so
+		// it does not depend on input order either.
+		e.CA.CertSHA256 = e.CertSHA256s[0]
+		t.Entries = append(t.Entries, e)
 	}
 	t.levels = append(t.levels, level)
 	for len(level) > 1 {
@@ -220,21 +244,20 @@ type Proof struct {
 }
 
 // Prove returns the membership proof of the certificate with the given
-// SHA-256 (hex), or an error if it is not in the tree.
+// SHA-256 (hex), or an error if it was not supplied to the tree. Every
+// supplied certificate proves, including those sharing a leaf.
 func (t *Tree) Prove(certSHA256 string) (Proof, error) {
-	for i, ca := range t.Entries {
-		if ca.CertSHA256 != certSHA256 {
-			continue
-		}
-		p := Proof{CA: ca, Index: i}
-		idx := i
-		for d := 0; d < Depth; d++ {
-			p.Siblings[d] = t.levels[d][idx^1]
-			idx >>= 1
-		}
-		return p, nil
+	i, ok := t.index[certSHA256]
+	if !ok {
+		return Proof{}, fmt.Errorf("certificate %s is not in the tree", certSHA256)
 	}
-	return Proof{}, fmt.Errorf("certificate %s is not in the tree", certSHA256)
+	p := Proof{CA: t.Entries[i].CA, Index: i}
+	idx := i
+	for d := 0; d < Depth; d++ {
+		p.Siblings[d] = t.levels[d][idx^1]
+		idx >>= 1
+	}
+	return p, nil
 }
 
 // Verify recomputes the root from a proof (the circuit's computation, natively).

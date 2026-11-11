@@ -11,7 +11,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"regexp"
 
+	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/std/math/emulated"
 	gnarkecdsa "github.com/consensys/gnark/std/signature/ecdsa"
@@ -218,12 +220,30 @@ func AssignHidden(in Inputs, tree *issuertree.Tree, s Sizes) (*HiddenIssuerCircu
 	return c, nil
 }
 
+// ParseRoot reads an issuer tree's root: canonical lowercase hex (no
+// prefix, no leading zeros), below the curve's scalar field modulus. Any other
+// spelling is refused, so that each root has exactly one form, as the
+// verifier's approved-root policy compares them; a root at or above the
+// modulus would otherwise be reduced into the field, an alias of another.
+func ParseRoot(text string, curve ecc.ID) (*big.Int, error) {
+	if !canonicalHex.MatchString(text) {
+		return nil, fmt.Errorf("issuer_root %q is not canonical lowercase hex", text)
+	}
+	root, _ := new(big.Int).SetString(text, 16)
+	if root.Cmp(curve.ScalarField()) >= 0 {
+		return nil, fmt.Errorf("issuer_root is not below the %s scalar field modulus", curve)
+	}
+	return root, nil
+}
+
+var canonicalHex = regexp.MustCompile(`^(0|[1-9a-f][0-9a-f]*)$`)
+
 // AssignHiddenPublic builds the public part of the hidden-issuer assignment
-// (the private part is zero), as the verifier does.
-func AssignHiddenPublic(pub HiddenPublic, s Sizes) (*HiddenIssuerCircuit, error) {
-	root, ok := new(big.Int).SetString(pub.Root, 16)
-	if !ok || root.Sign() < 0 {
-		return nil, fmt.Errorf("issuer_root is not a hex number")
+// (the private part is zero), as the verifier does, for the key set's curve.
+func AssignHiddenPublic(pub HiddenPublic, s Sizes, curve ecc.ID) (*HiddenIssuerCircuit, error) {
+	root, err := ParseRoot(pub.Root, curve)
+	if err != nil {
+		return nil, err
 	}
 	// The claim, time, and imprint checks and encodings are Circuit's; the
 	// issuer certificate is not used.

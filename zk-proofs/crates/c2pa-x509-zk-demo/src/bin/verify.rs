@@ -47,6 +47,12 @@ struct Args {
     #[arg(long)]
     keys: Option<PathBuf>,
 
+    /// Issuer policy for assets that hide their issuer (roadmap H4): the
+    /// trust-list snapshots whose issuer trees are approved, and when each
+    /// applied (JSON: {"snapshots": [{"name", "trust_list", "from", "until"}]})
+    #[arg(long)]
+    issuer_policy: Option<PathBuf>,
+
     /// The c2pa-zk-gnark CLI (default: c2pa-zk-gnark next to the target directory)
     #[arg(long)]
     gnark: Option<PathBuf>,
@@ -280,10 +286,14 @@ fn third_party(args: &Args) -> Result<()> {
         Some(cli) => cli.clone(),
         None => std::env::current_exe()?.parent().and_then(|d| d.parent()).map(|d| d.join("c2pa-zk-gnark")).ok_or_else(|| anyhow!("cannot locate c2pa-zk-gnark; pass --gnark"))?,
     };
-    let report = c2pa_x509_zk_demo::third_party::verify(&args.input, &trust, tsa_trust, &c2pa_x509_zk_demo::third_party::Prover { cli, keys }, args.issuer.as_deref())?;
+    let policy = args.issuer_policy.as_deref().map(c2pa_x509_zk_demo::third_party::IssuerPolicy::from_file).transpose()?;
+    let report = c2pa_x509_zk_demo::third_party::verify(&args.input, &trust, tsa_trust, &c2pa_x509_zk_demo::third_party::Prover { cli, keys }, args.issuer.as_deref(), policy.as_ref())?;
     println!("✅ Valid: the claim was signed by a certificate for C2PA claim signing,");
     println!("   issued by {}, valid at the time-stamped time {} (Unix).", report.issuer, report.time);
-    println!("   Issuing path: {} certificate(s) to the trust list; time stamp trusted.", report.path.len());
+    match &report.hidden {
+        None => println!("   Issuing path: {} certificate(s) to the trust list; time stamp trusted.", report.path.len()),
+        Some(h) => println!("   Issuer tree: approved snapshot {} (root {}); time stamp trusted.", h.snapshot, h.root),
+    }
     println!("   Claim checks (c2pa): {}", report.c2pa_success.join(", "));
     println!("   Visible: {} | assertions: {}", report.claim.claim_generator, report.claim.assertions.join(", "));
     println!("   Not established: revocation of the signer certificate; the full certificate profile (H2).");

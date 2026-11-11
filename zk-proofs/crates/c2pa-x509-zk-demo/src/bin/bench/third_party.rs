@@ -17,6 +17,12 @@
 //!
 //! prove and prove_warm each run three times (this laptop's timings vary
 //! widely); the median run is reported, with every run in the record.
+//!
+//! With --hide-issuer (roadmap H4), the hidden-issuer statement: prepare also
+//! builds the issuer tree over the trust list's eligible issuers (the
+//! anonymizer does so for each asset), prove takes them, package writes the
+//! hidden form of the ZK signature, and verify_cli applies an issuer policy
+//! approving the trust list.
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
@@ -25,8 +31,8 @@ use std::process::{Command, Stdio};
 
 use c2pa_x509_zk_demo::jumbf::{active_manifest, manifest_store};
 use c2pa_x509_zk_demo::original_signature::OriginalSignature;
-use c2pa_x509_zk_demo::third_party::{check_claim, replace_signature, statement_inputs};
-use c2pa_x509_zk_demo::zk_signature::{proof_len, ZkSignature, DEFAULT_CURVE};
+use c2pa_x509_zk_demo::third_party::{check_claim, eligible_issuers_pem, replace_signature, statement_inputs, HiddenPublicInputs, Prover, VARIANT_HIDDEN_ISSUER};
+use c2pa_x509_zk_demo::zk_signature::{proof_len, IssuerTreeRef, ZkSignature, DEFAULT_CURVE};
 use c2pa_x509_zk_demo::{issuing_path_for, file_sha256, TrustList};
 
 use super::pk_load::{cache_state, evict, resident_fraction};
@@ -153,16 +159,45 @@ pub fn phase(name: &str, work_dir: &Path, zk_root: &Path) -> Result<()> {
             let vk_sha256 = keys["sha256"]["statement.vk"].as_str().unwrap_or_default().to_string();
             let curve = keys["curve"].as_str().unwrap_or(DEFAULT_CURVE).to_string();
             let token = original.time_stamp.as_ref().ok_or_else(|| anyhow!("no time stamp"))?.token.clone();
+            // The hidden issuer (H4): the tree over the eligible issuers, as
+            // the anonymizer builds it for each asset.
+            let issuers = if keys["variant"].as_str() == Some(VARIANT_HIDDEN_ISSUER) {
+                let tree = timed(&mut steps, "build_issuer_tree", || {
+                    if !trust.is_anchor(&chain[0]) {
+                        bail!("the issuing CA is not itself on the trust list (HIDING-THE-ISSUER.md, I2)");
+                    }
+                    let pem = eligible_issuers_pem(&trust, work_dir)?;
+                    let gnark = PathBuf::from(std::env::var_os("C2PA_ZK_GNARK").ok_or_else(|| anyhow!("C2PA_ZK_GNARK not set"))?);
+                    Prover { cli: gnark, keys: paths.keys.clone() }.tree(&pem)
+                })?;
+                data.insert("issuer_tree_entries".into(), json!(tree.entries));
+                std::fs::write(
+                    work_dir.join("policy.json"),
+                    serde_json::to_vec(&json!({ "snapshots": [{ "name": "bench-list", "trust_list": paths.trust_list, "from": 0 }] }))?,
+                )?;
+                Some(IssuerTreeRef { root: tree.root, list: "bench-list".into() })
+            } else {
+                None
+            };
+            let disclosed_chain = if issuers.is_some() { Vec::new() } else { chain.clone() };
             let size = manifest.cose_sign1.len();
             let spare = timed(&mut steps, "check_size", || {
-                let signature = ZkSignature { issuing_chain: chain.clone(), vk_sha256: vk_sha256.clone(), curve: curve.clone(), time_stamp_token: token.clone(), proof: vec![0; proof_len(&curve)?] };
+                let signature = ZkSignature { issuing_chain: disclosed_chain.clone(), issuers: issuers.clone(), vk_sha256: vk_sha256.clone(), curve: curve.clone(), time_stamp_token: token.clone(), proof: vec![0; proof_len(&curve)?] };
                 signature.encode_exact(size)?;
                 Ok(size - signature.encode(0, 0).len())
             })?;
             timed(&mut steps, "write_inputs", || {
                 std::fs::write(work_dir.join("inputs.json"), serde_json::to_vec(&inputs)?)?;
-                std::fs::write(work_dir.join("public.json"), serde_json::to_vec(&inputs.public)?)?;
-                let context = json!({ "issuing_chain": chain.iter().map(|c| super::b64(c)).collect::<Vec<_>>(), "vk_sha256": vk_sha256, "curve": curve, "token": super::b64(&token) });
+                let public = match &issuers {
+                    None => serde_json::to_vec(&inputs.public)?,
+                    Some(tree) => serde_json::to_vec(&HiddenPublicInputs { claim: inputs.public.claim.clone(), issuer_root: tree.root.clone(), time: inputs.public.time, imprint: inputs.public.imprint.clone() })?,
+                };
+                std::fs::write(work_dir.join("public.json"), public)?;
+                let context = json!({
+                    "issuing_chain": disclosed_chain.iter().map(|c| super::b64(c)).collect::<Vec<_>>(),
+                    "issuers": issuers.as_ref().map(|t| json!({ "root": t.root, "list": t.list })),
+                    "vk_sha256": vk_sha256, "curve": curve, "token": super::b64(&token),
+                });
                 Ok(std::fs::write(work_dir.join("context.json"), serde_json::to_vec(&context)?)?)
             })?;
             let tbs_len = original.signer_certificate()?.get(6..8).map(|b| 4 + (b[0] as usize) * 256 + b[1] as usize).unwrap_or(0);
@@ -186,6 +221,10 @@ pub fn phase(name: &str, work_dir: &Path, zk_root: &Path) -> Result<()> {
             let cose = timed(&mut steps, "encode_signature", || {
                 let signature = ZkSignature {
                     issuing_chain: context["issuing_chain"].as_array().ok_or_else(|| anyhow!("no chain"))?.iter().map(decode).collect::<Result<_>>()?,
+                    issuers: context["issuers"].as_object().map(|t| IssuerTreeRef {
+                        root: t["root"].as_str().unwrap_or_default().to_string(),
+                        list: t["list"].as_str().unwrap_or_default().to_string(),
+                    }),
                     vk_sha256: context["vk_sha256"].as_str().unwrap_or_default().to_string(),
                     curve: context["curve"].as_str().unwrap_or(DEFAULT_CURVE).to_string(),
                     time_stamp_token: decode(&context["token"])?,
@@ -369,6 +408,7 @@ pub fn measure(
     keys: Option<&Path>,
     key_loading: KeyLoading,
     curve: &str,
+    hide_issuer: bool,
 ) -> Result<Value> {
     let files = key_loading.prover_files();
     let reps = PROVE_REPS;
@@ -377,7 +417,7 @@ pub fn measure(
     let keys = paths.keys.clone();
     let phase_cmd = |name: &str| {
         let mut cmd = Command::new(exe);
-        cmd.args(["phase", name, "--work-dir"]).arg(work_dir).arg("--zk-root").arg(zk_root);
+        cmd.args(["phase", name, "--work-dir"]).arg(work_dir).arg("--zk-root").arg(zk_root).env("C2PA_ZK_GNARK", gnark);
         cmd
     };
     let gnark_cmd = |args: &[&std::ffi::OsStr]| {
@@ -392,10 +432,14 @@ pub fn measure(
         Ok(())
     };
     let (inputs, public, proof) = (work_dir.join("inputs.json"), work_dir.join("public.json"), work_dir.join("proof.bin"));
-    let prove_args = [
+    let issuers_pem = work_dir.join("eligible-issuers.pem");
+    let mut prove_args: Vec<&std::ffi::OsStr> = vec![
         "prove".as_ref(), "--keys".as_ref(), keys.as_os_str(), "--input".as_ref(), inputs.as_os_str(), "--proof".as_ref(), proof.as_os_str(),
         "--pk-format".as_ref(), key_loading.format.as_ref(), "--pk-check".as_ref(), key_loading.check.as_ref(),
     ];
+    if hide_issuer {
+        prove_args.extend(["--issuers".as_ref(), issuers_pem.as_os_str()]);
+    }
     let verify_args = ["verify".as_ref(), "--keys".as_ref(), keys.as_os_str(), "--public".as_ref(), public.as_os_str(), "--proof".as_ref(), proof.as_os_str()];
 
     if external.is_none() {
@@ -406,7 +450,12 @@ pub fn measure(
     if keys_given(work_dir, &keys) {
         phases.push(json!({ "name": "setup", "category": "one-time", "skipped": "reused existing keys" }));
     } else {
-        phases.push(gnark_phase("setup", "one-time", &mut gnark_cmd(&["setup".as_ref(), "--keys".as_ref(), keys.as_os_str(), "--curve".as_ref(), curve.as_ref()]))?);
+        let statement = if hide_issuer { VARIANT_HIDDEN_ISSUER } else { "disclosed" };
+        phases.push(gnark_phase("setup", "one-time", &mut gnark_cmd(&["setup".as_ref(), "--keys".as_ref(), keys.as_os_str(), "--curve".as_ref(), curve.as_ref(), "--statement".as_ref(), statement.as_ref()]))?);
+    }
+    let keys_variant = keys_manifest(&keys)?["variant"].as_str().unwrap_or("disclosed").to_string();
+    if hide_issuer != (keys_variant == VARIANT_HIDDEN_ISSUER) {
+        bail!("--hide-issuer {} but the keys in {} are for the {keys_variant} statement", if hide_issuer { "given" } else { "not given" }, keys.display());
     }
     run_phase(&mut phases, "prepare", "anonymization", &mut phase_cmd("tp-prepare"))?;
 
@@ -414,16 +463,16 @@ pub fn measure(
     phases.push(gnark_phase("self_verify", "anonymization", &mut gnark_cmd(&verify_args))?);
     run_phase(&mut phases, "package", "anonymization", &mut phase_cmd("tp-package"))?;
     phases.push(gnark_phase("verify", "verification", &mut gnark_cmd(&verify_args))?);
-    run_phase(
-        &mut phases,
-        "verify_cli",
-        "verification-full",
-        Command::new(exe.with_file_name("c2pa-x509-zk-verify"))
-            .arg("--input").arg(&paths.anonymized)
-            .arg("--trust-list").arg(&paths.trust_list)
-            .arg("--tsa-trust-list").arg(&paths.tsa_trust_list)
-            .arg("--keys").arg(&keys).arg("--gnark").arg(gnark),
-    )?;
+    let mut verify_cli = Command::new(exe.with_file_name("c2pa-x509-zk-verify"));
+    verify_cli
+        .arg("--input").arg(&paths.anonymized)
+        .arg("--trust-list").arg(&paths.trust_list)
+        .arg("--tsa-trust-list").arg(&paths.tsa_trust_list)
+        .arg("--keys").arg(&keys).arg("--gnark").arg(gnark);
+    if hide_issuer {
+        verify_cli.arg("--issuer-policy").arg(work_dir.join("policy.json"));
+    }
+    run_phase(&mut phases, "verify_cli", "verification-full", &mut verify_cli)?;
     // Warm runs: read the files once so they are resident, then prove.
     for file in files {
         std::io::copy(&mut std::fs::File::open(keys.join(file))?, &mut std::io::sink())?;
@@ -450,7 +499,8 @@ pub fn measure(
             "proof_system": "Groth16 (gnark v0.16.4, native Go witness solving, one BSB22 commitment)",
             "proving_key": { "format": key_loading.format, "point_checks": key_loading.check, "file_sha256_checked": true },
             "curve": manifest["curve"].as_str().unwrap_or(DEFAULT_CURVE),
-            "circuit": "gnark/statement (third-party/1)",
+            "circuit": if hide_issuer { "gnark/statement HiddenIssuerCircuit (third-party-hidden-issuer/1)" } else { "gnark/statement (third-party/1)" },
+            "issuer": if hide_issuer { json!({ "hidden": true, "tree": "issuertree format 1 (Poseidon2, depth 8)", "entries": prepare["issuer_tree_entries"] }) } else { json!({ "hidden": false }) },
         },
         "statement": STATEMENT,
         "accounting": ACCOUNTING,

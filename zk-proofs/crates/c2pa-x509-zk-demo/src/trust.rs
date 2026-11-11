@@ -121,7 +121,7 @@ pub fn validate_issuing_chain(chain: &[Vec<u8>], trust: &TrustList, at: u64) -> 
     }
     for (i, der) in chain.iter().enumerate() {
         let cert = parse(der)?;
-        check_ca(&cert, at, i).with_context(|| format!("issuing chain certificate {i}"))?;
+        check_ca(&cert, Some(at), i).with_context(|| format!("issuing chain certificate {i}"))?;
         if trust.is_anchor(der) {
             return Ok(chain[..=i].to_vec());
         }
@@ -134,7 +134,7 @@ pub fn validate_issuing_chain(chain: &[Vec<u8>], trust: &TrustList, at: u64) -> 
                 // path is valid if any of them is a valid anchor for it.
                 let mut last_err = None;
                 for anchor in trust.anchors.iter().filter(|a| verify_issued_by(der, a).is_ok()) {
-                    match check_ca(&parse(anchor)?, at, chain.len()) {
+                    match check_ca(&parse(anchor)?, Some(at), chain.len()) {
                         Ok(()) => return Ok(chain.to_vec()),
                         Err(e) => last_err = Some(e.context("trust anchor")),
                     }
@@ -250,7 +250,7 @@ const CLAIM_SIGNING_CA_EKUS: [&str; 5] = [
 /// with no unrecognized critical extension, an EKU (if any) that allows C2PA
 /// claim signing, and a path-length constraint (if any) allowing `cas_below`
 /// CA certificates between it and the signer.
-fn check_ca(cert: &Certificate, at: u64, cas_below: usize) -> Result<()> {
+fn check_ca(cert: &Certificate, at: Option<u64>, cas_below: usize) -> Result<()> {
     use const_oid::db::rfc5280::{
         ID_CE_AUTHORITY_KEY_IDENTIFIER, ID_CE_BASIC_CONSTRAINTS, ID_CE_EXT_KEY_USAGE, ID_CE_KEY_USAGE,
         ID_CE_SUBJECT_KEY_IDENTIFIER,
@@ -309,12 +309,41 @@ fn check_ca(cert: &Certificate, at: u64, cas_below: usize) -> Result<()> {
         bail!("{}: unsupported critical extension {}", tbs.subject, ext.extn_id);
     }
 
+    let Some(at) = at else { return Ok(()) };
     let not_before = tbs.validity.not_before.to_unix_duration().as_secs();
     let not_after = tbs.validity.not_after.to_unix_duration().as_secs();
     if at < not_before || at > not_after {
         bail!("{} is not valid at the verification time", tbs.subject);
     }
     Ok(())
+}
+
+/// The trust list's certificates eligible as hidden issuers (roadmap H4,
+/// HIDING-THE-ISSUER.md, I1), and the reasons the others are not: the CA
+/// check applied to an issuing CA (`check_ca`) except validity, which the
+/// hidden-issuer statement checks at the attested time, in the circuit; and
+/// no name constraints or policy constraints, critical or not, which
+/// constrain the signer's subject, hidden from the verifier. The key type is
+/// filtered by the tree builder (P-384 for the current statement).
+pub fn eligible_issuers(trust: &TrustList) -> (Vec<Vec<u8>>, Vec<String>) {
+    use const_oid::db::rfc5280::{ID_CE_NAME_CONSTRAINTS, ID_CE_POLICY_CONSTRAINTS};
+    let (mut eligible, mut excluded) = (Vec::new(), Vec::new());
+    for der in &trust.anchors {
+        let checked = parse(der).and_then(|cert| {
+            check_ca(&cert, None, 0)?;
+            let subject_constraint = cert.tbs_certificate.extensions.as_deref().unwrap_or_default().iter()
+                .find(|e| e.extn_id == ID_CE_NAME_CONSTRAINTS || e.extn_id == ID_CE_POLICY_CONSTRAINTS);
+            if let Some(ext) = subject_constraint {
+                bail!("{}: carries {} (name or policy constraints cannot be checked against a hidden subject)", cert.tbs_certificate.subject, ext.extn_id);
+            }
+            Ok(())
+        });
+        match checked {
+            Ok(()) => eligible.push(der.clone()),
+            Err(e) => excluded.push(e.to_string()),
+        }
+    }
+    (eligible, excluded)
 }
 
 /// The original DER bytes of the TBSCertificate (the first element of the
@@ -442,6 +471,31 @@ mod tests {
         run(&["x509", "-req", "-in", &csr, "-CA", &format!("{issuer}.pem"), "-CAkey", &format!("{issuer}.key"),
               "-CAcreateserial", "-sha256", "-days", "30", "-extfile", &ext, "-outform", "DER", "-out", &der]);
         pki.read(&der)
+    }
+
+    /// H4 eligibility: the CA check without validity, and no name or policy
+    /// constraints, critical or not.
+    #[test]
+    fn eligible_issuers_apply_the_ca_check_and_exclude_subject_constraints() {
+        let pki = TestPki::generate("Trust Test");
+        let ca = "basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign\n";
+        let plain = issue_ca(&pki, "plain-ca", "root", ca);
+        let not_ca = issue_ca(&pki, "not-a-ca", "root", "basicConstraints=critical,CA:FALSE\n");
+        let no_cert_sign = issue_ca(&pki, "no-cert-sign", "root", "basicConstraints=critical,CA:TRUE\nkeyUsage=critical,digitalSignature\n");
+        let names = issue_ca(&pki, "name-constrained", "root", &format!("{ca}nameConstraints=permitted;DNS:example.com\n"));
+        let names_critical = issue_ca(&pki, "name-constrained-critical", "root", &format!("{ca}nameConstraints=critical,permitted;DNS:example.com\n"));
+        let policy = issue_ca(&pki, "policy-constrained", "root", &format!("{ca}policyConstraints=requireExplicitPolicy:0\n"));
+        let trust = TrustList {
+            anchors: vec![plain.clone(), not_ca, no_cert_sign, names, names_critical, policy, pki.read("issuing-ca.der")],
+            skipped: 0,
+        };
+        let (eligible, excluded) = eligible_issuers(&trust);
+        assert_eq!(eligible, vec![plain, pki.read("issuing-ca.der")], "excluded: {excluded:?}");
+        assert_eq!(excluded.len(), 5, "{excluded:?}");
+        // Non-critical name and policy constraints are excluded by the new
+        // rule; critical name constraints already by the CA check.
+        assert_eq!(excluded.iter().filter(|e| e.contains("name or policy constraints")).count(), 2, "{excluded:?}");
+        assert!(excluded.iter().any(|e| e.contains("name-constrained-critical") && e.contains("unsupported critical extension")), "{excluded:?}");
     }
 
     #[test]

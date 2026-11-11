@@ -70,7 +70,7 @@ var otherCAs = sync.OnceValue(func() [][]byte {
 // treeWith builds the issuer tree over the given CA certificates and the others.
 func treeWith(t *testing.T, curve ecc.ID, certs ...[]byte) *issuertree.Tree {
 	t.Helper()
-	tree, _, err := issuertree.Build(curve, append(append([][]byte{}, otherCAs()...), certs...))
+	tree, _, err := issuertree.Build(curve, issuertree.RoleIssuer, append(append([][]byte{}, otherCAs()...), certs...))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +283,7 @@ func singleEntryTree(t *testing.T, curve ecc.ID, ca issuertree.CA) (*big.Int, is
 		p.Siblings[d] = sibling
 		sibling, _ = h.Hash(big.NewInt(2), sibling, sibling)
 	}
-	root, err := issuertree.VerifyWith(h, p)
+	root, err := issuertree.VerifyWith(h, issuertree.RoleIssuer, p)
 	if err != nil {
 		t.Fatal(err)
 	}

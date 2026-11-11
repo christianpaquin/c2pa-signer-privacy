@@ -56,6 +56,9 @@ pub struct StatementInputs {
     pub protected: String,
     /// The original claim signature, r || s (base64).
     pub signature: String,
+    /// The original time-stamp token (base64), for the statement that hides
+    /// it (I6); the other statements ignore it.
+    pub time_stamp_token: String,
 }
 
 fn b64(bytes: &[u8]) -> String {
@@ -112,6 +115,7 @@ fn prepare(original: &OriginalSignature, trust: &TrustList) -> Result<(Statement
         },
         protected: b64(&original.protected),
         signature: b64(&original.signature),
+        time_stamp_token: b64(&ts.token),
     };
     Ok((inputs, chain))
 }
@@ -235,15 +239,21 @@ impl Prover {
         Ok(self.manifest()?["variant"].as_str().unwrap_or(VARIANT_DISCLOSED).to_string())
     }
 
-    /// The issuer tree over the eligible certificates in `issuers` (PEM),
-    /// built by the CLI with the key set's curve.
-    pub fn tree(&self, issuers: &Path) -> Result<IssuerTree> {
+    /// The tree over the certificates in `issuers` (PEM), built by the CLI
+    /// with the key set's curve, in the role of `purpose` (its leaf tag:
+    /// HIDING-THE-TIME-STAMP.md, T4). Only `purpose_tree` calls it, with
+    /// certificates filtered for the same purpose.
+    fn tree(&self, issuers: &Path, purpose: Purpose) -> Result<IssuerTree> {
         let curve = self.curve()?;
-        let out = self.run(&["tree".as_ref(), "--issuers".as_ref(), issuers.as_os_str(), "--curve".as_ref(), curve.as_ref()])?;
+        let role = tree_role(purpose);
+        let out = self.run(&["tree".as_ref(), "--issuers".as_ref(), issuers.as_os_str(), "--curve".as_ref(), curve.as_ref(), "--role".as_ref(), role.as_ref()])?;
         if !out.status.success() {
             bail!("building the issuer tree failed: {}", String::from_utf8_lossy(&out.stderr).trim());
         }
         let tree: serde_json::Value = serde_json::from_slice(&out.stdout).context("the CLI's tree output is not JSON")?;
+        if tree["role"].as_str() != Some(role) {
+            bail!("the CLI built a {:?} tree, not a {role} tree", tree["role"]);
+        }
         let root = tree["root"].as_str().ok_or_else(|| anyhow!("the CLI's tree has no root"))?.to_string();
         if !is_canonical_root(&root) {
             bail!("the CLI's tree root is not canonical hex");
@@ -303,9 +313,27 @@ pub struct IssuerTree {
     pub entries: usize,
 }
 
+/// The tree role (leaf tag) for a purpose: issuer trees for claim signing,
+/// TSA trees for time stamping.
+fn tree_role(purpose: Purpose) -> &'static str {
+    match purpose {
+        Purpose::ClaimSigning => "issuer",
+        Purpose::TimeStamping => "tsa",
+    }
+}
+
+/// The file name of a purpose's eligible issuers in a working directory: one
+/// per purpose, so that both trees' lists can coexist in one directory.
+pub fn eligible_issuers_file(purpose: Purpose) -> &'static str {
+    match purpose {
+        Purpose::ClaimSigning => "eligible-issuers.pem",
+        Purpose::TimeStamping => "eligible-tsa-issuers.pem",
+    }
+}
+
 /// The eligible issuers of a trust list for `purpose` (`eligible_issuers`),
-/// written as PEM into `dir`, for the CLI.
-pub fn eligible_issuers_pem(trust: &TrustList, purpose: Purpose, dir: &Path) -> Result<PathBuf> {
+/// written as PEM into `dir` (`eligible_issuers_file`), for the CLI.
+fn eligible_issuers_pem(trust: &TrustList, purpose: Purpose, dir: &Path) -> Result<PathBuf> {
     let (eligible, _) = eligible_issuers(trust, purpose);
     if eligible.is_empty() {
         bail!("no certificate of the trust list is eligible as a hidden issuer");
@@ -319,16 +347,27 @@ pub fn eligible_issuers_pem(trust: &TrustList, purpose: Purpose, dir: &Path) -> 
         }
         pem.push_str("-----END CERTIFICATE-----\n");
     }
-    let path = dir.join("eligible-issuers.pem");
+    let path = dir.join(eligible_issuers_file(purpose));
     std::fs::write(&path, pem)?;
     Ok(path)
 }
 
-/// The issuer tree over a trust list's eligible issuers, as the verifier and
-/// the anonymizer build it.
+/// The tree for `purpose` over a trust list: the certificates eligible for
+/// that purpose, hashed in that purpose's role. The one way trees are built,
+/// so that the eligibility filter and the hashing domain cannot disagree. The
+/// eligible certificates are also written as PEM into `dir`, for the prover's
+/// --issuers or --tsa-issuers. The role's tag separates the domains against
+/// root and path mix-ups; it cannot correct a wrongly filtered list.
+pub fn purpose_tree(trust: &TrustList, purpose: Purpose, prover: &Prover, dir: &Path) -> Result<(IssuerTree, PathBuf)> {
+    let pem = eligible_issuers_pem(trust, purpose, dir)?;
+    Ok((prover.tree(&pem, purpose)?, pem))
+}
+
+/// The issuer tree (claim signing) over a trust list, as the verifier and the
+/// anonymizer build it.
 pub fn issuer_tree(trust: &TrustList, prover: &Prover) -> Result<IssuerTree> {
     let dir = tempfile::tempdir()?;
-    prover.tree(&eligible_issuers_pem(trust, Purpose::ClaimSigning, dir.path())?)
+    Ok(purpose_tree(trust, Purpose::ClaimSigning, prover, dir.path())?.0)
 }
 
 /// A trust-list snapshot the verifier approves for hidden issuers, with the
@@ -491,8 +530,7 @@ pub fn anonymize(input: &Path, output: &Path, trust: &TrustList, prover: &Prover
             if !eligible_issuers(trust, Purpose::ClaimSigning).0.contains(&issuing_chain[0]) {
                 bail!("the issuing CA is not eligible as a hidden issuer (HIDING-THE-ISSUER.md, I1)");
             }
-            let pem = eligible_issuers_pem(trust, Purpose::ClaimSigning, dir.path())?;
-            let tree = prover.tree(&pem)?;
+            let (tree, pem) = purpose_tree(trust, Purpose::ClaimSigning, prover, dir.path())?;
             let report = HiddenIssuerReport { snapshot: list.to_string(), root: tree.root.clone(), anonymity_set: tree.entries };
             (Some(IssuerTreeRef { root: tree.root, list: list.to_string() }), Some(report), Some(pem))
         }

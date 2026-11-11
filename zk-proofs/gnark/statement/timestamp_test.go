@@ -81,6 +81,7 @@ type tokenOptions struct {
 	changeTST   bool                    // TSTInfo changed after the attributes were made
 	changeSig   bool                    // the TSA's signature changed
 	changeCASig bool                    // the TSA CA's signature changed
+	imprint     []byte                  // the imprint (default: a fixed digest)
 }
 
 type tokenFixture struct {
@@ -180,6 +181,9 @@ func newToken(t *testing.T, opt tokenOptions) *tokenFixture {
 		genTime = defaultGenTime
 	}
 	imprint := sha256.Sum256([]byte("the original signature's countersignature structure"))
+	if opt.imprint != nil {
+		copy(imprint[:], opt.imprint)
+	}
 	gen := genTime.UTC().Format("20060102150405Z")
 	var tst []byte
 	if opt.tstInfo != nil {

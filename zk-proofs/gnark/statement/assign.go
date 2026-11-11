@@ -37,6 +37,9 @@ type Inputs struct {
 	Public
 	Protected []byte `json:"protected"` // the original protected header
 	Signature []byte `json:"signature"` // the original claim signature, r || s
+	// The original time-stamp token (sigTst2), for the statement that hides
+	// it (I6); the other statements do not use it.
+	TimeStampToken []byte `json:"time_stamp_token,omitempty"`
 }
 
 // Assign builds the full assignment. It checks only what it needs to build

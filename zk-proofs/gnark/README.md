@@ -73,6 +73,20 @@ A second statement, designed in [HIDING-THE-ISSUER.md](../HIDING-THE-ISSUER.md):
 
 `--issuers` holds the eligible CA certificates (PEM); deciding eligibility (the CA checks, excluding name and policy constraints) is the caller's, as is approving the root: `hidden-public.json` is `statement.HiddenPublic`, with `issuer_root` instead of the issuing CA's certificate: canonical lowercase hex below the curve's scalar field modulus, the only accepted form, as `tree` prints it. The prover builds the tree from `--issuers` and refuses if its issuing CA is not in it; certificates with the same key and validity share a leaf, and each of them proves.
 
+### Hidden issuer and time stamp (I6, opt-in)
+
+A third statement, `hidden-all` ([HIDING-THE-TIME-STAMP.md](../HIDING-THE-TIME-STAMP.md)): the hidden-issuer statement with the time-stamp token verified in the circuit instead of disclosed. Public: the claim, the issuer tree's root, the TSA tree's root, and the window `[t1, t2)`; the exact time, the imprint, the token, and the TSA certificate are private. Each tree's role is fixed by the statement: the issuing CA's leaf is hashed with tag 1, the TSA CA's with tag 4.
+
+```bash
+../target/c2pa-zk-gnark tree  --issuers tsa-issuers.pem --role tsa      # a TSA tree's root
+../target/c2pa-zk-gnark setup --keys keys-all/ --statement hidden-all
+../target/c2pa-zk-gnark prove --keys keys-all/ --input inputs.json --proof proof.bin \
+    --issuers issuers.pem --tsa-issuers tsa-issuers.pem [--window 86400]
+../target/c2pa-zk-gnark verify --keys keys-all/ --public all-public.json --proof proof.bin
+```
+
+`inputs.json` must carry the token (`time_stamp_token`, as `c2pa-x509-zk-statement-inputs` writes it); `--tsa-issuers` holds the CA certificates eligible for time stamping, as `--issuers` those eligible for claim signing (filtering each list for its purpose is the caller's: in the Rust crate, `third_party::purpose_tree`). The prover finds the TSA CA as the TSA tree's entry whose key signed the token's TSA certificate, valid at `genTime`, and refuses otherwise. `--window` is the window's granularity in seconds (aligned to the Unix epoch: UTC days by default). `all-public.json` is `statement.HiddenAllPublic`: `claim`, `issuer_root`, `tsa_root`, `t1`, `t2`.
+
 ## Tests
 
 ```bash
@@ -93,6 +107,8 @@ C2PA_ZK_GROTH16=1 go test ./...     # adds a real setup, proof, and verification
   - TSA certificate: rejected for an EKU not critical, with another purpose, without time stamping, absent, or duplicated; a CA certificate; issued by another CA; a changed CA signature; not yet valid or expired at `genTime`;
   - the window `[t₁, t₂)`: midnight belongs to the day it starts, a one-second window holds one second; `genTime = t₂`, before `t₁`, or in an empty window is rejected; endpoints are integers in `[0, 2³⁴)`: `p − 1` (which would act as −1) or `2³⁴` for either is rejected, the widest window in range accepted.
   - `C2PA_ZK_TOKENS=token.der:tsa-ca.der[,...]` checks tokens taken from assets (the mirror fixture's and a real device photo's are accepted).
+- Tree roles: the same CAs, eligible for both purposes, give different issuer and TSA roots on both curves, and a path from one role's tree does not verify as the other's; issuer roots are unchanged by the extension (format 1, tag 1).
+- The statement hiding the issuer and the token (`HiddenAllCircuit`), on both curves: accepted with the issuing CA in an issuer tree of seven and the TSA CA in a TSA tree of seven; rejected when the TSA CA is proven in an issuer-role tree of the same CAs, or the issuing CA in a TSA-role tree (each with a valid path in its own tree), with the roots swapped, for a token over another imprint (with or without that imprint), a token at another time than the statement's, `genTime = t2`, a TSA tree without the TSA CA, a TSA CA expired or not yet valid at `genTime`, or a changed claim byte. The prover refuses trees in the wrong roles, a `genTime` outside the window or not the inputs' time; the verifier's public inputs refuse an empty or out-of-range window and a non-canonical root.
 - Components: variable-length SHA-384 against `crypto/sha512` at padding boundaries; UTCTime conversion against Go's `time` (leap days, the 2049 limit) and malformed dates.
 
 Certificates in the tests are built field by field with `encoding/asn1`, since `crypto/x509` refuses to create some of the malformed ones. From the Rust side, `tests/third_party_fixtures.rs` checks that the inputs exported from a real c2pa-signed asset satisfy the statement at the default sizes and that a tampered time does not (`C2PA_ZK_GO=$(which go) cargo test --release --test third_party_fixtures -- --ignored`).

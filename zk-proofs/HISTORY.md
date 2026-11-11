@@ -23,6 +23,7 @@ How the X.509 + ZK prototype evolved, for reporting. Details live in the pull re
 | RSA cost | Nov 10 | #30 | RSA PKCS#1 v1.5 and PS256 measured in gnark (E1) |
 | Scope | Nov 10 | #31, #32 | Ingredient manifests as an open question (E8); TIFF-based formats refused |
 | Anonymize, then edit | Nov 10 | #33 | An anonymized asset survives a resize as an ingredient, with its proof still verifying; the proof covers the ingredient's signature, not the link to it, which standard validation checks; c2pa-rs rates the edited asset Invalid either way (E8) |
+| Hiding the issuer (design) | Nov 11 | #34 | H4 proposed: membership of the issuing CA in a verifier-approved Merkle root, opt-in; limited gain while the claim and the time-stamp token name the organization |
 
 ## Defects found in the original prototype
 
@@ -43,6 +44,7 @@ Recorded in [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIONS.md) (D1–D7) and
 - **Replace the signature in place** (Q1): the original claim and its hard binding stay valid, with nothing added to the asset.
 - **A trusted time stamp is required** (D7, Q6): validity at the time a TSA attested the signature, as C2PA defines it; the token is public, so the TSA operator can link the output to the original (Q7).
 - **gnark for E2b** (#22), after E1 measured ECDSA at a thirteenth of circom's constraints and P-384 available.
+- **The hidden issuer is opt-in, under verifier-approved roots** (#34): a root supplied by the asset alone proves nothing, and an old root proves trust only within its snapshot's period. Without `x5chain`, c2pa-rs 0.77 does not read a manifest at all, so removing the certificate also affects the verifier's own assertion and hard-binding checks ([HIDING-THE-ISSUER.md](HIDING-THE-ISSUER.md)).
 - **Single-manifest assets only** (#31): later claims commit to their ingredients' signatures, so an earlier signer cannot be anonymized afterwards without breaking the provenance links; anonymizing before editing works with c2pa-rs, at the cost of standard validators rating the edited asset invalid ([E8](README.md#e8-ingredient-manifests)).
 - **V0 kept as a frozen baseline** rather than retired, so the comparison can be reproduced. Moving past it was a decision (Q2), not a dominance result: the two disclose different information and accept different inputs.
 

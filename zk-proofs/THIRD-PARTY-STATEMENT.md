@@ -55,7 +55,7 @@ The verifier never sees `P`, so it cannot recompute any hash over the signed byt
 |---|---|---|
 | Signer certificate, key, serial, subject, exact validity | No | Private inputs. The exact validity period would be a fingerprint: the real sample's certificate was issued an hour before the photo |
 | Original signature | No | With the claim and `P`, it would allow recovering the signer's key |
-| Issuing CA chain | Yes | [D4](ARCHITECTURE-DECISIONS.md#d4-where-the-issuing-ca-chain-lives-decided); the anonymity set is that CA's certificate holders ([H4](README.md#h4-hiding-the-issuing-ca)) |
+| Issuing CA chain | Yes | [D4](ARCHITECTURE-DECISIONS.md#d4-where-the-issuing-ca-chain-lives-decided); the anonymity set is that CA's certificate holders ([H4](README.md#h4-hiding-the-issuing-ca), design in [HIDING-THE-ISSUER.md](HIDING-THE-ISSUER.md)) |
 | The claim and its assertions | Yes | Unchanged, including `claim_generator_info` (software name and version), `instanceID`, and the actions (for example, "Created by" a named camera app) ([Q9](#q9-assertions-and-metadata)) |
 | Time `t` and the time-stamp token | Yes, with a token | The token reveals the TSA and the attested time; its imprint is a hash over private data, but the TSA operator can match it ([Q7](#q7-time-stamp-threat-model)) |
 | Stapled OCSP responses | No | Removed: they identify the signer certificate ([Q8](#q8-revocation)) |

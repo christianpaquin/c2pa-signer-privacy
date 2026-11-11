@@ -697,6 +697,14 @@ fn mirror_time_stamp_has_the_real_profile() {
         token.windows(cert.len()).any(|w| w == cert.as_slice())
     };
     assert!(has("tsa.der") && has("tsa-ca.der") && !has("tsa-root.der"));
+
+    // The algorithms: a P-256 TSA key, a P-384 TSA CA key, ECDSA-SHA384 between them.
+    let parse = |name: &str| x509_cert::Certificate::from_der(&std::fs::read(fixture.pki(name)).unwrap()).unwrap();
+    let (tsa_cert, tsa_ca_cert) = (parse("tsa.der"), parse("tsa-ca.der"));
+    assert_eq!(key_curve(&tsa_cert), const_oid::db::rfc5912::SECP_256_R_1);
+    assert_eq!(key_curve(&tsa_ca_cert), const_oid::db::rfc5912::SECP_384_R_1);
+    assert_eq!(tsa_cert.signature_algorithm.oid, const_oid::db::rfc5912::ECDSA_WITH_SHA_384);
+
     let tsa_ca = std::fs::read(fixture.pki("tsa-ca.der")).unwrap();
     let tsa_trust = TrustList::from_file(&fixture.pki("tsa-trust-list.pem")).unwrap();
     assert!(tsa_trust.is_anchor(&tsa_ca));

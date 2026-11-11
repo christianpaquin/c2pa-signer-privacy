@@ -103,7 +103,7 @@ Per-key-type trees follow from fixed circuits: an RSA-4096 CA would need the RSA
 
 For the gain of [What H4 can and cannot hide](#what-h4-can-and-cannot-hide) to hold for organizations that run their own TSA, the token must be hidden too ([Q7](THIRD-PARTY-STATEMENT.md#q7-time-stamp-threat-model), "hidden token"). That means verifying in the circuit the TSA's signature over the token's signed attributes, the TSA certificate under a CA on the TSA trust list (the same membership proof, over a second tree), and parsing the token's `TSTInfo` for `t` and the imprint. Estimated from E1 and E2b, not measured: about 2–2.5M constraints (a CA signature over the TSA certificate, the TSA's signature, and hashes over 1–2 KB of token), roughly +50% on V1.
 
-- **Proposed: separate step.** H4 first, with the public token, stated as a limitation; the hidden token as a second experiment, since its cost is substantial and its value depends on who runs the TSA.
+- **Proposed: separate step.** H4 first, with the public token, stated as a limitation; the hidden token as a second experiment, since its cost is substantial and its value depends on who runs the TSA. Designed in [HIDING-THE-TIME-STAMP.md](HIDING-THE-TIME-STAMP.md).
 
 ### I7. Disclosed or hidden, per asset
 

@@ -24,6 +24,7 @@ How the X.509 + ZK prototype evolved, for reporting. Details live in the pull re
 | Scope | Nov 10 | #31, #32 | Ingredient manifests as an open question (E8); TIFF-based formats refused |
 | Anonymize, then edit | Nov 10 | #33 | An anonymized asset survives a resize as an ingredient, with its proof still verifying; the proof covers the ingredient's signature, not the link to it, which standard validation checks; c2pa-rs rates the edited asset Invalid either way (E8) |
 | Hiding the issuer (design) | Nov 11 | #34 | H4 proposed: membership of the issuing CA in a verifier-approved Merkle root, opt-in; limited gain while the claim and the time-stamp token name the organization |
+| Hiding the issuer | Nov 11 | #35, #36 | H4 implemented as an opt-in: the issuer tree and statement in gnark, the anonymizer, and the verifier's policy; no measurable cost |
 
 ## Defects found in the original prototype
 
@@ -64,6 +65,7 @@ All on the same laptop ([reference machine](FEASIBILITY.md#reference-machine)); 
 | [V1, key loading variants](bench/results/2026-11-06-e6/) (E6) | Same as V1 | 77 s → **25–28 s** | 7.4 → 9.2 GiB | Raw or dumped proving key, points not validated on load, behind its setup hash. Adopted as an opt-in raw path with provenance records and streamed loading: 49 s against 97 s in a slower session, 6.7 GiB |
 | [V1 on BLS12-381](bench/results/2026-11-09-e7/) (E7) | Same, on a ~120-bit curve (curve-level estimate; option, BN254 stays default) | 302 s; **88 s** with the raw key path | 8.5 GiB | BN254 in the same session: 72 s and 33 s; raw BLS12-381 keys parse slowly even unchecked |
 | [E1 RSA primitives](bench/results/2026-11-10-e1-rsa-gnark-review.json) (#30) | RSA CA and PS256 signatures, next to ECDSA, in gnark | 4.6 s for an RSA-4096 CA over a 1.5 KB TBS (key resident; not comparable) | 3.4 GiB | RSA-4096 costs about as much as ECDSA P-256 (exponent 65537); RSA CAs 0.75–0.86× P-384 ones; PS256 3.5–6.0× ES256, mostly MGF1 hashing |
+| [V1, hidden issuer](bench/results/2026-11-11-h4/) (H4) | Same, with the issuing CA hidden among the trust list's eligible CAs (opt-in) | 107 s against 104 s for V1 in the same session (within noise) | 6.7 GiB | The machine slowed by ~40% within the session without suspending; compared with the adjacent run |
 
 ## Lessons
 
@@ -72,6 +74,6 @@ All on the same laptop ([reference machine](FEASIBILITY.md#reference-machine)); 
 - **Test what a check rejects, and why.** Proofs from bad witnesses and the forgery both hid behind checks that passed for the wrong reason. Negative tests now assert the reason for rejection, and positive controls show the check can pass.
 - **Sizing is not constraining.** A circuit with room for a 2048-bit key does not establish that the key has 2048 bits, and a value correct modulo n is not the canonical one; both must be asserted, since encodings depend on the size and time stamps cover the exact bytes (#30). Tests must also run against the compiled constraints, not only the circuit definition.
 - **Formats should leave no room for other data.** Strict decoding (exact fields, zero padding, fixed-length proof) closed places where identifying data could ride along (#23) Likewise, a value checked against a policy should have one accepted form: a tree root plus the field modulus was a valid alias of the root until refused (#35).
-- **Measure the conditions, not just the time.** Record the cache state rather than assume it, repeat runs on a noisy machine (single runs here varied by 2×), compare only under the same accounting, and keep primitive timings apart from per-asset ones (#17, #19, #21, #24).
+- **Measure the conditions, not just the time.** Record the cache state rather than assume it, repeat runs on a noisy machine (single runs here varied by 2×), compare only under the same accounting, and keep primitive timings apart from per-asset ones (#17, #19, #21, #24). A laptop that sleeps suspends the measurement with it, and one that locks may slow down: keep it awake, log a heartbeat to detect suspends, and compare only adjacent runs (#36).
 - **The proving key, not the proof, dominates.** In both stacks, loading and validating the 1 GB key costs more than proving; the cheapest remaining gain is there.
 - **Real deployments decide feasibility.** P-384 CAs, `sigTst2` time stamps, and unauthenticated EXIF were found by examining real trust lists and signed assets, not from the specification alone; designing against a real sample made the first real asset work unchanged.

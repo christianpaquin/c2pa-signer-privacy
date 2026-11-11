@@ -683,6 +683,27 @@ fn hidden_issuer_verification_follows_the_verifiers_policy() {
     assert!(err.contains("keys in") && err.contains("disclosed statement"), "{err}");
 }
 
+/// The mirror fixture's time stamp has the real profile (I6,
+/// HIDING-THE-TIME-STAMP.md): a P-256 TSA certificate issued by a listed
+/// P-384 TSA CA, both carried in the token, the root not; the TSA CA is
+/// eligible for time stamping, not for claim signing.
+#[test]
+fn mirror_time_stamp_has_the_real_profile() {
+    use c2pa_x509_zk_demo::trust::{eligible_issuers, Purpose};
+    let fixture = Fixture::new(true, true);
+    let token = fixture.original().time_stamp.unwrap().token;
+    let has = |name: &str| {
+        let cert = std::fs::read(fixture.pki(name)).unwrap();
+        token.windows(cert.len()).any(|w| w == cert.as_slice())
+    };
+    assert!(has("tsa.der") && has("tsa-ca.der") && !has("tsa-root.der"));
+    let tsa_ca = std::fs::read(fixture.pki("tsa-ca.der")).unwrap();
+    let tsa_trust = TrustList::from_file(&fixture.pki("tsa-trust-list.pem")).unwrap();
+    assert!(tsa_trust.is_anchor(&tsa_ca));
+    assert!(eligible_issuers(&tsa_trust, Purpose::TimeStamping).0.contains(&tsa_ca));
+    assert!(!eligible_issuers(&tsa_trust, Purpose::ClaimSigning).0.contains(&tsa_ca));
+}
+
 /// A policy file's snapshots reject unknown fields: a misspelled `until`
 /// must not turn an expiring approval into an indefinite one. Omitting
 /// `until` on purpose is still accepted.

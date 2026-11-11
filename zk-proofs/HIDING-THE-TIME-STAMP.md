@@ -1,6 +1,6 @@
 # I6: Hiding the Time-Stamp Token
 
-**Status: proposed, for review.** This note designs the hidden time-stamp token ([HIDING-THE-ISSUER.md, I6](HIDING-THE-ISSUER.md#i6-the-time-stamp-token); [THIRD-PARTY-STATEMENT.md, Q7](THIRD-PARTY-STATEMENT.md#q7-time-stamp-threat-model), "hidden token") before any circuit work, as the H4 note did for the issuer. Each choice is listed under [Decisions for review](#decisions-for-review) with a proposed default.
+**Status: adopted (PR #37); being implemented.** Done: the fixture's profile and eligibility by purpose (PR #38). This note designs the hidden time-stamp token ([HIDING-THE-ISSUER.md, I6](HIDING-THE-ISSUER.md#i6-the-time-stamp-token); [THIRD-PARTY-STATEMENT.md, Q7](THIRD-PARTY-STATEMENT.md#q7-time-stamp-threat-model), "hidden token") before any circuit work, as the H4 note did for the issuer. Each choice is listed under [Decisions for review](#decisions-for-review) with a proposed default.
 
 ## The problem
 
@@ -31,7 +31,7 @@ The real device-signed photo's `sigTst2` token (2,015 bytes), and the official T
 
 The time stamp's chain has the same shape as the signer's: a P-256 end-entity certificate issued, with ECDSA-SHA384, by a P-384 CA that is itself listed. The circuit's existing parts (P-384 CA signature over a TBS, P-256 ECDSA, the DER walk, the issuer tree) apply to it directly.
 
-The mirror fixture does not yet reproduce this: its TSA certificate is P-384 and issued by a listed root. It needs the real profile ([plan](#proposed-plan), step 1).
+The mirror fixture reproduces this profile (`generate-test-pki.sh --mirror`: a P-256 TSA certificate issued by a listed P-384 TSA CA, both carried in the token; [plan](#proposed-plan), step 1, done).
 
 ## The statement with a hidden token
 

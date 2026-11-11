@@ -121,7 +121,7 @@ pub fn validate_issuing_chain(chain: &[Vec<u8>], trust: &TrustList, at: u64) -> 
     }
     for (i, der) in chain.iter().enumerate() {
         let cert = parse(der)?;
-        check_ca(&cert, Some(at), i).with_context(|| format!("issuing chain certificate {i}"))?;
+        check_ca(&cert, Some(at), i, Purpose::ClaimSigning).with_context(|| format!("issuing chain certificate {i}"))?;
         if trust.is_anchor(der) {
             return Ok(chain[..=i].to_vec());
         }
@@ -134,7 +134,7 @@ pub fn validate_issuing_chain(chain: &[Vec<u8>], trust: &TrustList, at: u64) -> 
                 // path is valid if any of them is a valid anchor for it.
                 let mut last_err = None;
                 for anchor in trust.anchors.iter().filter(|a| verify_issued_by(der, a).is_ok()) {
-                    match check_ca(&parse(anchor)?, Some(at), chain.len()) {
+                    match check_ca(&parse(anchor)?, Some(at), chain.len(), Purpose::ClaimSigning) {
                         Ok(()) => return Ok(chain.to_vec()),
                         Err(e) => last_err = Some(e.context("trust anchor")),
                     }
@@ -246,11 +246,41 @@ const CLAIM_SIGNING_CA_EKUS: [&str; 5] = [
     "1.3.6.1.4.1.311.76.59.1.9",
 ];
 
+/// EKUs that let a CA issue time-stamping certificates (RFC 3161):
+/// anyExtendedKeyUsage and time stamping.
+const TIME_STAMPING_CA_EKUS: [&str; 2] = ["2.5.29.37.0", "1.3.6.1.5.5.7.3.8"];
+
+/// What a CA is trusted to issue certificates for: the purpose its extended
+/// key usage, if any, must allow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// C2PA claim signing: signer issuers (the C2PA trust list).
+    ClaimSigning,
+    /// Time stamping: TSA issuers (the C2PA TSA trust list; roadmap I6).
+    TimeStamping,
+}
+
+impl Purpose {
+    fn ca_ekus(self) -> &'static [&'static str] {
+        match self {
+            Purpose::ClaimSigning => &CLAIM_SIGNING_CA_EKUS,
+            Purpose::TimeStamping => &TIME_STAMPING_CA_EKUS,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Purpose::ClaimSigning => "C2PA claim signing",
+            Purpose::TimeStamping => "time stamping",
+        }
+    }
+}
+
 /// The certificate must be a CA that can sign certificates, valid at `at`,
-/// with no unrecognized critical extension, an EKU (if any) that allows C2PA
-/// claim signing, and a path-length constraint (if any) allowing `cas_below`
-/// CA certificates between it and the signer.
-fn check_ca(cert: &Certificate, at: Option<u64>, cas_below: usize) -> Result<()> {
+/// with no unrecognized critical extension, an EKU (if any) that allows
+/// `purpose`, and a path-length constraint (if any) allowing `cas_below`
+/// CA certificates between it and the end-entity certificate.
+fn check_ca(cert: &Certificate, at: Option<u64>, cas_below: usize, purpose: Purpose) -> Result<()> {
     use const_oid::db::rfc5280::{
         ID_CE_AUTHORITY_KEY_IDENTIFIER, ID_CE_BASIC_CONSTRAINTS, ID_CE_EXT_KEY_USAGE, ID_CE_KEY_USAGE,
         ID_CE_SUBJECT_KEY_IDENTIFIER,
@@ -286,13 +316,14 @@ fn check_ca(cert: &Certificate, at: Option<u64>, cas_below: usize) -> Result<()>
 
     // An EKU on a CA restricts the purposes it may issue for (CA/Browser
     // Forum and common practice; RFC 5280 does not define it for CAs). It
-    // must decode, and allow claim signing: anyExtendedKeyUsage, or one of the
-    // EKUs real C2PA signer certificates carry.
+    // must decode, and allow the purpose: anyExtendedKeyUsage, or one of the
+    // purpose's EKUs (for claim signing, those real C2PA signer certificates
+    // carry).
     if let Some(ext) = find(ID_CE_EXT_KEY_USAGE) {
         let eku = ExtendedKeyUsage::from_der(ext.extn_value.as_bytes())
             .map_err(|e| anyhow!("{}: invalid extendedKeyUsage: {e}", tbs.subject))?;
-        if !eku.0.iter().any(|oid| CLAIM_SIGNING_CA_EKUS.contains(&oid.to_string().as_str())) {
-            bail!("{}: extendedKeyUsage does not allow C2PA claim signing", tbs.subject);
+        if !eku.0.iter().any(|oid| purpose.ca_ekus().contains(&oid.to_string().as_str())) {
+            bail!("{}: extendedKeyUsage does not allow {}", tbs.subject, purpose.name());
         }
     }
 
@@ -318,19 +349,20 @@ fn check_ca(cert: &Certificate, at: Option<u64>, cas_below: usize) -> Result<()>
     Ok(())
 }
 
-/// The trust list's certificates eligible as hidden issuers (roadmap H4,
-/// HIDING-THE-ISSUER.md, I1), and the reasons the others are not: the CA
-/// check applied to an issuing CA (`check_ca`) except validity, which the
-/// hidden-issuer statement checks at the attested time, in the circuit; and
-/// no name constraints or policy constraints, critical or not, which
-/// constrain the signer's subject, hidden from the verifier. The key type is
-/// filtered by the tree builder (P-384 for the current statement).
-pub fn eligible_issuers(trust: &TrustList) -> (Vec<Vec<u8>>, Vec<String>) {
+/// The trust list's certificates eligible as hidden issuers for `purpose`
+/// (roadmap H4, HIDING-THE-ISSUER.md, I1; for TSA issuers, I6,
+/// HIDING-THE-TIME-STAMP.md, T4), and the reasons the others are not: the CA
+/// check applied to an issuing CA (`check_ca`) for that purpose, except
+/// validity, which the hidden statements check at the attested time, in the
+/// circuit; and no name constraints or policy constraints, critical or not,
+/// which constrain the end-entity's subject, hidden from the verifier. The
+/// key type is filtered by the tree builder (P-384 for the current statements).
+pub fn eligible_issuers(trust: &TrustList, purpose: Purpose) -> (Vec<Vec<u8>>, Vec<String>) {
     use const_oid::db::rfc5280::{ID_CE_NAME_CONSTRAINTS, ID_CE_POLICY_CONSTRAINTS};
     let (mut eligible, mut excluded) = (Vec::new(), Vec::new());
     for der in &trust.anchors {
         let checked = parse(der).and_then(|cert| {
-            check_ca(&cert, None, 0)?;
+            check_ca(&cert, None, 0, purpose)?;
             let subject_constraint = cert.tbs_certificate.extensions.as_deref().unwrap_or_default().iter()
                 .find(|e| e.extn_id == ID_CE_NAME_CONSTRAINTS || e.extn_id == ID_CE_POLICY_CONSTRAINTS);
             if let Some(ext) = subject_constraint {
@@ -489,13 +521,39 @@ mod tests {
             anchors: vec![plain.clone(), not_ca, no_cert_sign, names, names_critical, policy, pki.read("issuing-ca.der")],
             skipped: 0,
         };
-        let (eligible, excluded) = eligible_issuers(&trust);
+        let (eligible, excluded) = eligible_issuers(&trust, Purpose::ClaimSigning);
         assert_eq!(eligible, vec![plain, pki.read("issuing-ca.der")], "excluded: {excluded:?}");
         assert_eq!(excluded.len(), 5, "{excluded:?}");
         // Non-critical name and policy constraints are excluded by the new
         // rule; critical name constraints already by the CA check.
         assert_eq!(excluded.iter().filter(|e| e.contains("name or policy constraints")).count(), 2, "{excluded:?}");
         assert!(excluded.iter().any(|e| e.contains("name-constrained-critical") && e.contains("unsupported critical extension")), "{excluded:?}");
+    }
+
+    /// Eligibility depends on the purpose (HIDING-THE-TIME-STAMP.md, T4): a
+    /// CA's EKU, if any, must allow it; a CA without an EKU, or with
+    /// anyExtendedKeyUsage, is eligible for both.
+    #[test]
+    fn eligible_issuers_follow_the_purpose() {
+        let pki = TestPki::generate("Trust Test");
+        let ca = "basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign\n";
+        let cases = [
+            ("time-stamping-only", "extendedKeyUsage=timeStamping\n", false, true),
+            ("claim-signing-only", "extendedKeyUsage=1.3.6.1.4.1.62558.2.1\n", true, false),
+            ("unrestricted", "", true, true),
+            ("any-purpose", "extendedKeyUsage=anyExtendedKeyUsage\n", true, true),
+            ("code-signing-only", "extendedKeyUsage=codeSigning\n", false, false),
+        ];
+        let certs: Vec<_> = cases.iter().map(|(name, eku, _, _)| issue_ca(&pki, name, "root", &format!("{ca}{eku}"))).collect();
+        let trust = TrustList { anchors: certs.clone(), skipped: 0 };
+        for purpose in [Purpose::ClaimSigning, Purpose::TimeStamping] {
+            let (eligible, excluded) = eligible_issuers(&trust, purpose);
+            for ((name, _, claim, tsa), cert) in cases.iter().zip(&certs) {
+                let want = if purpose == Purpose::ClaimSigning { *claim } else { *tsa };
+                assert_eq!(eligible.contains(cert), want, "{name} for {purpose:?}: excluded {excluded:?}");
+            }
+            assert!(excluded.iter().all(|e| e.contains(&format!("does not allow {}", purpose.name()))), "{excluded:?}");
+        }
     }
 
     #[test]

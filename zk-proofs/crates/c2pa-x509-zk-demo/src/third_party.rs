@@ -9,7 +9,7 @@
 
 use crate::jumbf::{active_assertions, active_manifest, manifest_count, manifest_store, manifests, ActiveManifest};
 use crate::original_signature::{tst_info, OriginalSignature, TimeStampVersion, COSE_ALG_ES256, SHA256_OID};
-use crate::trust::{eligible_issuers, issuing_path_for, validate_issuing_chain, TrustList};
+use crate::trust::{eligible_issuers, issuing_path_for, validate_issuing_chain, Purpose, TrustList};
 use crate::zk_signature::{is_canonical_root, proof_len, IssuerTreeRef, ZkSignature, DEFAULT_CURVE};
 use anyhow::{anyhow, bail, Context, Result};
 use ciborium::Value;
@@ -303,10 +303,10 @@ pub struct IssuerTree {
     pub entries: usize,
 }
 
-/// The eligible issuers of a trust list (`eligible_issuers`), written as PEM
-/// into `dir`, for the CLI.
-pub fn eligible_issuers_pem(trust: &TrustList, dir: &Path) -> Result<PathBuf> {
-    let (eligible, _) = eligible_issuers(trust);
+/// The eligible issuers of a trust list for `purpose` (`eligible_issuers`),
+/// written as PEM into `dir`, for the CLI.
+pub fn eligible_issuers_pem(trust: &TrustList, purpose: Purpose, dir: &Path) -> Result<PathBuf> {
+    let (eligible, _) = eligible_issuers(trust, purpose);
     if eligible.is_empty() {
         bail!("no certificate of the trust list is eligible as a hidden issuer");
     }
@@ -328,7 +328,7 @@ pub fn eligible_issuers_pem(trust: &TrustList, dir: &Path) -> Result<PathBuf> {
 /// the anonymizer build it.
 pub fn issuer_tree(trust: &TrustList, prover: &Prover) -> Result<IssuerTree> {
     let dir = tempfile::tempdir()?;
-    prover.tree(&eligible_issuers_pem(trust, dir.path())?)
+    prover.tree(&eligible_issuers_pem(trust, Purpose::ClaimSigning, dir.path())?)
 }
 
 /// A trust-list snapshot the verifier approves for hidden issuers, with the
@@ -488,10 +488,10 @@ pub fn anonymize(input: &Path, output: &Path, trust: &TrustList, prover: &Prover
             if !trust.is_anchor(&issuing_chain[0]) {
                 bail!("the issuing CA is not itself on the trust list; hiding the issuer needs a directly listed CA (HIDING-THE-ISSUER.md, I2)");
             }
-            if !eligible_issuers(trust).0.contains(&issuing_chain[0]) {
+            if !eligible_issuers(trust, Purpose::ClaimSigning).0.contains(&issuing_chain[0]) {
                 bail!("the issuing CA is not eligible as a hidden issuer (HIDING-THE-ISSUER.md, I1)");
             }
-            let pem = eligible_issuers_pem(trust, dir.path())?;
+            let pem = eligible_issuers_pem(trust, Purpose::ClaimSigning, dir.path())?;
             let tree = prover.tree(&pem)?;
             let report = HiddenIssuerReport { snapshot: list.to_string(), root: tree.root.clone(), anonymity_set: tree.entries };
             (Some(IssuerTreeRef { root: tree.root, list: list.to_string() }), Some(report), Some(pem))

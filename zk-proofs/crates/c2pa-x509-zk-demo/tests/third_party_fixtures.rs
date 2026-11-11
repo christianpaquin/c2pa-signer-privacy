@@ -683,6 +683,46 @@ fn hidden_issuer_verification_follows_the_verifiers_policy() {
     assert!(err.contains("keys in") && err.contains("disclosed statement"), "{err}");
 }
 
+/// A policy file's snapshots reject unknown fields: a misspelled `until`
+/// must not turn an expiring approval into an indefinite one. Omitting
+/// `until` on purpose is still accepted.
+#[test]
+fn issuer_policy_rejects_unknown_snapshot_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, snapshot: serde_json::Value| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, serde_json::json!({ "snapshots": [snapshot] }).to_string()).unwrap();
+        path
+    };
+    let typo = write("typo.json", serde_json::json!({ "name": "historical-list", "trust_list": "list.pem", "from": 0, "untill": 100 }));
+    let err = format!("{:#}", IssuerPolicy::from_file(&typo).unwrap_err());
+    assert!(err.contains("untill"), "{err}");
+    let current = write("current.json", serde_json::json!({ "name": "current-list", "trust_list": "list.pem", "from": 0 }));
+    assert!(IssuerPolicy::from_file(&current).unwrap().snapshots[0].until.is_none());
+}
+
+/// Snapshots with the same root (for example, lists differing only in
+/// certificates the tree leaves out) and overlapping periods: the asset is
+/// accepted under the one it names, in either order, and refused if it names
+/// neither.
+#[test]
+fn issuer_policy_does_not_depend_on_snapshot_order() {
+    let fixture = Fixture::new(true, true);
+    let prover = hidden_stand_in(fixture.dir.path());
+    let trust = TrustList::from_file(&fixture.pki("trust-list.pem")).unwrap();
+    let tsa = fixture.pki("tsa-trust-list.pem");
+    let list = fixture.pki("trust-list.pem");
+    let asset = hidden_with_placeholder(&fixture, &prover, &list, "fixture-list");
+    let verify = |policy: &IssuerPolicy| third_party::verify(&asset, &trust, &tsa, &prover, None, Some(policy)).unwrap_err().to_string();
+    let named = |a: &str, b: &str| policy(vec![(a, list.clone(), 0, None), (b, list.clone(), 0, None)]);
+    for policy in [named("other-approved-name", "fixture-list"), named("fixture-list", "other-approved-name")] {
+        let err = verify(&policy);
+        assert!(err.contains("the proof does not verify"), "{err}");
+    }
+    let err = verify(&named("other-approved-name", "yet-another-name"));
+    assert!(err.contains("names the trust list"), "{err}");
+}
+
 /// Without x5chain, c2pa-rs does not read the manifest; the verifier still
 /// checks the claim's assertions and hard binding, on a copy carrying the
 /// placeholder certificate (HIDING-THE-ISSUER.md, I5).

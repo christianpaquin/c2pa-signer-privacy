@@ -335,6 +335,7 @@ pub fn issuer_tree(trust: &TrustList, prover: &Prover) -> Result<IssuerTree> {
 /// interval during which it applied: `from` ≤ t < `until` (Unix seconds; no
 /// `until` while it is current).
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)] // a misspelled "until" must not make an approval indefinite
 pub struct Snapshot {
     pub name: String,
     /// The snapshot's trust list (PEM or C2PA JSON), relative to the policy file.
@@ -390,7 +391,9 @@ impl IssuerPolicy {
     /// The snapshot whose root, built by the verifier, is `issuers.root`, and
     /// whose interval contains `time`.
     pub fn approve(&self, prover: &Prover, time: u64, issuers: &IssuerTreeRef) -> Result<HiddenIssuerReport> {
-        let mut outside = Vec::new();
+        // Every snapshot is considered, so the result does not depend on their
+        // order: accepted only if one matches the root, the time, and the name.
+        let (mut outside, mut other_names) = (Vec::new(), Vec::new());
         for s in &self.snapshots {
             let tree = issuer_tree(&TrustList::from_file(&s.trust_list)?, prover)?;
             if tree.root != issuers.root {
@@ -401,9 +404,13 @@ impl IssuerPolicy {
                 continue;
             }
             if issuers.list != s.name {
-                bail!("the asset names the trust list {:?}, but its root is that of the approved snapshot {:?}", issuers.list, s.name);
+                other_names.push(format!("{:?}", s.name));
+                continue;
             }
             return Ok(HiddenIssuerReport { snapshot: s.name.clone(), root: tree.root, anonymity_set: tree.entries });
+        }
+        if !other_names.is_empty() {
+            bail!("the asset names the trust list {:?}, but its root is that of the approved snapshot(s) {}", issuers.list, other_names.join(", "));
         }
         if !outside.is_empty() {
             bail!("the issuer tree root is that of {}, which did not apply at the attested time {time}", outside.join(", "));

@@ -6,7 +6,16 @@
 //	c2pa-zk-gnark prove  --keys DIR --input inputs.json --proof proof.bin [--issuers issuers.pem] [--pk-format F --pk-check C]
 //	c2pa-zk-gnark convert-pk --keys DIR
 //	c2pa-zk-gnark verify --keys DIR --public public.json --proof proof.bin
-//	c2pa-zk-gnark tree   --issuers issuers.pem [--curve C]
+//	c2pa-zk-gnark tree   --issuers issuers.pem [--curve C] [--role issuer|tsa]
+//
+// A third statement, "hidden-all" (roadmap I6, HIDING-THE-TIME-STAMP.md),
+// also hides the time-stamp token: prove and check take --issuers (signer
+// issuers) and --tsa-issuers (TSA issuers, eligible for time stamping), and
+// --window (the window's granularity in seconds, default a day); inputs.json
+// must hold the token (time_stamp_token); public.json holds
+// statement.HiddenAllPublic. Each tree's role is fixed by the statement: tree
+// --role tsa prints a TSA tree's root (leaf tag 4), --role issuer (the
+// default) an issuer tree's (leaf tag 1).
 //
 // Two statements (roadmap H4, HIDING-THE-ISSUER.md): "disclosed" (the
 // default: the issuing CA's key is a public input) and "hidden-issuer" (the
@@ -81,10 +90,12 @@ type manifest struct {
 	Variant string `json:"variant,omitempty"`
 	// The proof system's curve: "bn254" (also when absent, for key sets
 	// from before E7) or "bls12-381".
-	Curve       string            `json:"curve,omitempty"`
-	Sizes       statement.Sizes   `json:"sizes"`
-	Constraints int               `json:"constraints"`
-	SHA256      map[string]string `json:"sha256"`
+	Curve string          `json:"curve,omitempty"`
+	Sizes statement.Sizes `json:"sizes"`
+	// The token's sizes, for the hidden-all statement.
+	TokenSizes  *statement.TokenSizes `json:"token_sizes,omitempty"`
+	Constraints int                   `json:"constraints"`
+	SHA256      map[string]string     `json:"sha256"`
 	// How each proving-key file was produced, by format (roadmap E6).
 	// Loading a key without point checks requires its record.
 	ProvingKeys map[string]keyFile `json:"proving_keys,omitempty"`
@@ -145,18 +156,22 @@ func main() {
 	pkFormat := fs.String("pk-format", "compressed", "proving-key file: compressed, raw, or dump")
 	pkCheck := fs.String("pk-check", "full", "validate proving-key points on load: full or none")
 	curve := fs.String("curve", "bn254", "setup, check, and tree: the curve, bn254 or bls12-381")
-	variant := fs.String("statement", variantDisclosed, "setup and check: the statement, disclosed or hidden-issuer")
+	variant := fs.String("statement", variantDisclosed, "setup and check: the statement, disclosed, hidden-issuer, or hidden-all")
 	issuers := fs.String("issuers", "", "hidden issuer: the eligible CA certificates (PEM) the tree is built from")
+	tsaIssuers := fs.String("tsa-issuers", "", "hidden-all: the CA certificates eligible for time stamping (PEM) the TSA tree is built from")
+	window := fs.Int64("window", 86400, "hidden-all: the time window's granularity, in seconds (aligned to the Unix epoch; a day by default)")
+	role := fs.String("role", "issuer", "tree: the tree's role, issuer or tsa")
 	_ = fs.Parse(os.Args[2:])
+	opts := proverOptions{issuers: *issuers, tsaIssuers: *tsaIssuers, window: *window}
 
 	var err error
 	switch os.Args[1] {
 	case "setup":
 		err = setup(require(*keys, "--keys"), *curve, *variant)
 	case "check":
-		err = check(require(*input, "--input"), *curve, *variant, *issuers)
+		err = check(require(*input, "--input"), *curve, *variant, opts)
 	case "prove":
-		err = prove(require(*keys, "--keys"), require(*input, "--input"), require(*proofPath, "--proof"), *pkFormat, *pkCheck, *issuers)
+		err = prove(require(*keys, "--keys"), require(*input, "--input"), require(*proofPath, "--proof"), *pkFormat, *pkCheck, opts)
 	case "convert-pk":
 		err = convertPK(require(*keys, "--keys"))
 	case "verify":
@@ -166,7 +181,7 @@ func main() {
 			os.Exit(1)
 		}
 	case "tree":
-		err = printTree(require(*issuers, "--issuers"), *curve)
+		err = printTree(require(*issuers, "--issuers"), *curve, *role)
 	default:
 		usage()
 	}
@@ -202,19 +217,29 @@ func timed(what string, f func() error) error {
 const (
 	variantDisclosed = "disclosed"
 	variantHidden    = "hidden-issuer"
+	variantHiddenAll = "hidden-all"
 )
 
 func checkVariant(v string) error {
-	if v != variantDisclosed && v != variantHidden {
-		return fmt.Errorf("unknown statement %q (disclosed or hidden-issuer)", v)
+	if v != variantDisclosed && v != variantHidden && v != variantHiddenAll {
+		return fmt.Errorf("unknown statement %q (disclosed, hidden-issuer, or hidden-all)", v)
 	}
 	return nil
 }
 
-func compile(s statement.Sizes, curve ecc.ID, variant string) (constraint.ConstraintSystem, error) {
+// proverOptions are the prover's options for the hidden statements.
+type proverOptions struct {
+	issuers, tsaIssuers string
+	window              int64
+}
+
+func compile(s statement.Sizes, ts statement.TokenSizes, curve ecc.ID, variant string) (constraint.ConstraintSystem, error) {
 	var circuit frontend.Circuit = statement.NewCircuit(s)
-	if variant == variantHidden {
+	switch variant {
+	case variantHidden:
 		circuit = statement.NewHiddenIssuerCircuit(s)
+	case variantHiddenAll:
+		circuit = statement.NewHiddenAllCircuit(s, ts)
 	}
 	var ccs constraint.ConstraintSystem
 	err := timed("compile", func() (err error) {
@@ -224,8 +249,9 @@ func compile(s statement.Sizes, curve ecc.ID, variant string) (constraint.Constr
 	return ccs, err
 }
 
-// issuerTree builds the issuer tree from a PEM file of CA certificates.
-func issuerTree(path string, curve ecc.ID) (*issuertree.Tree, []string, error) {
+// issuerTree builds the role's tree from a PEM file of CA certificates
+// (already filtered for the role's purpose by the caller).
+func issuerTree(path string, curve ecc.ID, role issuertree.Role) (*issuertree.Tree, []string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, nil, err
@@ -244,33 +270,58 @@ func issuerTree(path string, curve ecc.ID) (*issuertree.Tree, []string, error) {
 	if len(certs) == 0 {
 		return nil, nil, fmt.Errorf("no certificates in %s", path)
 	}
-	return issuertree.Build(curve, certs)
+	return issuertree.Build(curve, role, certs)
 }
 
 // assignment builds the prover's assignment for the key set's statement.
-func assignment(in statement.Inputs, s statement.Sizes, curve ecc.ID, variant, issuers string) (frontend.Circuit, error) {
-	if variant != variantHidden {
-		if issuers != "" {
-			return nil, fmt.Errorf("--issuers applies only to the hidden-issuer statement")
+func assignment(in statement.Inputs, s statement.Sizes, ts statement.TokenSizes, curve ecc.ID, variant string, o proverOptions) (frontend.Circuit, error) {
+	if variant != variantHiddenAll && o.tsaIssuers != "" {
+		return nil, fmt.Errorf("--tsa-issuers applies only to the hidden-all statement")
+	}
+	switch variant {
+	case variantDisclosed:
+		if o.issuers != "" {
+			return nil, fmt.Errorf("--issuers applies only to the hidden-issuer and hidden-all statements")
 		}
 		return statement.Assign(in, s)
+	case variantHidden:
+		if o.issuers == "" {
+			return nil, fmt.Errorf("the hidden-issuer statement needs --issuers")
+		}
+		tree, _, err := issuerTree(o.issuers, curve, issuertree.RoleIssuer)
+		if err != nil {
+			return nil, err
+		}
+		return statement.AssignHidden(in, tree, s)
 	}
-	if issuers == "" {
-		return nil, fmt.Errorf("the hidden-issuer statement needs --issuers")
+	if o.issuers == "" || o.tsaIssuers == "" {
+		return nil, fmt.Errorf("the hidden-all statement needs --issuers and --tsa-issuers")
 	}
-	tree, _, err := issuerTree(issuers, curve)
+	if o.window <= 0 {
+		return nil, fmt.Errorf("--window must be positive")
+	}
+	issuers, _, err := issuerTree(o.issuers, curve, issuertree.RoleIssuer)
 	if err != nil {
 		return nil, err
 	}
-	return statement.AssignHidden(in, tree, s)
+	tsas, _, err := issuerTree(o.tsaIssuers, curve, issuertree.RoleTSA)
+	if err != nil {
+		return nil, fmt.Errorf("--tsa-issuers: %w", err)
+	}
+	t1, t2 := statement.Window(in.Time, o.window)
+	return statement.AssignHiddenAll(in, issuers, tsas, t1, t2, s, ts)
 }
 
-func printTree(issuers, curveName string) error {
+func printTree(issuers, curveName, roleName string) error {
 	curve, err := curveID(curveName)
 	if err != nil {
 		return err
 	}
-	tree, skipped, err := issuerTree(issuers, curve)
+	role, err := issuertree.ParseRole(roleName)
+	if err != nil {
+		return err
+	}
+	tree, skipped, err := issuerTree(issuers, curve, role)
 	if err != nil {
 		return err
 	}
@@ -281,12 +332,13 @@ func printTree(issuers, curveName string) error {
 	}
 	out := struct {
 		FormatVersion int      `json:"format_version"`
+		Role          string   `json:"role"`
 		Curve         string   `json:"curve"`
 		KeyType       string   `json:"key_type"`
 		Root          string   `json:"root"`
 		Entries       []entry  `json:"entries"`
 		Skipped       []string `json:"skipped"`
-	}{FormatVersion: issuertree.FormatVersion, Curve: curveName, KeyType: "P-384", Root: tree.Root().Text(16), Entries: []entry{}, Skipped: append([]string{}, skipped...)}
+	}{FormatVersion: issuertree.FormatVersion, Role: role.String(), Curve: curveName, KeyType: "P-384", Root: tree.Root().Text(16), Entries: []entry{}, Skipped: append([]string{}, skipped...)}
 	for _, e := range tree.Entries {
 		out.Entries = append(out.Entries, entry{e.CertSHA256s, e.NotBefore, e.NotAfter})
 	}
@@ -307,7 +359,7 @@ func setup(dir, curveName, variant string) error {
 		return err
 	}
 	s := statement.DefaultSizes
-	ccs, err := compile(s, curve, variant)
+	ccs, err := compile(s, statement.DefaultTokenSizes, curve, variant)
 	if err != nil {
 		return err
 	}
@@ -317,8 +369,12 @@ func setup(dir, curveName, variant string) error {
 		return err
 	}
 	m := manifest{Statement: "c2pa-x509-zk third-party (E2b)", Curve: curveName, Sizes: s, Constraints: ccs.GetNbConstraints(), SHA256: map[string]string{}}
-	if variant == variantHidden {
+	switch variant {
+	case variantHidden:
 		m.Statement, m.Variant = "c2pa-x509-zk third-party, hidden issuer (H4)", variantHidden
+	case variantHiddenAll:
+		ts := statement.DefaultTokenSizes
+		m.Statement, m.Variant, m.TokenSizes = "c2pa-x509-zk third-party, hidden issuer and time stamp (I6)", variantHiddenAll, &ts
 	}
 	for name, w := range map[string]io.WriterTo{ccsFile: ccs, pkFile: pk, vkFile: vk} {
 		sum, err := writeFile(filepath.Join(dir, name), w)
@@ -333,7 +389,7 @@ func setup(dir, curveName, variant string) error {
 	return os.WriteFile(filepath.Join(dir, manifestFile), append(data, '\n'), 0o644)
 }
 
-func check(inputPath, curveName, variant, issuers string) error {
+func check(inputPath, curveName, variant string, opts proverOptions) error {
 	curve, err := curveID(curveName)
 	if err != nil {
 		return err
@@ -345,11 +401,11 @@ func check(inputPath, curveName, variant, issuers string) error {
 	if err := readJSON(inputPath, &in); err != nil {
 		return err
 	}
-	assigned, err := assignment(in, statement.DefaultSizes, curve, variant, issuers)
+	assigned, err := assignment(in, statement.DefaultSizes, statement.DefaultTokenSizes, curve, variant, opts)
 	if err != nil {
 		return err
 	}
-	ccs, err := compile(statement.DefaultSizes, curve, variant)
+	ccs, err := compile(statement.DefaultSizes, statement.DefaultTokenSizes, curve, variant)
 	if err != nil {
 		return err
 	}
@@ -484,7 +540,7 @@ type writerFunc func(io.Writer) (int64, error)
 
 func (f writerFunc) WriteTo(w io.Writer) (int64, error) { return f(w) }
 
-func prove(dir, inputPath, proofPath, pkFormat, pkCheck, issuers string) error {
+func prove(dir, inputPath, proofPath, pkFormat, pkCheck string, opts proverOptions) error {
 	m, err := readManifest(dir)
 	if err != nil {
 		return err
@@ -493,7 +549,7 @@ func prove(dir, inputPath, proofPath, pkFormat, pkCheck, issuers string) error {
 	if err := readJSON(inputPath, &in); err != nil {
 		return err
 	}
-	assigned, err := assignment(in, m.Sizes, m.curve(), m.variant(), issuers)
+	assigned, err := assignment(in, m.Sizes, m.tokenSizes(), m.curve(), m.variant(), opts)
 	if err != nil {
 		return err
 	}
@@ -523,7 +579,15 @@ func verify(dir, publicPath, proofPath string) error {
 		return err
 	}
 	var assigned frontend.Circuit
-	if m.variant() == variantHidden {
+	if m.variant() == variantHiddenAll {
+		var pub statement.HiddenAllPublic
+		if err := readJSON(publicPath, &pub); err != nil {
+			return err
+		}
+		if assigned, err = statement.AssignHiddenAllPublic(pub, m.Sizes, m.tokenSizes(), m.curve()); err != nil {
+			return err
+		}
+	} else if m.variant() == variantHidden {
 		var pub statement.HiddenPublic
 		if err := readJSON(publicPath, &pub); err != nil {
 			return err
@@ -575,6 +639,14 @@ func readManifest(dir string) (manifest, error) {
 		return m, fmt.Errorf("%s: %w", manifestFile, err)
 	}
 	return m, nil
+}
+
+// tokenSizes are the key set's token sizes (hidden-all key sets record them).
+func (m manifest) tokenSizes() statement.TokenSizes {
+	if m.TokenSizes != nil {
+		return *m.TokenSizes
+	}
+	return statement.DefaultTokenSizes
 }
 
 // variant is the key set's statement: disclosed when absent (key sets from

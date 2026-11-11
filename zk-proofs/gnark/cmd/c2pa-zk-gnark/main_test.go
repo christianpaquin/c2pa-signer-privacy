@@ -23,6 +23,7 @@ import (
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs/r1cs"
 
+	"c2pa-zk-gnark/issuertree"
 	"c2pa-zk-gnark/statement"
 )
 
@@ -300,10 +301,10 @@ func TestStatementIsPartOfTheKeySet(t *testing.T) {
 // disclosed one, so a mistaken invocation never silently proves the other.
 func TestIssuersFlagMatchesTheStatement(t *testing.T) {
 	var in statementInputs
-	if _, err := assignment(in.Inputs, smallSizes, ecc.BN254, variantDisclosed, "issuers.pem"); err == nil || !strings.Contains(err.Error(), "only to the hidden-issuer") {
+	if _, err := assignment(in.Inputs, smallSizes, statement.DefaultTokenSizes, ecc.BN254, variantDisclosed, proverOptions{issuers: "issuers.pem"}); err == nil || !strings.Contains(err.Error(), "only to the hidden-issuer and hidden-all") {
 		t.Fatalf("disclosed statement with --issuers: %v", err)
 	}
-	if _, err := assignment(in.Inputs, smallSizes, ecc.BN254, variantHidden, ""); err == nil || !strings.Contains(err.Error(), "needs --issuers") {
+	if _, err := assignment(in.Inputs, smallSizes, statement.DefaultTokenSizes, ecc.BN254, variantHidden, proverOptions{}); err == nil || !strings.Contains(err.Error(), "needs --issuers") {
 		t.Fatalf("hidden issuer without --issuers: %v", err)
 	}
 }
@@ -312,7 +313,7 @@ func TestIssuerTreeReadsPEMCertificates(t *testing.T) {
 	dir := t.TempDir()
 	empty := filepath.Join(dir, "empty.pem")
 	os.WriteFile(empty, []byte("no certificates here\n"), 0o644)
-	if _, _, err := issuerTree(empty, ecc.BN254); err == nil {
+	if _, _, err := issuerTree(empty, ecc.BN254, issuertree.RoleIssuer); err == nil {
 		t.Fatal("a file without certificates was accepted")
 	}
 	pemFile := filepath.Join(dir, "issuers.pem")
@@ -321,7 +322,7 @@ func TestIssuerTreeReadsPEMCertificates(t *testing.T) {
 		pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: der})
 	}
 	os.WriteFile(pemFile, buf.Bytes(), 0o644)
-	tree, _, err := issuerTree(pemFile, ecc.BN254)
+	tree, _, err := issuerTree(pemFile, ecc.BN254, issuertree.RoleIssuer)
 	if err != nil || len(tree.Entries) != 3 {
 		t.Fatalf("tree from 3 certificates: %v", err)
 	}
@@ -345,4 +346,22 @@ func testCAs(t *testing.T, n int) [][]byte {
 		out = append(out, der)
 	}
 	return out
+}
+
+// --tsa-issuers applies only to hidden-all, which needs both lists.
+func TestTSAIssuersFlagMatchesTheStatement(t *testing.T) {
+	var in statementInputs
+	for _, v := range []string{variantDisclosed, variantHidden} {
+		if _, err := assignment(in.Inputs, smallSizes, statement.DefaultTokenSizes, ecc.BN254, v, proverOptions{issuers: "i.pem", tsaIssuers: "t.pem"}); err == nil || !strings.Contains(err.Error(), "only to the hidden-all") {
+			t.Fatalf("%s with --tsa-issuers: %v", v, err)
+		}
+	}
+	for _, o := range []proverOptions{{issuers: "i.pem"}, {tsaIssuers: "t.pem"}} {
+		if _, err := assignment(in.Inputs, smallSizes, statement.DefaultTokenSizes, ecc.BN254, variantHiddenAll, o); err == nil || !strings.Contains(err.Error(), "needs --issuers and --tsa-issuers") {
+			t.Fatalf("hidden-all with %+v: %v", o, err)
+		}
+	}
+	if err := checkVariant(variantHiddenAll); err != nil {
+		t.Fatal(err)
+	}
 }

@@ -594,10 +594,11 @@ fn hidden_stand_in(dir: &Path) -> Prover {
     std::fs::write(&cli, r#"#!/bin/sh
 case "$1" in
   tree)
-    while [ $# -gt 0 ]; do [ "$1" = "--issuers" ] && f="$2"; shift; done
-    root=$(sha256sum "$f" | cut -c1-64 | sed 's/^0*//')
+    role=issuer
+    while [ $# -gt 0 ]; do [ "$1" = "--issuers" ] && f="$2"; [ "$1" = "--role" ] && role="$2"; shift; done
+    root=$( (cat "$f"; echo "$role") | sha256sum | cut -c1-64 | sed 's/^0*//')
     n=$(grep -c 'BEGIN CERTIFICATE' "$f")
-    printf '{"root": "%s", "entries": [' "$root"; i=1; while [ $i -le $n ]; do [ $i -gt 1 ] && printf ','; printf '{}'; i=$((i+1)); done; printf ']}
+    printf '{"role": "%s", "root": "%s", "entries": [' "$role" "$root"; i=1; while [ $i -le $n ]; do [ $i -gt 1 ] && printf ','; printf '{}'; i=$((i+1)); done; printf ']}
 ' ;;
   verify) echo 'proof is INVALID' >&2; exit 1 ;;
   *) echo "unexpected $1" >&2; exit 2 ;;

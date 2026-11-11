@@ -1,9 +1,11 @@
 package statement
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/sha256"
+	"crypto/sha512"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
@@ -11,9 +13,12 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/std/math/emulated"
 	gnarkecdsa "github.com/consensys/gnark/std/signature/ecdsa"
+
+	"c2pa-zk-gnark/issuertree"
 )
 
 // TokenParts are a time-stamp token's parts the gadget takes, as the prover
@@ -232,4 +237,148 @@ func TokenTime(parts TokenParts) (int64, []byte, error) {
 func Window(t, granularity int64) (int64, int64) {
 	t1 := t - t%granularity
 	return t1, t1 + granularity
+}
+
+// HiddenAllPublic is what the verifier supplies for the statement hiding the
+// issuer and the token: the claim, the roots of an issuer tree and a TSA tree
+// it approves (canonical hex), and the window [T1, T2).
+type HiddenAllPublic struct {
+	Claim      []byte `json:"claim"`
+	IssuerRoot string `json:"issuer_root"`
+	TSARoot    string `json:"tsa_root"`
+	T1         int64  `json:"t1"`
+	T2         int64  `json:"t2"`
+}
+
+// AssignHiddenAll builds the full assignment of the statement hiding the
+// issuer and the token: the statement's inputs (whose time and imprint must
+// be the token's), the issuing CA's membership in the issuer tree, the token,
+// and its TSA CA's membership in the TSA tree, with the window [t1, t2).
+func AssignHiddenAll(in Inputs, issuers, tsas *issuertree.Tree, t1, t2 int64, s Sizes, ts TokenSizes) (*HiddenAllCircuit, error) {
+	if issuers.Role != issuertree.RoleIssuer || tsas.Role != issuertree.RoleTSA {
+		return nil, fmt.Errorf("the trees' roles are %s and %s, not issuer and tsa", issuers.Role, tsas.Role)
+	}
+	hidden, err := AssignHidden(in, issuers, s)
+	if err != nil {
+		return nil, err
+	}
+	parts, err := ParseToken(in.TimeStampToken)
+	if err != nil {
+		return nil, fmt.Errorf("time-stamp token: %w", err)
+	}
+	genTime, imprint, err := TokenTime(parts)
+	if err != nil {
+		return nil, err
+	}
+	if genTime != in.Time || !bytes.Equal(imprint, in.Imprint) {
+		return nil, fmt.Errorf("the token's genTime and imprint are not the inputs' time and imprint")
+	}
+	if !(t1 <= genTime && genTime < t2) {
+		return nil, fmt.Errorf("genTime %d is not in the window [%d, %d)", genTime, t1, t2)
+	}
+	tk, err := AssignToken(parts, ts)
+	if err != nil {
+		return nil, err
+	}
+	proof, err := tsaMembership(parts.TSACert, tsas, genTime)
+	if err != nil {
+		return nil, err
+	}
+
+	c := NewHiddenAllCircuit(s, ts)
+	copy(c.Claim, hidden.Claim)
+	c.ClaimLen = hidden.ClaimLen
+	c.Root = hidden.Root
+	c.TSARoot = tsas.Root()
+	c.T1, c.T2 = t1, t2
+	c.Time = hidden.Time
+	c.Imprint = hidden.Imprint
+	copy(c.SigStructure, hidden.SigStructure)
+	c.ProtectedLen = hidden.ProtectedLen
+	copy(c.ClaimSig, hidden.ClaimSig)
+	c.CASig, c.CAKey = hidden.CASig, hidden.CAKey
+	c.CANotBefore, c.CANotAfter = hidden.CANotBefore, hidden.CANotAfter
+	c.Siblings, c.IndexBits = hidden.Siblings, hidden.IndexBits
+	c.Token = tk
+	c.TSACAKey = gnarkecdsa.PublicKey[emulated.P384Fp, emulated.P384Fr]{
+		X: emulated.ValueOf[emulated.P384Fp](proof.CA.X),
+		Y: emulated.ValueOf[emulated.P384Fp](proof.CA.Y),
+	}
+	c.TSACANotBefore, c.TSACANotAfter = proof.CA.NotBefore, proof.CA.NotAfter
+	for d := 0; d < issuertree.Depth; d++ {
+		c.TSASiblings[d] = proof.Siblings[d]
+		c.TSAIndexBits[d] = (proof.Index >> d) & 1
+	}
+	return c, nil
+}
+
+// tsaMembership finds the TSA tree's entry whose key signed the TSA
+// certificate (ECDSA-SHA384) and whose validity contains genTime, and returns
+// its membership proof.
+func tsaMembership(tsaCert []byte, tsas *issuertree.Tree, genTime int64) (issuertree.Proof, error) {
+	var cert struct {
+		TBS       asn1.RawValue
+		Algorithm pkix.AlgorithmIdentifier
+		Signature asn1.BitString
+	}
+	if _, err := asn1.Unmarshal(tsaCert, &cert); err != nil {
+		return issuertree.Proof{}, fmt.Errorf("TSA certificate: %v", err)
+	}
+	sig, err := certificateSignature(tsaCert)
+	if err != nil {
+		return issuertree.Proof{}, err
+	}
+	digest := sha512.Sum384(cert.TBS.FullBytes)
+	for _, e := range tsas.Entries {
+		key := &ecdsa.PublicKey{Curve: elliptic.P384(), X: e.X, Y: e.Y}
+		if e.NotBefore <= genTime && genTime <= e.NotAfter && ecdsa.Verify(key, digest[:], sig.R, sig.S) {
+			return tsas.Prove(e.CertSHA256s[0])
+		}
+	}
+	return issuertree.Proof{}, fmt.Errorf("no CA in the TSA tree, valid at genTime, signed the TSA certificate")
+}
+
+// AssignHiddenAllPublic builds the public part of the assignment (the private
+// part is zero), as the verifier does, for the key set's curve.
+func AssignHiddenAllPublic(pub HiddenAllPublic, s Sizes, ts TokenSizes, curve ecc.ID) (*HiddenAllCircuit, error) {
+	root, err := ParseRoot(pub.IssuerRoot, curve)
+	if err != nil {
+		return nil, err
+	}
+	tsaRoot, err := ParseRoot(pub.TSARoot, curve)
+	if err != nil {
+		return nil, fmt.Errorf("tsa_root: %w", err)
+	}
+	if !(0 <= pub.T1 && pub.T1 < pub.T2 && pub.T2 < 1<<timeBits) {
+		return nil, fmt.Errorf("the window [%d, %d) is not an interval of Unix seconds below 2^%d", pub.T1, pub.T2, timeBits)
+	}
+	hidden, err := AssignHiddenPublic(HiddenPublic{Claim: pub.Claim, Root: pub.IssuerRoot, Time: 0, Imprint: make([]byte, 32)}, s, curve)
+	if err != nil {
+		return nil, err
+	}
+	c := NewHiddenAllCircuit(s, ts)
+	copy(c.Claim, hidden.Claim)
+	c.ClaimLen = hidden.ClaimLen
+	c.Root, c.TSARoot = root, tsaRoot
+	c.T1, c.T2 = pub.T1, pub.T2
+	c.Time, c.Imprint = 0, [2]frontend.Variable{0, 0}
+	copy(c.SigStructure, hidden.SigStructure)
+	c.ProtectedLen = 0
+	copy(c.ClaimSig, hidden.ClaimSig)
+	c.CASig, c.CAKey = hidden.CASig, hidden.CAKey
+	c.CANotBefore, c.CANotAfter = 0, 0
+	zeroFp, zeroFr := emulated.ValueOf[emulated.P384Fp](0), emulated.ValueOf[emulated.P384Fr](0)
+	for _, v := range [][]frontend.Variable{c.Token.SignedAttrs, c.Token.TSTInfo, c.Token.TSATBS, c.Token.TSASig} {
+		for i := range v {
+			v[i] = 0
+		}
+	}
+	c.Token.SignedAttrsLen, c.Token.TSTInfoLen = 0, 0
+	c.Token.TSACASig = gnarkecdsa.Signature[emulated.P384Fr]{R: zeroFr, S: zeroFr}
+	c.TSACAKey = gnarkecdsa.PublicKey[emulated.P384Fp, emulated.P384Fr]{X: zeroFp, Y: zeroFp}
+	c.TSACANotBefore, c.TSACANotAfter = 0, 0
+	for d := 0; d < issuertree.Depth; d++ {
+		c.Siblings[d], c.IndexBits[d], c.TSASiblings[d], c.TSAIndexBits[d] = 0, 0, 0, 0
+	}
+	return c, nil
 }

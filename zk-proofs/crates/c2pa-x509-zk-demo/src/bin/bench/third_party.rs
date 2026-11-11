@@ -31,7 +31,7 @@ use std::process::{Command, Stdio};
 
 use c2pa_x509_zk_demo::jumbf::{active_manifest, manifest_store};
 use c2pa_x509_zk_demo::original_signature::OriginalSignature;
-use c2pa_x509_zk_demo::third_party::{check_claim, eligible_issuers_pem, replace_signature, statement_inputs, HiddenPublicInputs, Prover, VARIANT_HIDDEN_ISSUER};
+use c2pa_x509_zk_demo::third_party::{check_claim, purpose_tree, replace_signature, statement_inputs, HiddenPublicInputs, Prover, VARIANT_HIDDEN_ISSUER};
 use c2pa_x509_zk_demo::zk_signature::{proof_len, IssuerTreeRef, ZkSignature, DEFAULT_CURVE};
 use c2pa_x509_zk_demo::{issuing_path_for, file_sha256, TrustList};
 
@@ -166,9 +166,9 @@ pub fn phase(name: &str, work_dir: &Path, zk_root: &Path) -> Result<()> {
                     if !trust.is_anchor(&chain[0]) {
                         bail!("the issuing CA is not itself on the trust list (HIDING-THE-ISSUER.md, I2)");
                     }
-                    let pem = eligible_issuers_pem(&trust, c2pa_x509_zk_demo::trust::Purpose::ClaimSigning, work_dir)?;
                     let gnark = PathBuf::from(std::env::var_os("C2PA_ZK_GNARK").ok_or_else(|| anyhow!("C2PA_ZK_GNARK not set"))?);
-                    Prover { cli: gnark, keys: paths.keys.clone() }.tree(&pem)
+                    let prover = Prover { cli: gnark, keys: paths.keys.clone() };
+                    Ok(purpose_tree(&trust, c2pa_x509_zk_demo::trust::Purpose::ClaimSigning, &prover, work_dir)?.0)
                 })?;
                 data.insert("issuer_tree_entries".into(), json!(tree.entries));
                 std::fs::write(

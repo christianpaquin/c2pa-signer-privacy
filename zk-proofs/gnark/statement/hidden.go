@@ -59,15 +59,25 @@ func (c *HiddenIssuerCircuit) Define(api frontend.API) error {
 		return err
 	}
 
+	return assertMember(api, issuertree.RoleIssuer, &c.CAKey, c.CANotBefore, c.CANotAfter, c.Time, c.Siblings, c.IndexBits, c.Root)
+}
+
+// assertMember asserts that the CA key, with its validity period, is a leaf
+// of the role's tree whose root is given, at the path given by siblings and
+// index bits, and that its validity contains t. The role's leaf tag is fixed
+// here by the statement, never taken from the prover (HIDING-THE-TIME-STAMP.md,
+// T4): an issuer path cannot verify against a TSA root, nor the reverse.
+func assertMember(api frontend.API, role issuertree.Role, key *ecdsa.PublicKey[emulated.P384Fp, emulated.P384Fr], notBefore, notAfter, t frontend.Variable,
+	siblings, indexBits [issuertree.Depth]frontend.Variable, root frontend.Variable) error {
 	// The CA's validity contains t (both below 2^64, as in the leaf).
-	stdbits.ToBinary(api, c.CANotBefore, stdbits.WithNbDigits(64))
-	stdbits.ToBinary(api, c.CANotAfter, stdbits.WithNbDigits(64))
+	stdbits.ToBinary(api, notBefore, stdbits.WithNbDigits(64))
+	stdbits.ToBinary(api, notAfter, stdbits.WithNbDigits(64))
 	validity := cmp.NewBoundedComparator(api, new(big.Int).Lsh(big.NewInt(1), 64), false)
-	validity.AssertIsLessEq(c.CANotBefore, c.Time)
-	validity.AssertIsLessEq(c.Time, c.CANotAfter)
+	validity.AssertIsLessEq(notBefore, t)
+	validity.AssertIsLessEq(t, notAfter)
 
 	// The leaf: the key's canonical coordinates as 128-bit limbs (the
-	// verification above used the key modulo p, which these encode).
+	// signature verification used the key modulo p, which these encode).
 	fp, err := emulated.NewField[emulated.P384Fp](api)
 	if err != nil {
 		return err
@@ -83,10 +93,10 @@ func (c *HiddenIssuerCircuit) Define(api frontend.API) error {
 			stdbits.FromBinary(api, bits[0:128]),
 		}
 	}
-	inputs := []frontend.Variable{1, issuertree.FormatVersion, issuertree.KeyTypeP384}
-	inputs = append(inputs, limbs(&c.CAKey.X)...)
-	inputs = append(inputs, limbs(&c.CAKey.Y)...)
-	inputs = append(inputs, c.CANotBefore, c.CANotAfter)
+	inputs := []frontend.Variable{role.LeafTag(), issuertree.FormatVersion, issuertree.KeyTypeP384}
+	inputs = append(inputs, limbs(&key.X)...)
+	inputs = append(inputs, limbs(&key.Y)...)
+	inputs = append(inputs, notBefore, notAfter)
 	cur, err := hash(api, inputs...)
 	if err != nil {
 		return err
@@ -94,15 +104,15 @@ func (c *HiddenIssuerCircuit) Define(api frontend.API) error {
 
 	// The path to the root.
 	for d := 0; d < issuertree.Depth; d++ {
-		bit := c.IndexBits[d]
+		bit := indexBits[d]
 		api.AssertIsBoolean(bit)
-		left := api.Select(bit, c.Siblings[d], cur)
-		right := api.Select(bit, cur, c.Siblings[d])
+		left := api.Select(bit, siblings[d], cur)
+		right := api.Select(bit, cur, siblings[d])
 		if cur, err = hash(api, 2, left, right); err != nil {
 			return err
 		}
 	}
-	api.AssertIsEqual(cur, c.Root)
+	api.AssertIsEqual(cur, root)
 	return nil
 }
 

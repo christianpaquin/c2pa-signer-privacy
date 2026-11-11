@@ -4,7 +4,13 @@
 //
 // A leaf commits to a CA's P-384 key and validity period:
 //
-//	H(1, version, keyType, x2, x1, x0, y2, y1, y0, notBefore, notAfter)
+//	H(tag, version, keyType, x2, x1, x0, y2, y1, y0, notBefore, notAfter)
+//
+// where tag is the tree's role: 1 for issuer trees (CAs of signer
+// certificates, H4) and 4 for TSA trees (CAs of TSA certificates, I6,
+// HIDING-THE-TIME-STAMP.md, T4). The two domains are separate: a root or path
+// built for one role never verifies as the other's. Issuer trees are exactly
+// format 1 as first specified; the TSA tag extends it.
 //
 // where x2 x1 x0 (and y2 y1 y0) are the canonical coordinate as three 128-bit
 // limbs, most significant first, and notBefore and notAfter are Unix seconds.
@@ -14,9 +20,11 @@
 // their hash as an integer; identical leaves are kept once; the tree is
 // padded with empty leaves to 2^Depth, and larger sets are refused.
 //
-// Which certificates are eligible (CA checks, no name or policy constraints)
-// is the caller's decision (HIDING-THE-ISSUER.md, I1): Build takes the
-// certificates it is given and keeps those with P-384 keys.
+// Which certificates are eligible (CA checks for the role's purpose, no name
+// or policy constraints) is the caller's decision (HIDING-THE-ISSUER.md, I1;
+// HIDING-THE-TIME-STAMP.md, T4): Build takes the certificates it is given and
+// keeps those with P-384 keys. The role's tag separates the hashing domains;
+// it cannot make up for certificates filtered for the wrong purpose.
 package issuertree
 
 import (
@@ -46,10 +54,48 @@ const (
 	Depth    = 8
 	Capacity = 1 << Depth
 
-	tagLeaf  = 1
-	tagNode  = 2
-	tagEmpty = 3
+	// TagLeafIssuer and TagLeafTSA are the leaf domain tags of each role.
+	TagLeafIssuer = 1
+	TagLeafTSA    = 4
+	tagNode       = 2
+	tagEmpty      = 3
 )
+
+// Role is what a tree's CAs are trusted for; it fixes the leaves' domain tag.
+type Role int
+
+const (
+	// RoleIssuer: CAs issuing claim-signing certificates (tag 1).
+	RoleIssuer Role = iota
+	// RoleTSA: CAs issuing time-stamping certificates (tag 4).
+	RoleTSA
+)
+
+// LeafTag is the role's leaf domain tag.
+func (r Role) LeafTag() int64 {
+	if r == RoleTSA {
+		return TagLeafTSA
+	}
+	return TagLeafIssuer
+}
+
+func (r Role) String() string {
+	if r == RoleTSA {
+		return "tsa"
+	}
+	return "issuer"
+}
+
+// ParseRole reads a role by name: "issuer" or "tsa".
+func ParseRole(name string) (Role, error) {
+	switch name {
+	case "issuer":
+		return RoleIssuer, nil
+	case "tsa":
+		return RoleTSA, nil
+	}
+	return 0, fmt.Errorf("unknown tree role %q (issuer or tsa)", name)
+}
 
 // Hasher computes H over field elements for a curve's scalar field.
 type Hasher struct {
@@ -118,11 +164,11 @@ type Entry struct {
 	CertSHA256s []string
 }
 
-// LeafInputs are the leaf's hash inputs, in order.
-func LeafInputs(ca CA) []*big.Int {
+// LeafInputs are a leaf's hash inputs for the role, in order.
+func LeafInputs(role Role, ca CA) []*big.Int {
 	x, y := Limbs128(ca.X), Limbs128(ca.Y)
 	return []*big.Int{
-		big.NewInt(tagLeaf), big.NewInt(FormatVersion), big.NewInt(KeyTypeP384),
+		big.NewInt(role.LeafTag()), big.NewInt(FormatVersion), big.NewInt(KeyTypeP384),
 		x[0], x[1], x[2], y[0], y[1], y[2],
 		big.NewInt(ca.NotBefore), big.NewInt(ca.NotAfter),
 	}
@@ -149,6 +195,8 @@ func FromCertificate(der []byte) (CA, error) {
 // Tree is a built tree: its levels, leaves first.
 type Tree struct {
 	hasher *Hasher
+	// Role is the tree's role, which fixed its leaves' tag.
+	Role Role
 	// Entries in leaf order (sorted by leaf hash), without the padding.
 	Entries []Entry
 	levels  [][]*big.Int
@@ -156,9 +204,9 @@ type Tree struct {
 	index map[string]int
 }
 
-// Build builds the tree over the given certificates' CA entries. Certificates
-// without a P-384 key are skipped and returned, with the reason.
-func Build(curve ecc.ID, certificates [][]byte) (*Tree, []string, error) {
+// Build builds the role's tree over the given certificates' CA entries.
+// Certificates without a P-384 key are skipped and returned, with the reason.
+func Build(curve ecc.ID, role Role, certificates [][]byte) (*Tree, []string, error) {
 	h, err := NewHasher(curve)
 	if err != nil {
 		return nil, nil, err
@@ -177,7 +225,7 @@ func Build(curve ecc.ID, certificates [][]byte) (*Tree, []string, error) {
 			skipped = append(skipped, err.Error())
 			continue
 		}
-		v, err := h.Hash(LeafInputs(ca)...)
+		v, err := h.Hash(LeafInputs(role, ca)...)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -198,7 +246,7 @@ func Build(curve ecc.ID, certificates [][]byte) (*Tree, []string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	t := &Tree{hasher: h, index: map[string]int{}}
+	t := &Tree{hasher: h, Role: role, index: map[string]int{}}
 	level := make([]*big.Int, Capacity)
 	for i := range level {
 		if i >= len(leaves) {
@@ -260,12 +308,14 @@ func (t *Tree) Prove(certSHA256 string) (Proof, error) {
 	return p, nil
 }
 
-// Verify recomputes the root from a proof (the circuit's computation, natively).
-func (t *Tree) Verify(p Proof) (*big.Int, error) { return VerifyWith(t.hasher, p) }
+// Verify recomputes the root from a proof (the circuit's computation,
+// natively), in the tree's role.
+func (t *Tree) Verify(p Proof) (*big.Int, error) { return VerifyWith(t.hasher, t.Role, p) }
 
-// VerifyWith recomputes the root from a proof with a given hasher.
-func VerifyWith(h *Hasher, p Proof) (*big.Int, error) {
-	cur, err := h.Hash(LeafInputs(p.CA)...)
+// VerifyWith recomputes the root from a proof, with a given hasher, as a
+// member of a tree of the given role.
+func VerifyWith(h *Hasher, role Role, p Proof) (*big.Int, error) {
+	cur, err := h.Hash(LeafInputs(role, p.CA)...)
 	if err != nil {
 		return nil, err
 	}

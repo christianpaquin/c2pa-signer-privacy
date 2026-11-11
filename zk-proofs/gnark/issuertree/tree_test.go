@@ -57,12 +57,12 @@ func TestLimbs128(t *testing.T) {
 func TestRootIsIndependentOfInputOrderAndDuplicates(t *testing.T) {
 	for _, curve := range []ecc.ID{ecc.BN254, ecc.BLS12_381} {
 		certs := cas(t, 5)
-		a, _, err := Build(curve, certs)
+		a, _, err := Build(curve, RoleIssuer, certs)
 		if err != nil {
 			t.Fatal(err)
 		}
 		reversed := [][]byte{certs[4], certs[3], certs[2], certs[1], certs[0], certs[2]} // and a duplicate
-		b, _, err := Build(curve, reversed)
+		b, _, err := Build(curve, RoleIssuer, reversed)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -85,9 +85,9 @@ func TestRootIsIndependentOfInputOrderAndDuplicates(t *testing.T) {
 
 func TestRootDependsOnEveryEntryAndTheCurve(t *testing.T) {
 	certs := cas(t, 3)
-	full, _, _ := Build(ecc.BN254, certs)
-	fewer, _, _ := Build(ecc.BN254, certs[:2])
-	other, _, _ := Build(ecc.BLS12_381, certs)
+	full, _, _ := Build(ecc.BN254, RoleIssuer, certs)
+	fewer, _, _ := Build(ecc.BN254, RoleIssuer, certs[:2])
+	other, _, _ := Build(ecc.BLS12_381, RoleIssuer, certs)
 	if full.Root().Cmp(fewer.Root()) == 0 {
 		t.Fatal("removing an entry kept the root")
 	}
@@ -99,8 +99,8 @@ func TestRootDependsOnEveryEntryAndTheCurve(t *testing.T) {
 	renewed := ca
 	renewed.NotAfter++
 	h, _ := NewHasher(ecc.BN254)
-	a, _ := h.Hash(LeafInputs(ca)...)
-	b, _ := h.Hash(LeafInputs(renewed)...)
+	a, _ := h.Hash(LeafInputs(RoleIssuer, ca)...)
+	b, _ := h.Hash(LeafInputs(RoleIssuer, renewed)...)
 	if a.Cmp(b) == 0 {
 		t.Fatal("validity is not part of the leaf")
 	}
@@ -109,7 +109,7 @@ func TestRootDependsOnEveryEntryAndTheCurve(t *testing.T) {
 func TestNonP384KeysAreSkippedAndCapacityIsEnforced(t *testing.T) {
 	now := time.Now()
 	certs := append(cas(t, 2), caCert(t, elliptic.P256(), now, now.Add(time.Hour)))
-	tree, skipped, err := Build(ecc.BN254, certs)
+	tree, skipped, err := Build(ecc.BN254, RoleIssuer, certs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestNonP384KeysAreSkippedAndCapacityIsEnforced(t *testing.T) {
 	if testing.Short() {
 		return
 	}
-	if _, _, err := Build(ecc.BN254, cas(t, Capacity+1)); err == nil {
+	if _, _, err := Build(ecc.BN254, RoleIssuer, cas(t, Capacity+1)); err == nil {
 		t.Fatalf("%d entries accepted; capacity is %d", Capacity+1, Capacity)
 	}
 }
@@ -164,7 +164,7 @@ func TestEquivalentCertificatesShareALeafAndAllProve(t *testing.T) {
 		{twins[0], twins[1], others[0], others[1]},
 		{others[1], twins[1], others[0], twins[0]},
 	} {
-		tree, _, err := Build(ecc.BN254, order)
+		tree, _, err := Build(ecc.BN254, RoleIssuer, order)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -185,5 +185,53 @@ func TestEquivalentCertificatesShareALeafAndAllProve(t *testing.T) {
 	}
 	if roots[0].Cmp(roots[1]) != 0 {
 		t.Fatal("the root depends on input order")
+	}
+}
+
+// The roles' domains are separate (HIDING-THE-TIME-STAMP.md, T4): the same
+// CAs give different roots as issuer and TSA trees, and a path in one does
+// not verify as a member of the other.
+func TestRolesSeparateTheDomains(t *testing.T) {
+	for _, curve := range []ecc.ID{ecc.BN254, ecc.BLS12_381} {
+		certs := cas(t, 3) // the same CAs, eligible for both purposes
+		issuer, _, err := Build(curve, RoleIssuer, certs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tsa, _, err := Build(curve, RoleTSA, certs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if issuer.Root().Cmp(tsa.Root()) == 0 {
+			t.Fatalf("%s: the issuer and TSA roots of the same CAs are equal", curve)
+		}
+		h, _ := NewHasher(curve)
+		for _, e := range tsa.Entries {
+			p, err := tsa.Prove(e.CertSHA256)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if root, _ := VerifyWith(h, RoleTSA, p); root.Cmp(tsa.Root()) != 0 {
+				t.Fatalf("%s: a TSA path does not verify as TSA", curve)
+			}
+			if root, _ := VerifyWith(h, RoleIssuer, p); root.Cmp(tsa.Root()) == 0 || root.Cmp(issuer.Root()) == 0 {
+				t.Fatalf("%s: a TSA path verifies as an issuer member", curve)
+			}
+		}
+		for _, e := range issuer.Entries {
+			p, _ := issuer.Prove(e.CertSHA256)
+			if root, _ := VerifyWith(h, RoleTSA, p); root.Cmp(issuer.Root()) == 0 || root.Cmp(tsa.Root()) == 0 {
+				t.Fatalf("%s: an issuer path verifies as a TSA member", curve)
+			}
+		}
+	}
+	if _, err := ParseRole("both"); err == nil {
+		t.Fatal("an unknown role was parsed")
+	}
+	if r, _ := ParseRole("tsa"); r != RoleTSA || r.LeafTag() != TagLeafTSA {
+		t.Fatal("tsa role")
+	}
+	if r, _ := ParseRole("issuer"); r != RoleIssuer || r.LeafTag() != TagLeafIssuer || TagLeafIssuer != 1 {
+		t.Fatal("issuer role: format 1's tag 1 is unchanged")
 	}
 }

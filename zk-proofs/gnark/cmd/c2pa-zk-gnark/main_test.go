@@ -2,18 +2,28 @@ package main
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/backend/groth16"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs/r1cs"
+
+	"c2pa-zk-gnark/statement"
 )
 
 // A proof must be exactly the input: truncated or extended inputs (a signer
@@ -266,4 +276,73 @@ func TestBLS12381KeySets(t *testing.T) {
 	if _, err := readManifest(dir); err == nil {
 		t.Error("an unknown curve was accepted")
 	}
+}
+
+// The statement belongs to the key set: key sets from before H4 are the
+// disclosed statement, and an unknown statement is refused.
+func TestStatementIsPartOfTheKeySet(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, manifest{Statement: "old", Curve: "bn254"})
+	m, err := readManifest(dir)
+	if err != nil || m.variant() != variantDisclosed {
+		t.Fatalf("a key set without a variant: %v, %q", err, m.variant())
+	}
+	writeManifest(t, dir, manifest{Statement: "x", Curve: "bn254", Variant: "hidden-everything"})
+	if _, err := readManifest(dir); err == nil {
+		t.Fatal("an unknown statement was accepted")
+	}
+	if err := setup(t.TempDir(), "bn254", "hidden-everything"); err == nil {
+		t.Fatal("setup accepted an unknown statement")
+	}
+}
+
+// --issuers is required by the hidden-issuer statement and refused by the
+// disclosed one, so a mistaken invocation never silently proves the other.
+func TestIssuersFlagMatchesTheStatement(t *testing.T) {
+	var in statementInputs
+	if _, err := assignment(in.Inputs, smallSizes, ecc.BN254, variantDisclosed, "issuers.pem"); err == nil || !strings.Contains(err.Error(), "only to the hidden-issuer") {
+		t.Fatalf("disclosed statement with --issuers: %v", err)
+	}
+	if _, err := assignment(in.Inputs, smallSizes, ecc.BN254, variantHidden, ""); err == nil || !strings.Contains(err.Error(), "needs --issuers") {
+		t.Fatalf("hidden issuer without --issuers: %v", err)
+	}
+}
+
+func TestIssuerTreeReadsPEMCertificates(t *testing.T) {
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty.pem")
+	os.WriteFile(empty, []byte("no certificates here\n"), 0o644)
+	if _, _, err := issuerTree(empty, ecc.BN254); err == nil {
+		t.Fatal("a file without certificates was accepted")
+	}
+	pemFile := filepath.Join(dir, "issuers.pem")
+	var buf bytes.Buffer
+	for _, der := range testCAs(t, 3) {
+		pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: der})
+	}
+	os.WriteFile(pemFile, buf.Bytes(), 0o644)
+	tree, _, err := issuerTree(pemFile, ecc.BN254)
+	if err != nil || len(tree.Entries) != 3 {
+		t.Fatalf("tree from 3 certificates: %v", err)
+	}
+}
+
+type statementInputs struct{ Inputs statement.Inputs }
+
+var smallSizes = statement.Sizes{MaxProtected: 1536, MaxClaim: 512, MaxTBS: 768, MaxExtensions: 8, MaxEKUs: 4}
+
+func testCAs(t *testing.T, n int) [][]byte {
+	t.Helper()
+	var out [][]byte
+	for i := 0; i < n; i++ {
+		key, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+		tmpl := &x509.Certificate{SerialNumber: big.NewInt(int64(i + 1)), Subject: pkix.Name{CommonName: "CLI Test CA"},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, der)
+	}
+	return out
 }

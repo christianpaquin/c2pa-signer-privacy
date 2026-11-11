@@ -1,6 +1,6 @@
 # H4: Hiding the Issuing CA
 
-**Status: proposed, for review.** This note designs [roadmap H4](README.md#h4-hiding-the-issuing-ca) before any circuit work, as [E2a](THIRD-PARTY-STATEMENT.md) did for the third-party statement. Each choice is listed under [Decisions for review](#decisions-for-review) with a proposed default.
+**Status: adopted (PR #34), as an opt-in experiment; being implemented.** The tree (format version 1) and the hidden-issuer statement are in the gnark prover ([`issuertree`](gnark/issuertree/), [`statement/hidden.go`](gnark/statement/hidden.go)); the anonymizer, the verifier's policy, and the measurement are next. This note designs [roadmap H4](README.md#h4-hiding-the-issuing-ca), as [E2a](THIRD-PARTY-STATEMENT.md) did for the third-party statement. Each choice is listed under [Decisions for review](#decisions-for-review) with its default.
 
 ## The problem
 

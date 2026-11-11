@@ -1,11 +1,21 @@
 // c2pa-zk-gnark proves and verifies the third-party anonymization statement
 // (package statement) with Groth16, on BN254 (the default) or BLS12-381.
 //
-//	c2pa-zk-gnark setup  --keys DIR [--curve bn254|bls12-381]
-//	c2pa-zk-gnark check  --input inputs.json [--curve bn254|bls12-381]
-//	c2pa-zk-gnark prove  --keys DIR --input inputs.json --proof proof.bin [--pk-format F --pk-check C]
+//	c2pa-zk-gnark setup  --keys DIR [--curve bn254|bls12-381] [--statement disclosed|hidden-issuer]
+//	c2pa-zk-gnark check  --input inputs.json [--curve C] [--statement S --issuers issuers.pem]
+//	c2pa-zk-gnark prove  --keys DIR --input inputs.json --proof proof.bin [--issuers issuers.pem] [--pk-format F --pk-check C]
 //	c2pa-zk-gnark convert-pk --keys DIR
 //	c2pa-zk-gnark verify --keys DIR --public public.json --proof proof.bin
+//	c2pa-zk-gnark tree   --issuers issuers.pem [--curve C]
+//
+// Two statements (roadmap H4, HIDING-THE-ISSUER.md): "disclosed" (the
+// default: the issuing CA's key is a public input) and "hidden-issuer" (the
+// CA's key is private and proven a member of the issuer tree whose root is
+// public). The statement belongs to the key set, like the curve. For the
+// hidden issuer, prove and check build the tree from --issuers (a PEM file of
+// eligible CA certificates; eligibility is the caller's, I1), and public.json
+// holds statement.HiddenPublic, with the root of a tree the verifier
+// approves. tree prints a tree's root and entries (JSON).
 //
 // inputs.json holds statement.Inputs (byte fields in base64); public.json
 // holds statement.Public. Both are produced from a signed asset by the Rust
@@ -33,6 +43,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -52,6 +63,7 @@ import (
 	"github.com/consensys/gnark/frontend/cs/r1cs"
 	gnarkio "github.com/consensys/gnark/io"
 
+	"c2pa-zk-gnark/issuertree"
 	"c2pa-zk-gnark/statement"
 )
 
@@ -65,6 +77,8 @@ const (
 // manifest identifies the keys: the circuit's sizes and the files' hashes.
 type manifest struct {
 	Statement string `json:"statement"`
+	// "hidden-issuer" for the H4 statement; absent for the disclosed one.
+	Variant string `json:"variant,omitempty"`
 	// The proof system's curve: "bn254" (also when absent, for key sets
 	// from before E7) or "bls12-381".
 	Curve       string            `json:"curve,omitempty"`
@@ -130,17 +144,19 @@ func main() {
 	proofPath := fs.String("proof", "", "proof file")
 	pkFormat := fs.String("pk-format", "compressed", "proving-key file: compressed, raw, or dump")
 	pkCheck := fs.String("pk-check", "full", "validate proving-key points on load: full or none")
-	curve := fs.String("curve", "bn254", "setup and check: the curve, bn254 or bls12-381")
+	curve := fs.String("curve", "bn254", "setup, check, and tree: the curve, bn254 or bls12-381")
+	variant := fs.String("statement", variantDisclosed, "setup and check: the statement, disclosed or hidden-issuer")
+	issuers := fs.String("issuers", "", "hidden issuer: the eligible CA certificates (PEM) the tree is built from")
 	_ = fs.Parse(os.Args[2:])
 
 	var err error
 	switch os.Args[1] {
 	case "setup":
-		err = setup(require(*keys, "--keys"), *curve)
+		err = setup(require(*keys, "--keys"), *curve, *variant)
 	case "check":
-		err = check(require(*input, "--input"), *curve)
+		err = check(require(*input, "--input"), *curve, *variant, *issuers)
 	case "prove":
-		err = prove(require(*keys, "--keys"), require(*input, "--input"), require(*proofPath, "--proof"), *pkFormat, *pkCheck)
+		err = prove(require(*keys, "--keys"), require(*input, "--input"), require(*proofPath, "--proof"), *pkFormat, *pkCheck, *issuers)
 	case "convert-pk":
 		err = convertPK(require(*keys, "--keys"))
 	case "verify":
@@ -149,6 +165,8 @@ func main() {
 			fmt.Fprintln(os.Stderr, "proof is INVALID")
 			os.Exit(1)
 		}
+	case "tree":
+		err = printTree(require(*issuers, "--issuers"), *curve)
 	default:
 		usage()
 	}
@@ -161,7 +179,7 @@ func main() {
 var errInvalid = errors.New("invalid proof")
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: c2pa-zk-gnark setup|check|prove|verify|convert-pk (see the source header)")
+	fmt.Fprintln(os.Stderr, "usage: c2pa-zk-gnark setup|check|prove|verify|convert-pk|tree (see the source header)")
 	os.Exit(2)
 }
 
@@ -181,25 +199,115 @@ func timed(what string, f func() error) error {
 	return err
 }
 
-func compile(s statement.Sizes, curve ecc.ID) (constraint.ConstraintSystem, error) {
+const (
+	variantDisclosed = "disclosed"
+	variantHidden    = "hidden-issuer"
+)
+
+func checkVariant(v string) error {
+	if v != variantDisclosed && v != variantHidden {
+		return fmt.Errorf("unknown statement %q (disclosed or hidden-issuer)", v)
+	}
+	return nil
+}
+
+func compile(s statement.Sizes, curve ecc.ID, variant string) (constraint.ConstraintSystem, error) {
+	var circuit frontend.Circuit = statement.NewCircuit(s)
+	if variant == variantHidden {
+		circuit = statement.NewHiddenIssuerCircuit(s)
+	}
 	var ccs constraint.ConstraintSystem
 	err := timed("compile", func() (err error) {
-		ccs, err = frontend.Compile(curve.ScalarField(), r1cs.NewBuilder, statement.NewCircuit(s))
+		ccs, err = frontend.Compile(curve.ScalarField(), r1cs.NewBuilder, circuit)
 		return
 	})
 	return ccs, err
 }
 
-func setup(dir, curveName string) error {
+// issuerTree builds the issuer tree from a PEM file of CA certificates.
+func issuerTree(path string, curve ecc.ID) (*issuertree.Tree, []string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	var certs [][]byte
+	for {
+		var block *pem.Block
+		block, data = pem.Decode(data)
+		if block == nil {
+			break
+		}
+		if block.Type == "CERTIFICATE" {
+			certs = append(certs, block.Bytes)
+		}
+	}
+	if len(certs) == 0 {
+		return nil, nil, fmt.Errorf("no certificates in %s", path)
+	}
+	return issuertree.Build(curve, certs)
+}
+
+// assignment builds the prover's assignment for the key set's statement.
+func assignment(in statement.Inputs, s statement.Sizes, curve ecc.ID, variant, issuers string) (frontend.Circuit, error) {
+	if variant != variantHidden {
+		if issuers != "" {
+			return nil, fmt.Errorf("--issuers applies only to the hidden-issuer statement")
+		}
+		return statement.Assign(in, s)
+	}
+	if issuers == "" {
+		return nil, fmt.Errorf("the hidden-issuer statement needs --issuers")
+	}
+	tree, _, err := issuerTree(issuers, curve)
+	if err != nil {
+		return nil, err
+	}
+	return statement.AssignHidden(in, tree, s)
+}
+
+func printTree(issuers, curveName string) error {
 	curve, err := curveID(curveName)
 	if err != nil {
+		return err
+	}
+	tree, skipped, err := issuerTree(issuers, curve)
+	if err != nil {
+		return err
+	}
+	type entry struct {
+		CertSHA256s []string `json:"cert_sha256s"` // every certificate with this leaf
+		NotBefore   int64    `json:"not_before"`
+		NotAfter    int64    `json:"not_after"`
+	}
+	out := struct {
+		FormatVersion int      `json:"format_version"`
+		Curve         string   `json:"curve"`
+		KeyType       string   `json:"key_type"`
+		Root          string   `json:"root"`
+		Entries       []entry  `json:"entries"`
+		Skipped       []string `json:"skipped"`
+	}{FormatVersion: issuertree.FormatVersion, Curve: curveName, KeyType: "P-384", Root: tree.Root().Text(16), Entries: []entry{}, Skipped: append([]string{}, skipped...)}
+	for _, e := range tree.Entries {
+		out.Entries = append(out.Entries, entry{e.CertSHA256s, e.NotBefore, e.NotAfter})
+	}
+	data, _ := json.MarshalIndent(out, "", "  ")
+	fmt.Println(string(data))
+	return nil
+}
+
+func setup(dir, curveName, variant string) error {
+	curve, err := curveID(curveName)
+	if err != nil {
+		return err
+	}
+	if err := checkVariant(variant); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	s := statement.DefaultSizes
-	ccs, err := compile(s, curve)
+	ccs, err := compile(s, curve, variant)
 	if err != nil {
 		return err
 	}
@@ -209,6 +317,9 @@ func setup(dir, curveName string) error {
 		return err
 	}
 	m := manifest{Statement: "c2pa-x509-zk third-party (E2b)", Curve: curveName, Sizes: s, Constraints: ccs.GetNbConstraints(), SHA256: map[string]string{}}
+	if variant == variantHidden {
+		m.Statement, m.Variant = "c2pa-x509-zk third-party, hidden issuer (H4)", variantHidden
+	}
 	for name, w := range map[string]io.WriterTo{ccsFile: ccs, pkFile: pk, vkFile: vk} {
 		sum, err := writeFile(filepath.Join(dir, name), w)
 		if err != nil {
@@ -222,24 +333,27 @@ func setup(dir, curveName string) error {
 	return os.WriteFile(filepath.Join(dir, manifestFile), append(data, '\n'), 0o644)
 }
 
-func check(inputPath, curveName string) error {
+func check(inputPath, curveName, variant, issuers string) error {
 	curve, err := curveID(curveName)
 	if err != nil {
+		return err
+	}
+	if err := checkVariant(variant); err != nil {
 		return err
 	}
 	var in statement.Inputs
 	if err := readJSON(inputPath, &in); err != nil {
 		return err
 	}
-	ccs, err := compile(statement.DefaultSizes, curve)
+	assigned, err := assignment(in, statement.DefaultSizes, curve, variant, issuers)
 	if err != nil {
 		return err
 	}
-	assignment, err := statement.Assign(in, statement.DefaultSizes)
+	ccs, err := compile(statement.DefaultSizes, curve, variant)
 	if err != nil {
 		return err
 	}
-	w, err := frontend.NewWitness(assignment, curve.ScalarField())
+	w, err := frontend.NewWitness(assigned, curve.ScalarField())
 	if err != nil {
 		return err
 	}
@@ -370,7 +484,7 @@ type writerFunc func(io.Writer) (int64, error)
 
 func (f writerFunc) WriteTo(w io.Writer) (int64, error) { return f(w) }
 
-func prove(dir, inputPath, proofPath, pkFormat, pkCheck string) error {
+func prove(dir, inputPath, proofPath, pkFormat, pkCheck, issuers string) error {
 	m, err := readManifest(dir)
 	if err != nil {
 		return err
@@ -379,7 +493,7 @@ func prove(dir, inputPath, proofPath, pkFormat, pkCheck string) error {
 	if err := readJSON(inputPath, &in); err != nil {
 		return err
 	}
-	assignment, err := statement.Assign(in, m.Sizes)
+	assigned, err := assignment(in, m.Sizes, m.curve(), m.variant(), issuers)
 	if err != nil {
 		return err
 	}
@@ -391,7 +505,7 @@ func prove(dir, inputPath, proofPath, pkFormat, pkCheck string) error {
 	if err != nil {
 		return err
 	}
-	w, err := frontend.NewWitness(assignment, m.curve().ScalarField())
+	w, err := frontend.NewWitness(assigned, m.curve().ScalarField())
 	if err != nil {
 		return err
 	}
@@ -408,13 +522,23 @@ func verify(dir, publicPath, proofPath string) error {
 	if err != nil {
 		return err
 	}
-	var pub statement.Public
-	if err := readJSON(publicPath, &pub); err != nil {
-		return err
-	}
-	assignment, err := statement.AssignPublic(pub, m.Sizes)
-	if err != nil {
-		return err
+	var assigned frontend.Circuit
+	if m.variant() == variantHidden {
+		var pub statement.HiddenPublic
+		if err := readJSON(publicPath, &pub); err != nil {
+			return err
+		}
+		if assigned, err = statement.AssignHiddenPublic(pub, m.Sizes, m.curve()); err != nil {
+			return err
+		}
+	} else {
+		var pub statement.Public
+		if err := readJSON(publicPath, &pub); err != nil {
+			return err
+		}
+		if assigned, err = statement.AssignPublic(pub, m.Sizes); err != nil {
+			return err
+		}
 	}
 	vk := groth16.NewVerifyingKey(m.curve())
 	if err := readFile(dir, vkFile, m, vk); err != nil {
@@ -428,7 +552,7 @@ func verify(dir, publicPath, proofPath string) error {
 	if err != nil {
 		return err
 	}
-	w, err := frontend.NewWitness(assignment, m.curve().ScalarField(), frontend.PublicOnly())
+	w, err := frontend.NewWitness(assigned, m.curve().ScalarField(), frontend.PublicOnly())
 	if err != nil {
 		return err
 	}
@@ -447,7 +571,19 @@ func readManifest(dir string) (manifest, error) {
 	if _, err := curveID(m.Curve); err != nil {
 		return m, fmt.Errorf("%s: %w", manifestFile, err)
 	}
+	if err := checkVariant(m.variant()); err != nil {
+		return m, fmt.Errorf("%s: %w", manifestFile, err)
+	}
 	return m, nil
+}
+
+// variant is the key set's statement: disclosed when absent (key sets from
+// before H4).
+func (m manifest) variant() string {
+	if m.Variant == "" {
+		return variantDisclosed
+	}
+	return m.Variant
 }
 
 // curve is the key set's curve (validated by readManifest).

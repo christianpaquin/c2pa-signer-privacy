@@ -60,6 +60,19 @@ BN254 is the default. `c2pa-zk-gnark setup --keys DIR --curve bls12-381` creates
 
 Loading without point checks is refused unless the key's provenance record matches the file and the running gnark version. Every file is streamed twice through a bounded buffer, hashed before parsing and again while parsing; a file that changes in between, or has trailing bytes, is rejected. Measurements and the trade-off: [FEASIBILITY.md](../FEASIBILITY.md#e6-proving-key-loading-in-gnark). The dump is not recommended beyond a disposable local cache.
 
+### Hidden issuer (H4, opt-in)
+
+A second statement, designed in [HIDING-THE-ISSUER.md](../HIDING-THE-ISSUER.md): the issuing CA's key is private and proven to be a leaf of an issuer tree (package [`issuertree`](issuertree/), tree format version 1: Poseidon2, depth 8), whose root is public in place of the key; the CA's validity period, from its leaf, must contain `t`. The statement belongs to the key set (`variant` in `keys.json`); the disclosed statement stays the default.
+
+```bash
+../target/c2pa-zk-gnark tree  --issuers issuers.pem                    # the root and entries (JSON)
+../target/c2pa-zk-gnark setup --keys keys-hidden/ --statement hidden-issuer
+../target/c2pa-zk-gnark prove --keys keys-hidden/ --input inputs.json --proof proof.bin --issuers issuers.pem
+../target/c2pa-zk-gnark verify --keys keys-hidden/ --public hidden-public.json --proof proof.bin
+```
+
+`--issuers` holds the eligible CA certificates (PEM); deciding eligibility (the CA checks, excluding name and policy constraints) is the caller's, as is approving the root: `hidden-public.json` is `statement.HiddenPublic`, with `issuer_root` instead of the issuing CA's certificate: canonical lowercase hex below the curve's scalar field modulus, the only accepted form, as `tree` prints it. The prover builds the tree from `--issuers` and refuses if its issuing CA is not in it; certificates with the same key and validity share a leaf, and each of them proves.
+
 ## Tests
 
 ```bash
@@ -72,6 +85,7 @@ C2PA_ZK_GROTH16=1 go test ./...     # adds a real setup, proof, and verification
 - Rejected: a changed claim byte or length, imprint, a time just outside validity (the boundaries are inclusive), another CA, a changed claim signature, signer certificate byte, protected header byte, protected length, or CA signature.
 - Basic constraints: accepted when absent, empty, with `cA` FALSE written out, or with only a path length; rejected for `cA` TRUE in short and long-form sequences (a valid DER sequence with a 123-byte path length), with a path length, as a BOOLEAN of length 2, with an unexpected first element, or when the sequence does not fill the extension value or the BOOLEAN runs past it.
 - Certificate purpose: rejected without the claim-signing purpose, without an extended key usage extension, with the EKU hidden inside another extension, with two EKU extensions, or for a CA certificate; accepted with claim signing alone or among other purposes.
+- Hidden issuer, on both curves: the statement is accepted with the issuing CA in a tree of seven; rejected with the root of a list without the CA, a changed sibling, a flipped or non-boolean index bit, a changed CA validity, or a listed CA that did not issue the certificate (its own valid path); rejected when the CA's validity in its leaf ended before `t` or starts after it (the boundaries are inclusive, each with a valid path in another tree); the disclosed statement's checks (claim, imprint, time, claim signature) still hold. The tree: the root does not depend on input order or duplicates, depends on every entry, the validity, and the curve; non-P-384 keys are skipped; more than 256 entries are refused; certificates with the same key and validity but different serial numbers share one leaf, and each proves, in either input order. Roots: only canonical lowercase hex below the scalar field modulus is accepted (the root plus the modulus, a leading zero, uppercase, or a `0x` prefix are refused).
 - Components: variable-length SHA-384 against `crypto/sha512` at padding boundaries; UTCTime conversion against Go's `time` (leap days, the 2049 limit) and malformed dates.
 
 Certificates in the tests are built field by field with `encoding/asn1`, since `crypto/x509` refuses to create some of the malformed ones. From the Rust side, `tests/third_party_fixtures.rs` checks that the inputs exported from a real c2pa-signed asset satisfy the statement at the default sizes and that a tampered time does not (`C2PA_ZK_GO=$(which go) cargo test --release --test third_party_fixtures -- --ignored`).

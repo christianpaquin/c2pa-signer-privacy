@@ -99,45 +99,64 @@ fn kind(marker: u8, payload: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// Whether the segments `run` (indices, consecutive) carry the C2PA manifest
-/// store, as JPEG's JUMBF transport splits it: each an APP11 payload of
-/// `JP`, the same box instance number, sequence numbers 1, 2, ... in order,
-/// and the same superbox header (a `jumb` box); the first one's content
-/// starting with a description box of the C2PA manifest store's type, labelled
-/// `c2pa`. Bytes that merely start with `JP` are not the store.
+/// Whether the segments `run` (indices, consecutive) carry exactly the C2PA
+/// manifest store, as JPEG's JUMBF transport splits it, and nothing else.
+///
+/// Each segment is an APP11 payload of a transport header (`JP`, the box
+/// instance number `En`, the sequence number `Z`: 1, 2, ... in order, the same
+/// `En` throughout) followed by the superbox header (`LBox`, `jumb`, and
+/// `XLBox` when `LBox` is 1), repeated in every segment, then a part of the
+/// superbox's content. Reassembled (the first segment's header once, each
+/// segment's content), the superbox must have exactly its declared length:
+/// bytes after the store, in the last segment or in a surplus segment, are not
+/// the store. The content must start with a description box of the C2PA
+/// manifest store's type, labelled `c2pa`, entirely within the first segment
+/// and the store. Bytes that merely start with `JP` are not the store.
 fn is_c2pa_store(jpeg: &[u8], segments: &[Segment], run: &[usize]) -> bool {
-    let mut first_header: Option<&[u8]> = None;
-    let mut instance: Option<&[u8]> = None;
+    let Some(&first) = run.first() else { return false };
+    let payload = |i: usize| {
+        let (ps, pl) = segments[i].payload();
+        &jpeg[ps..ps + pl]
+    };
+    // The superbox header, from the first segment.
+    let p0 = payload(first);
+    if segments[first].marker != 0xeb || p0.len() < 16 || &p0[..2] != JUMBF || &p0[12..16] != b"jumb" {
+        return false;
+    }
+    let lbox = u32::from_be_bytes([p0[8], p0[9], p0[10], p0[11]]) as u64;
+    let (declared, header_len) = match lbox {
+        1 if p0.len() >= 24 => (u64::from_be_bytes(p0[16..24].try_into().expect("8 bytes")), 16),
+        0 | 1 => return false, // "to the end of the file", or a truncated XLBox: not a bounded store
+        n => (n, 8),
+    };
+    let header = &p0[8..8 + header_len];
+    let instance = &p0[2..4];
+    let mut reassembled: u64 = 0;
     for (n, &i) in run.iter().enumerate() {
-        let s = &segments[i];
-        if s.marker != 0xeb {
+        let p = payload(i);
+        if segments[i].marker != 0xeb || p.len() < 8 + header_len || &p[..2] != JUMBF || &p[2..4] != instance {
             return false;
         }
-        let (ps, pl) = s.payload();
-        let p = &jpeg[ps..ps + pl];
-        // JP, En (2), Z (4), then the superbox header LBox (4) TBox (4).
-        if p.len() < 16 || &p[..2] != JUMBF {
+        if u32::from_be_bytes([p[4], p[5], p[6], p[7]]) != n as u32 + 1 || &p[8..8 + header_len] != header {
             return false;
         }
-        if *instance.get_or_insert(&p[2..4]) != &p[2..4] {
-            return false;
-        }
-        if u32::from_be_bytes([p[4], p[5], p[6], p[7]]) != n as u32 + 1 {
-            return false;
-        }
-        let header = &p[8..16];
-        if &header[4..8] != b"jumb" || *first_header.get_or_insert(header) != header {
-            return false;
-        }
-        if n == 0 {
-            // The description box: LBox (4) 'jumd' (4) UUID (16) toggles (1) label.
-            let d = &p[16..];
-            if d.len() < 30 || &d[4..8] != b"jumd" || d[8..24] != C2PA_STORE_UUID || d[24] & 0x02 == 0 || &d[25..30] != b"c2pa\0" {
-                return false;
-            }
+        // The first segment counts its header; every segment its content.
+        let content = (p.len() - 8 - header_len) as u64;
+        reassembled += content + if n == 0 { header_len as u64 } else { 0 };
+        if n > 0 && content == 0 {
+            return false; // a continuation carrying nothing
         }
     }
-    !run.is_empty()
+    if reassembled != declared {
+        return false; // trailing bytes, a surplus segment, or a truncated store
+    }
+    // The description box: LBox (4) 'jumd' (4) UUID (16) toggles (1) label.
+    let d = &p0[8 + header_len..];
+    if d.len() < 30 || &d[4..8] != b"jumd" || d[8..24] != C2PA_STORE_UUID || d[24] & 0x02 == 0 || &d[25..30] != b"c2pa\0" {
+        return false;
+    }
+    let d_len = u32::from_be_bytes([d[0], d[1], d[2], d[3]]) as usize;
+    d_len >= 30 && d_len <= d.len() && (header_len + d_len) as u64 <= declared
 }
 
 /// Scrub `asset` (in memory, `format` its file extension) given its hard
@@ -471,4 +490,45 @@ mod tests {
             }
         }
     }
+
+    /// Exactly the declared store, and nothing after it (PR #44 follow-up):
+    /// bytes past the superbox's length, in the same segment or a surplus
+    /// one, are not the store; nor is a truncated store or a description box
+    /// claiming more than the store.
+    #[test]
+    fn the_store_has_exactly_its_declared_extent() {
+        let serial = b"\0\0\0\x24free private-camera-serial-123456";
+        // Extra bytes after the store, in the first (only) segment.
+        let mut one = canonical_store(1);
+        let len = one[0].len() + serial.len() - 2;
+        one[0].extend(serial);
+        one[0][2..4].copy_from_slice(&(len as u16).to_be_bytes());
+        // Extra bytes in a second segment, with the same instance, header, and sequence 2.
+        let mut two = canonical_store(1);
+        let p = &two[0][4..];
+        let header = p[8..16].to_vec();
+        let extra = [JUMBF, &[0, 1][..], &2u32.to_be_bytes(), &header, serial].concat();
+        two.push(segment(0xeb, &extra));
+        // A truncated store: its last byte missing.
+        let mut short = canonical_store(1);
+        short[0].pop();
+        let l = short[0].len() - 2;
+        short[0][2..4].copy_from_slice(&(l as u16).to_be_bytes());
+        // A description box claiming more than the store holds.
+        let mut wide = canonical_store(1);
+        let d = 4 + 8 + 8; // segment header, transport header, superbox header
+        wide[0][d..d + 4].copy_from_slice(&10_000u32.to_be_bytes());
+        for (name, store) in [("extra bytes in the segment", one), ("extra bytes in a surplus segment", two), ("a truncated store", short), ("a description box beyond the store", wide)] {
+            let (asset, exclusions) = jpeg_with_store(store);
+            let err = refused(&asset, &exclusions);
+            assert!(err.contains("not recognized"), "{name}: {err}");
+        }
+        // Controls: single-segment and split stores of exactly their length.
+        for parts in [1, 2, 3] {
+            let (asset, exclusions) = jpeg_with_store(canonical_store(parts));
+            let mut a = asset.clone();
+            assert!(scrub(&mut a, "jpg", &exclusions).is_ok(), "a store in {parts} segment(s): refused");
+        }
+    }
+
 }

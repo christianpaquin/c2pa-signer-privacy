@@ -25,6 +25,7 @@ How the X.509 + ZK prototype evolved, for reporting. Details live in the pull re
 | Anonymize, then edit | Nov 10 | #33 | An anonymized asset survives a resize as an ingredient, with its proof still verifying; the proof covers the ingredient's signature, not the link to it, which standard validation checks; c2pa-rs rates the edited asset Invalid either way (E8) |
 | Hiding the issuer (design) | Nov 11 | #34 | H4 proposed: membership of the issuing CA in a verifier-approved Merkle root, opt-in; limited gain while the claim and the time-stamp token name the organization |
 | Hiding the issuer | Nov 11 | #35, #36 | H4 implemented as an opt-in: the issuer tree and statement in gnark, the anonymizer, and the verifier's policy; no measurable cost |
+| Hiding the time stamp | Nov 11–12 | #37–#41 | I6: the time-stamp token verified in the circuit under a reduced profile, the TSA hidden in its own tree (leaf tag 4), a UTC day disclosed by default; opt-in, +28% per asset |
 
 ## Defects found in the original prototype
 
@@ -46,6 +47,7 @@ Recorded in [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIONS.md) (D1–D7) and
 - **A trusted time stamp is required** (D7, Q6): validity at the time a TSA attested the signature, as C2PA defines it; the token is public, so the TSA operator can link the output to the original (Q7).
 - **gnark for E2b** (#22), after E1 measured ECDSA at a thirteenth of circom's constraints and P-384 available.
 - **The hidden issuer is opt-in, under verifier-approved roots** (#34): a root supplied by the asset alone proves nothing, and an old root proves trust only within its snapshot's period. Without `x5chain`, c2pa-rs 0.77 does not read a manifest at all, so removing the certificate also affects the verifier's own assertion and hard-binding checks ([HIDING-THE-ISSUER.md](HIDING-THE-ISSUER.md)).
+- **The token can be hidden too, under a stated reduced profile** (#37–#41): moving OpenSSL's token checks into the circuit made the accepted profile explicit (structural parsing, attribute cardinality, the `SET OF` preimage, a critical time-stamping-only EKU), with deliberate omissions listed. The exact time would still link for the TSA operator, so only an aligned window (a UTC day by default) is published. The issuer and TSA trees are separated in the circuit by their leaf tags, against root and path mix-ups; correct filtering for each purpose stays the verifier's job.
 - **Single-manifest assets only** (#31): later claims commit to their ingredients' signatures, so an earlier signer cannot be anonymized afterwards without breaking the provenance links; anonymizing before editing works with c2pa-rs, at the cost of standard validators rating the edited asset invalid ([E8](README.md#e8-ingredient-manifests)).
 - **V0 kept as a frozen baseline** rather than retired, so the comparison can be reproduced. Moving past it was a decision (Q2), not a dominance result: the two disclose different information and accept different inputs.
 
@@ -66,6 +68,7 @@ All on the same laptop ([reference machine](FEASIBILITY.md#reference-machine)); 
 | [V1 on BLS12-381](bench/results/2026-11-09-e7/) (E7) | Same, on a ~120-bit curve (curve-level estimate; option, BN254 stays default) | 302 s; **88 s** with the raw key path | 8.5 GiB | BN254 in the same session: 72 s and 33 s; raw BLS12-381 keys parse slowly even unchecked |
 | [E1 RSA primitives](bench/results/2026-11-10-e1-rsa-gnark-review.json) (#30) | RSA CA and PS256 signatures, next to ECDSA, in gnark | 4.6 s for an RSA-4096 CA over a 1.5 KB TBS (key resident; not comparable) | 3.4 GiB | RSA-4096 costs about as much as ECDSA P-256 (exponent 65537); RSA CAs 0.75–0.86× P-384 ones; PS256 3.5–6.0× ES256, mostly MGF1 hashing |
 | [V1, hidden issuer](bench/results/2026-11-11-h4/) (H4) | Same, with the issuing CA hidden among the trust list's eligible CAs (opt-in) | 107 s against 104 s for V1 in the same session (within noise) | 6.7 GiB | The machine slowed by ~40% within the session without suspending; compared with the adjacent run |
+| [V1, hidden issuer and time stamp](bench/results/2026-11-12-i6/) (I6) | Same, with the time-stamp token verified in the circuit (opt-in) | 97 s against 75–77 s for the hidden issuer in the same session | 8.5 GiB | Clean session (heartbeat, no suspend); an earlier one, spoiled by a laptop sleep, was discarded |
 
 ## Lessons
 

@@ -26,7 +26,7 @@ How the X.509 + ZK prototype evolved, for reporting. Details live in the pull re
 | Hiding the issuer (design) | Nov 11 | #34 | H4 proposed: membership of the issuing CA in a verifier-approved Merkle root, opt-in; limited gain while the claim and the time-stamp token name the organization |
 | Hiding the issuer | Nov 11 | #35, #36 | H4 implemented as an opt-in: the issuer tree and statement in gnark, the anonymizer, and the verifier's policy; no measurable cost |
 | Hiding the time stamp | Nov 11–12 | #37–#41 | I6: the time-stamp token verified in the circuit under a reduced profile, the TSA hidden in its own tree (leaf tag 4), a UTC day disclosed by default; opt-in, +28% per asset |
-| A real photo, fully hidden | Nov 12 | #42 | R2 with the issuer and the time stamp hidden: a real device photo anonymizes and verifies against the official lists; the unchanged claim is now the main disclosure |
+| A real photo, issuer and token hidden | Nov 12 | #42 | R2 with the issuer and the time stamp hidden: a real device photo anonymizes and verifies against the official lists; the unchanged claim is now the main disclosure |
 
 ## Defects found in the original prototype
 

@@ -736,6 +736,34 @@ fn hidden_public(public: &PublicInputs, tree: &IssuerTreeRef) -> HiddenPublicInp
     HiddenPublicInputs { claim: public.claim.clone(), issuer_root: tree.root.clone(), time: public.time, imprint: public.imprint.clone() }
 }
 
+// ---- Metadata scrubbing (H6) ------------------------------------------------------
+
+/// Scrub, in place, the identifying metadata the asset's hard binding
+/// excludes (EXIF and XMP; CLAIM-PRIVACY.md, H6), and report what was removed
+/// and what is signed and stays. The claim and the hard binding are unchanged.
+pub fn scrub_metadata(asset: &Path) -> Result<crate::scrub::ScrubReport> {
+    scrub_metadata_with(asset, true)
+}
+
+/// What scrubbing `asset` would do, without changing it: to refuse early,
+/// before proving.
+pub fn check_scrubbable(asset: &Path) -> Result<crate::scrub::ScrubReport> {
+    scrub_metadata_with(asset, false)
+}
+
+fn scrub_metadata_with(asset: &Path, write: bool) -> Result<crate::scrub::ScrubReport> {
+    let store = manifest_store(asset)?;
+    let manifest = active_manifest(&store)?;
+    let claim = check_claim(&store, &manifest.claim)?;
+    let format = asset.extension().and_then(|e| e.to_str()).ok_or_else(|| anyhow!("{} has no file extension", asset.display()))?.to_string();
+    let mut bytes = std::fs::read(asset)?;
+    let report = crate::scrub::scrub(&mut bytes, &format, &claim.hard_binding_exclusions)?;
+    if write && !report.removed.is_empty() {
+        std::fs::write(asset, bytes)?;
+    }
+    Ok(report)
+}
+
 // ---- Verify ---------------------------------------------------------------------
 
 /// Whether the asset's active manifest carries a third-party ZK signature.

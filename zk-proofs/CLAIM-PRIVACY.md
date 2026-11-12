@@ -107,6 +107,11 @@ EXIF and XMP sit in byte ranges the hard binding excludes, so changing them does
 
 - **Proposed:** the anonymizer scrubs them in place, overwriting the excluded ranges' identifying segments at the same size, by default when the claim is hidden and opt-in otherwise. It reports what it removed, and the tests check that the hard binding still matches and that nothing of the original metadata remains.
 - **Independent of the circuit,** so it can come first.
+- **Implemented** (#44, `--scrub-metadata`, opt-in; [`scrub.rs`](crates/c2pa-x509-zk-demo/src/scrub.rs)), JPEG for now. Only excluded bytes change, and the scrubber checks that no byte the binding covers did. Each excluded range must be the manifest store (whole APP11 segments, as real assets exclude it) or one segment's payload holding EXIF, XMP, or extended XMP; anything else is refused, before proving. A scrubbed payload keeps its marker and length (the binding covers them) and becomes an inert identifier and zeros. Metadata the binding covers is reported as kept.
+- **On the real samples:**
+  - **The device photo:** its EXIF and all its XMP (12 segments, about 670 KB) are excluded and removed; the vendor's and the model's names then remain only in the manifest store (the claim). Kept, because signed: the ICC profile, the MPF index, and the appended gain-map image (its XMP holds only HDR parameters).
+  - **The AI-generated image** binds its XMP and IPTC (APP13): they name the vendor and are signed, so scrubbing cannot remove them, and reports them. For such assets, only the signer can omit them; the private claim does not reach them either, since they are part of the content the hard binding covers.
+  - **The edited photo** has two manifests, which the anonymizer refuses ([E8](README.md#e8-ingredient-manifests)).
 
 ## Estimated cost
 
@@ -119,7 +124,7 @@ EXIF and XMP sit in byte ranges the hard binding excludes, so changing them does
 
 ## Proposed plan
 
-1. **H6, metadata scrubbing**, independent of the circuit.
+1. **H6, metadata scrubbing**, independent of the circuit (done: #44).
 2. **The private-claim statement:** the walk inside the signature's preimage (at the claim's offset, rather than a separate buffer), the statement and its CLI, tests, and the signer certificate's calendar-date check.
 3. **The anonymizer and verifier:** the output's claim (P3), blanking undisclosed assertions, `--disclose`, the verifier's references from the visible claim, and the measurement.
 4. **Partial disclosure within the actions** (P2), as a separate experiment.

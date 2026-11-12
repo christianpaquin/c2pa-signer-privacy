@@ -719,6 +719,67 @@ fn both_purpose_trees_coexist_in_one_directory() {
     assert_eq!(third_party::purpose_tree(&TrustList { anchors: tsas, skipped: 0 }, Purpose::TimeStamping, &prover, tempfile::tempdir().unwrap().path()).unwrap().0.root, tsa_tree.root);
 }
 
+/// Metadata scrubbing (H6) on the mirror fixture: a PNG whose hard binding
+/// excludes only the manifest store, so there is nothing to scrub, and the
+/// asset is unchanged.
+#[test]
+fn scrubbing_the_fixture_changes_nothing() {
+    let fixture = Fixture::new(true, true);
+    let copy = fixture.dir.path().join("scrub-copy.png");
+    std::fs::copy(fixture.signed(), &copy).unwrap();
+    let report = third_party::scrub_metadata(&copy).unwrap();
+    assert!(report.removed.is_empty(), "{report:?}");
+    assert_eq!(std::fs::read(&copy).unwrap(), std::fs::read(fixture.signed()).unwrap());
+}
+
+/// Metadata scrubbing on real assets (private, opt-in): C2PA_ZK_SCRUB_ASSETS
+/// is a list of signed JPEGs, separated as PATH is (`:` on Unix). Each keeps its claim and hard
+/// binding (c2pa checks pass before and after); the strings in
+/// C2PA_ZK_SCRUB_STRINGS (comma-separated, for example a vendor's or model's
+/// name) remain in no excluded range: only in the manifest store, or in
+/// metadata the hard binding covers (signed), which is reported.
+#[test]
+fn scrubbing_real_assets() {
+    let Some(list) = std::env::var_os("C2PA_ZK_SCRUB_ASSETS") else { return };
+    let strings: Vec<String> = std::env::var("C2PA_ZK_SCRUB_STRINGS").unwrap_or_default().split(',').filter(|s| !s.is_empty()).map(String::from).collect();
+    let dir = tempfile::tempdir().unwrap();
+    for (i, path) in std::env::split_paths(&list).enumerate() {
+        let path = path.to_str().unwrap().to_string();
+        let path = path.as_str();
+        let copy = dir.path().join(format!("asset-{i}.jpg"));
+        std::fs::copy(path, &copy).unwrap();
+        let before = third_party::c2pa_claim_checks(&copy).unwrap();
+        let report = third_party::scrub_metadata(&copy).unwrap();
+        let after = third_party::c2pa_claim_checks(&copy).unwrap();
+        assert_eq!(before, after, "{path}: the c2pa checks changed");
+        let exclusions = third_party::check_claim(&manifest_store(&copy).unwrap(), &active_manifest(&manifest_store(&copy).unwrap()).unwrap().claim).unwrap().hard_binding_exclusions;
+        let bytes = std::fs::read(&copy).unwrap();
+        // The manifest store's segments (APP11), before the image data.
+        let mut store_ranges = Vec::new();
+        let mut p = 2;
+        while p + 4 <= bytes.len() && bytes[p] == 0xff && bytes[p + 1] != 0xda {
+            let len = 2 + u16::from_be_bytes([bytes[p + 2], bytes[p + 3]]) as usize;
+            if bytes[p + 1] == 0xeb {
+                store_ranges.push(p..p + len);
+            }
+            p += len;
+        }
+        let mut signed = Vec::new();
+        for needle in &strings {
+            for at in bytes.windows(needle.len()).enumerate().filter(|(_, w)| *w == needle.as_bytes()).map(|(i, _)| i) {
+                if store_ranges.iter().any(|r| r.contains(&at)) {
+                    continue;
+                }
+                let excluded = exclusions.iter().any(|&(s, l)| (s as usize..(s + l) as usize).contains(&at));
+                assert!(!excluded, "{path}: {needle:?} remains at {at}, in an excluded range");
+                signed.push(format!("{needle}@{at}"));
+            }
+        }
+        println!("{path}: identifying strings left in signed metadata: {signed:?}");
+        println!("{path}: removed {:?}; kept {:?}", report.removed.iter().map(|(k, _, l)| format!("{k} {l} B")).collect::<Vec<_>>(), report.bound);
+    }
+}
+
 /// The mirror fixture's time stamp has the real profile (I6,
 /// HIDING-THE-TIME-STAMP.md): a P-256 TSA certificate issued by a listed
 /// P-384 TSA CA, both carried in the token, the root not; the TSA CA is

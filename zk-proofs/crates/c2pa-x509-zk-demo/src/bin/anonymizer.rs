@@ -91,6 +91,11 @@ struct Args {
     #[arg(long, default_value = "1d", requires = "hide_time_stamp")]
     time_window: String,
 
+    /// Third-party mode: also scrub the metadata the hard binding excludes
+    /// (EXIF and XMP; roadmap H6), in place; signed metadata is reported, not removed
+    #[arg(long, requires = "third_party")]
+    scrub_metadata: bool,
+
     /// Key directory from `c2pa-zk-gnark setup` (third-party mode)
     #[arg(long)]
     keys: Option<PathBuf>,
@@ -333,6 +338,10 @@ fn third_party(args: &Args) -> Result<()> {
             window: c2pa_x509_zk_demo::third_party::parse_window(&args.time_window)?,
         }),
     };
+    if args.scrub_metadata {
+        // Refuse before proving if the metadata cannot be scrubbed.
+        c2pa_x509_zk_demo::third_party::check_scrubbable(&args.input)?;
+    }
     let report = anonymize(&args.input, &args.output, &trust, &prover, args.hide_issuer.as_deref(), hide_time_stamp.as_ref())?;
     println!("\n✅ Anonymized asset written to {:?}", args.output);
     match &report.hidden {
@@ -350,9 +359,24 @@ fn third_party(args: &Args) -> Result<()> {
     println!("\nStill visible and authenticated by the claim:");
     println!("   Claim generator: {}", report.claim.claim_generator);
     println!("   Assertions: {}", report.claim.assertions.join(", "));
-    if report.claim.hard_binding_exclusions.len() > 1 {
+    if args.scrub_metadata {
+        let scrubbed = c2pa_x509_zk_demo::third_party::scrub_metadata(&args.output)?;
+        println!("\nMetadata scrubbed (outside the hard binding, so the claim and binding are unchanged):");
+        if scrubbed.removed.is_empty() {
+            println!("   nothing to scrub");
+        }
+        for kind in ["EXIF", "XMP", "extended XMP"] {
+            let n = scrubbed.removed.iter().filter(|(k, _, _)| *k == kind).count();
+            if n > 0 {
+                println!("   {kind}: {n} segment(s), {} bytes", scrubbed.bytes(kind));
+            }
+        }
+        for b in &scrubbed.bound {
+            println!("   kept: {b}");
+        }
+    } else if report.claim.hard_binding_exclusions.len() > 1 {
         println!(
-            "\n⚠️  The hard binding excludes {} byte ranges besides the manifest store: that data (for example EXIF or XMP) is neither authenticated nor anonymized.",
+            "\n⚠️  The hard binding excludes {} byte ranges besides the manifest store: that data (for example EXIF or XMP) is neither authenticated nor anonymized (--scrub-metadata removes it).",
             report.claim.hard_binding_exclusions.len() - 1
         );
     }

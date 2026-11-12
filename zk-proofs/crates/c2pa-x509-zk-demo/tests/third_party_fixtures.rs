@@ -978,8 +978,16 @@ fn hidden_all_anonymizer_refusals() {
     assert_eq!(parse_window("1h").unwrap(), 3600);
     assert_eq!(parse_window("1s").unwrap(), 1);
     assert_eq!(parse_window("90").unwrap(), 90);
-    for bad in ["0", "0d", "1w", "", "d", "-1d"] {
+    assert_eq!(parse_window("366d").unwrap(), 366 * 86_400);
+    for bad in ["0", "0d", "1w", "", "d", "-1d", "367d", "31622401", "307445734561825861m", "18446744073709551615d", "99999999999999999999"] {
         assert!(parse_window(bad).is_err(), "{bad:?}");
+    }
+
+    // The public API checks the window too (PR #41 review): no panic, a refusal.
+    for window in [0, c2pa_x509_zk_demo::third_party::MAX_TIME_WINDOW + 1, u64::MAX] {
+        let h = HideTimeStamp { window, ..hide("tsa-trust-list.pem") };
+        let err = anonymize(&all, Some("fixture-list"), Some(&h));
+        assert!(err.contains("window"), "window {window}: {err}");
     }
 }
 

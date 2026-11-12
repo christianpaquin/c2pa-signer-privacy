@@ -573,25 +573,37 @@ pub struct HideTimeStamp {
     pub window: u64,
 }
 
+/// The supported window lengths: from a second to 366 days.
+pub const MAX_TIME_WINDOW: u64 = 366 * 86_400;
+
+/// Check a window length is in the supported range, [1 s, MAX_TIME_WINDOW].
+pub fn check_window(seconds: u64) -> Result<u64> {
+    if seconds == 0 {
+        bail!("the window must be at least a second");
+    }
+    if seconds > MAX_TIME_WINDOW {
+        bail!("the window is {seconds} s; the longest supported is {MAX_TIME_WINDOW} s (366 days)");
+    }
+    Ok(seconds)
+}
+
 /// Parse a window length: a number of seconds, or with a unit, `s`, `m`, `h`,
-/// or `d` (for example `1d`, `1h`, `1s`).
+/// or `d` (for example `1d`, `1h`, `1s`), in the supported range.
 pub fn parse_window(text: &str) -> Result<u64> {
     let (digits, unit) = match text.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
         Some((i, _)) => text.split_at(i),
         None => (text, "s"),
     };
     let n: u64 = digits.parse().map_err(|_| anyhow!("malformed window {text:?}"))?;
-    let seconds = match unit {
-        "s" => n,
-        "m" => n * 60,
-        "h" => n * 3600,
-        "d" => n * 86_400,
+    let unit_seconds: u64 = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
         _ => bail!("malformed window {text:?} (a number of seconds, or with s, m, h, or d)"),
     };
-    if seconds == 0 {
-        bail!("the window must be at least a second");
-    }
-    Ok(seconds)
+    let seconds = n.checked_mul(unit_seconds).ok_or_else(|| anyhow!("the window {text:?} is too long"))?;
+    check_window(seconds)
 }
 
 /// Anonymize a signed asset in third-party mode: prove the statement for its
@@ -664,8 +676,13 @@ pub fn anonymize(input: &Path, output: &Path, trust: &TrustList, prover: &Prover
                 bail!("the time stamp's TSA certificate is not issued by a CA itself on the TSA trust list and eligible for time stamping (HIDING-THE-TIME-STAMP.md, T4)");
             }
             let (tree, pem) = purpose_tree(&h.tsa_trust, Purpose::TimeStamping, prover, tsa_dir.path())?;
+            // A public type: its window is checked here too, not only by the
+            // CLI's parser, before any arithmetic on it.
+            let length = check_window(h.window)?;
             let t = inputs.public.time;
-            let window = (t - t % h.window, t - t % h.window + h.window);
+            let start = t - t % length;
+            let end = start.checked_add(length).ok_or_else(|| anyhow!("the window's end overflows"))?;
+            let window = (start, end);
             if !is_aligned_window(window.0, window.1) {
                 bail!("the window [{}, {}) is not one the format accepts", window.0, window.1);
             }

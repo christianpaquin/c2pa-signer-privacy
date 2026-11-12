@@ -13,7 +13,7 @@ This approach keeps standard X.509/ECDSA-P256 signing, then adds a post-processi
 
 The verifier can confirm the asset was anonymized from an asset signed by *someone* with a certificate from a trusted CA, without learning *who*.
 
-**Two modes.** [Third-party mode](#quick-start-third-party-mode) is the current one: it proves the asset's *original* signature (in gnark), needs no private key, and replaces the signature in place. The signer-side mode described in the rest of this overview and in [M0 Baseline Reproduction](#v0-baseline-reproduction-frozen) is the **M0 baseline, frozen**: kept so its results can be reproduced and compared, but no longer developed. The anonymizer still runs M0 unless given `--third-party`; the verifier detects the mode from the asset. [HISTORY.md](HISTORY.md) traces how the project moved from one to the other. The anonymized asset's `x5chain` carries the issuing CA chain (never the signer's certificate), which the verifier validates against a trust list.
+**Two modes.** [Third-party mode](#quick-start-third-party-mode) is the current one: it proves the asset's *original* signature (in gnark), needs no private key, and replaces the signature in place. The signer-side mode described in the rest of this overview and in [M0 Baseline Reproduction](#m0-baseline-reproduction-frozen) is the **M0 baseline, frozen**: kept so its results can be reproduced and compared, but no longer developed. The anonymizer still runs M0 unless given `--third-party`; the verifier detects the mode from the asset. [HISTORY.md](HISTORY.md) traces how the project moved from one to the other. The anonymized asset's `x5chain` carries the issuing CA chain (never the signer's certificate), which the verifier validates against a trust list.
 
 ## Quick Start (Third-Party Mode)
 
@@ -284,7 +284,7 @@ pairing someone else's CA-signed certificate with their own key pair.
 
 ### Performance
 
-Measured with the [benchmark harness](#benchmarks) on a 13th Gen Intel Core i7-13800H laptop (20 logical CPUs, 32 GB of RAM, WSL2); full record in [`bench/results/2026-11-03-baseline.json`](bench/results/2026-11-03-baseline.json) and analysis in [FEASIBILITY.md](FEASIBILITY.md#v0-baseline-measured-detail). Each phase ran in its own process.
+Measured with the [benchmark harness](#benchmarks) on a 13th Gen Intel Core i7-13800H laptop (20 logical CPUs, 32 GB of RAM, WSL2); full record in [`bench/results/2026-11-03-baseline.json`](bench/results/2026-11-03-baseline.json) and analysis in [FEASIBILITY.md](FEASIBILITY.md#m0-baseline-measured-detail). Each phase ran in its own process.
 
 | Phase | Time | Peak RSS | Notes |
 |-------|------|----------|-------|

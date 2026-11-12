@@ -20,7 +20,7 @@ A real device photo, signed under the official C2PA trust list and time-stamped 
 - **Keeps** the original claim and its hard binding, so the content's integrity is checked as for any C2PA asset; the file keeps its size; the signature is replaced in place.
 - **Scrubs** the photo's EXIF and XMP (outside the hard binding), so that its only remaining mention of the device's maker is in the claim.
 
-Anonymizing takes about 75–100 seconds and 7–9 GB of memory on a laptop, depending on what is hidden; verifying takes 30–50 ms (about 0.1 s with the full verifier).
+On a laptop, anonymizing the benchmark fixture (a test asset mirroring the real deployment's chain) takes about 75–100 seconds and 7–9 GB of memory, depending on what is hidden, in controlled runs; the real photos, in single runs, took 129–141 seconds with everything hidden. Verifying takes 30–50 ms (about 0.1 s with the full verifier).
 
 ## The modes
 
@@ -31,9 +31,10 @@ Three statements, each with its own keys; the first is the default, the others o
 | Proves | The original ES256 signature over the claim, by a key in a certificate the issuing CA signed (P-384, SHA-384), for C2PA claim signing, not a CA, valid at the time stamp's time; the time-stamp token binds that signature | The same, with the issuing CA a member of a verifier-approved tree of eligible CAs | The same, with the time-stamp token verified in the proof: its TSA certified by a CA in a verifier-approved tree, its time within a public window |
 | Discloses | The issuing CA chain, the time-stamp token (TSA, exact time), the claim | The time-stamp token, the claim | The claim; the time as a window (a UTC day by default) |
 | Anonymity set (official lists) | The issuing CA's certificate holders | 28 CAs, 18 organizations | Issuer as before; TSA among 19 CAs, 14 organizations |
-| Verifier needs | Trust list, TSA trust list | An issuer policy: approved trust-list snapshots and their periods | The policy, with TSA snapshots; no TSA trust list |
+| Verifier needs | Trust list, TSA trust list | An issuer policy (approved trust-list snapshots and their periods), and the TSA trust list: the token is still public, checked outside the proof | The policy, with TSA snapshots; no TSA trust list |
 | Constraints | 4,710,820 | 4,718,946 (+0.17%) | 6,458,939 (+37%) |
-| Per-asset anonymization (cold, BN254) | 72–77 s | Within noise of the disclosed one | 97 s, against 75–77 s for the hidden issuer in the same session (+28%) |
+| Per-asset anonymization, fixture (cold, BN254; harness, median of three) | 72–77 s | Within noise of the disclosed one | 97 s, against 75–77 s for the hidden issuer in the same session (+28%) |
+| Per-asset anonymization, real photos (single runs) | 133 s (first photo) | Not run | 141 s; 129 s with metadata scrubbing (second photo) |
 | Peak memory | 6.7 GiB | 6.7 GiB | 8.5 GiB |
 | Proving key | 1.15 GB | 1.15 GB | 1.49 GB |
 | Verification (full verifier) | 35–48 ms (59–76 ms) | 31–50 ms (80–122 ms) | 32 ms (104 ms) |
@@ -77,7 +78,7 @@ Demonstrated on the private samples of one real C2PA deployment ([DEPLOYMENT-FIN
 
 - **Trust:** the trust lists are authentic, and the verifier approves the snapshots (and their periods) it accepts roots from; the real-asset runs approved the current lists retrospectively, which shows acceptance under that policy, not historical membership.
 - **Setup:** Groth16 keys from a single-party setup on the developer's machine (no ceremony).
-- **The anonymizer is honest** toward the signer: it could leak what it hides. The output's format leaves no room for hidden data (strict decoding).
+- **The anonymizer is honest** toward the signer: it could leak what it hides. Strict decoding rejects unspecified fields, trailing bytes, and nonzero padding, which closes those channels for extra data, but not every covert channel: a malicious anonymizer is not made safe, and the assumption remains necessary.
 - **Not checked:** revocation of the signer's or the TSA's certificate.
 - **Reduced profiles**, each stated, the rest refused: the signer certificate's checks (P-256 key, claim-signing EKU, not a CA, validity) without the full RFC 5280 profile ([H2](README.md#h2-full-certificate-validation-in-the-circuit)); the time-stamp token's checks ([T2](HIDING-THE-TIME-STAMP.md#t2-the-token-profile)); ES256 signatures under P-384 CAs; JPEG and PNG for in-place replacement, JPEG for scrubbing.
 

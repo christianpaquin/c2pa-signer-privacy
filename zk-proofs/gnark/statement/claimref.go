@@ -16,6 +16,15 @@ package statement
 // 2-5); lengths in the short, 1-byte, or 2-byte forms; containers of fewer
 // than 24 items; nesting up to claimMaxDepth; up to MaxTokens items; and
 // exactly one created_assertions key.
+//
+// Each reference's hash algorithm must be SHA-256, as the claim declares it
+// (C2PA 2.5, §10.2.2, §12.1): an entry's own "alg" overrides the claim's
+// "alg", which applies otherwise; with neither, or another algorithm, the
+// reference is refused, as are duplicate "alg" keys and a URL referenced by
+// more than one entry. References occupy a fixed number of slots (MaxRefs),
+// so that one circuit, and one key set, covers every disclosure count: slot
+// 0, the hard binding, is always active; the others carry an active flag, and
+// an inactive slot must be all zero.
 
 import (
 	"math/big"
@@ -33,14 +42,18 @@ type ClaimRefSizes struct {
 	MaxClaim  int // the claim's bytes
 	MaxTokens int // CBOR items walked (a real claim has 25)
 	MaxURL    int // a reference's URL
+	MaxRefs   int // reference slots: the hard binding, and up to MaxRefs-1 others
 }
 
-// DefaultClaimRefSizes: real claims are 377-384 bytes, 25 items, URLs of 41-43 bytes.
-var DefaultClaimRefSizes = ClaimRefSizes{MaxClaim: 1024, MaxTokens: 64, MaxURL: 64}
+// DefaultClaimRefSizes: real claims are 377-384 bytes, 25 items, URLs of
+// 41-43 bytes, and reference two assertions.
+var DefaultClaimRefSizes = ClaimRefSizes{MaxClaim: 1024, MaxTokens: 64, MaxURL: 64, MaxRefs: 4}
 
-// ClaimRef is a public reference: an assertion's URL and the SHA-256 of its
-// JUMBF superbox content, in two 16-byte halves.
+// ClaimRef is a public reference slot: whether it is used, an assertion's URL
+// (at most MaxURL bytes), and the SHA-256 of its JUMBF superbox content, in
+// two 16-byte halves. An unused slot is all zero.
 type ClaimRef struct {
+	Active frontend.Variable
 	URL    []frontend.Variable // zero-padded to MaxURL
 	URLLen frontend.Variable
 	Hash   [2]frontend.Variable
@@ -50,11 +63,13 @@ var (
 	keyCreatedAssertions = append([]byte{0x60 + 18}, "created_assertions"...)
 	keyURL               = append([]byte{0x63}, "url"...)
 	keyHash              = append([]byte{0x64}, "hash"...)
+	keyAlg               = append([]byte{0x63}, "alg"...)
+	textSHA256           = append([]byte{0x66}, "sha256"...)
 )
 
 // assertClaimReferences walks the claim held in r (claimLen bytes from
-// position 0) and asserts that its created_assertions array holds each of
-// refs exactly once.
+// position 0) and asserts that its created_assertions array holds each
+// active reference exactly once, with SHA-256 as its effective algorithm.
 func assertClaimReferences(api frontend.API, r *reader, claimLen frontend.Variable, s ClaimRefSizes, refs []ClaimRef) {
 	// Major type and additional information of a header byte.
 	majorT, infoT := logderivlookup.New(api), logderivlookup.New(api)
@@ -65,6 +80,22 @@ func assertClaimReferences(api frontend.API, r *reader, claimLen frontend.Variab
 	small := cmp.NewBoundedComparator(api, big.NewInt(1<<9), false)
 	isEq := r.isEq
 	not := func(v frontend.Variable) frontend.Variable { return api.Sub(1, v) }
+
+	// The slots: active flags are boolean, slot 0 (the hard binding) is
+	// active, URLs fit the buffer, and an inactive slot is all zero.
+	api.AssertIsEqual(refs[0].Active, 1)
+	for _, ref := range refs {
+		api.AssertIsBoolean(ref.Active)
+		r.pos.AssertIsLessEq(ref.URLLen, s.MaxURL)
+		inactive := not(ref.Active)
+		api.AssertIsEqual(api.Mul(inactive, ref.URLLen), 0)
+		api.AssertIsEqual(api.Mul(inactive, ref.Hash[0]), 0)
+		api.AssertIsEqual(api.Mul(inactive, ref.Hash[1]), 0)
+		for _, b := range ref.URL {
+			api.AssertIsEqual(api.Mul(inactive, b), 0)
+		}
+		api.AssertIsEqual(api.Mul(ref.Active, r.pos.IsLess(ref.URLLen, 1)), 0) // an active URL is not empty
+	}
 
 	// The stack: remaining items per depth, and whether each level is a map.
 	var rem, isMap [claimMaxDepth + 1]frontend.Variable
@@ -77,13 +108,17 @@ func assertClaimReferences(api frontend.API, r *reader, claimLen frontend.Variab
 	caKeys := frontend.Variable(0)    // created_assertions keys in the root map
 	prevKeyCA := frontend.Variable(0) // the previous root-map key was created_assertions
 	inCA := frontend.Variable(0)      // inside the created_assertions array
-	prevKeyURL, prevKeyHash := frontend.Variable(0), frontend.Variable(0)
-	urlKeys, hashKeys := frontend.Variable(0), frontend.Variable(0)
+	prevKeyURL, prevKeyHash, prevKeyAlg := frontend.Variable(0), frontend.Variable(0), frontend.Variable(0)
+	urlKeys, hashKeys, algKeys := frontend.Variable(0), frontend.Variable(0), frontend.Variable(0)
+	elemAlgSHA := frontend.Variable(0)                                                                           // this entry's alg is sha256
+	rootAlgKeys, prevRootKeyAlg, claimAlgSHA := frontend.Variable(0), frontend.Variable(0), frontend.Variable(0) // the claim's alg
 	elemURL := make([]frontend.Variable, len(refs))
 	elemHash := make([]frontend.Variable, len(refs))
-	found := make([]frontend.Variable, len(refs))
+	foundOwn := make([]frontend.Variable, len(refs))     // matched, with the entry's own alg sha256
+	foundDefault := make([]frontend.Variable, len(refs)) // matched, with no alg of the entry's own
+	urlCount := make([]frontend.Variable, len(refs))     // entries with the reference's URL
 	for k := range refs {
-		elemURL[k], elemHash[k], found[k] = 0, 0, 0
+		elemURL[k], elemHash[k], foundOwn[k], foundDefault[k], urlCount[k] = 0, 0, 0, 0, 0
 	}
 
 	level := func(arr [claimMaxDepth + 1]frontend.Variable, d frontend.Variable) frontend.Variable {
@@ -122,6 +157,12 @@ func assertClaimReferences(api frontend.API, r *reader, claimLen frontend.Variab
 		// Root-map keys: created_assertions (exactly one).
 		isCAKey := api.Mul(active, atRoot1, isKey, r.matches(p, keyCreatedAssertions))
 		caKeys = api.Add(caKeys, isCAKey)
+		// The claim's alg: at most one root key, a text value.
+		isRootAlgKey := api.Mul(active, atRoot1, isKey, r.matches(p, keyAlg))
+		rootAlgKeys = api.Add(rootAlgKeys, isRootAlgKey)
+		isRootAlgValue := api.Mul(active, atRoot1, not(isKey), prevRootKeyAlg)
+		r.assertIf(isRootAlgValue, isText, 1)
+		claimAlgSHA = api.Add(claimAlgSHA, api.Mul(isRootAlgValue, r.matches(p, textSHA256)))
 		// The value after the created_assertions key must be an array; it opens the walk of the entries.
 		isCAValue := api.Mul(active, atRoot1, not(isKey), prevKeyCA)
 		r.assertIf(isCAValue, isArray, 1)
@@ -132,8 +173,13 @@ func assertClaimReferences(api frontend.API, r *reader, claimLen frontend.Variab
 		// Inside an entry: "url" and "hash" keys, then their values.
 		isURLKey := api.Mul(active, atEntry, isKey, r.matches(p, keyURL))
 		isHashKey := api.Mul(active, atEntry, isKey, r.matches(p, keyHash))
+		isAlgKey := api.Mul(active, atEntry, isKey, r.matches(p, keyAlg))
 		urlKeys = api.Add(urlKeys, isURLKey)
 		hashKeys = api.Add(hashKeys, isHashKey)
+		algKeys = api.Add(algKeys, isAlgKey)
+		isAlgValue := api.Mul(active, atEntry, not(isKey), prevKeyAlg)
+		r.assertIf(isAlgValue, isText, 1)
+		elemAlgSHA = api.Add(elemAlgSHA, api.Mul(isAlgValue, r.matches(p, textSHA256)))
 		isURLValue := api.Mul(active, atEntry, not(isKey), prevKeyURL)
 		isHashValue := api.Mul(active, atEntry, not(isKey), prevKeyHash)
 		r.assertIf(isURLValue, isText, 1)
@@ -159,6 +205,8 @@ func assertClaimReferences(api frontend.API, r *reader, claimLen frontend.Variab
 
 		// Track the previous key, at the levels that matter.
 		prevKeyCA = api.Select(api.Mul(active, atRoot1), isCAKey, prevKeyCA)
+		prevRootKeyAlg = api.Select(api.Mul(active, atRoot1), isRootAlgKey, prevRootKeyAlg)
+		prevKeyAlg = api.Select(api.Mul(active, atEntry), isAlgKey, prevKeyAlg)
 		prevKeyURL = api.Select(api.Mul(active, atEntry), isURLKey, prevKeyURL)
 		prevKeyHash = api.Select(api.Mul(active, atEntry), isHashKey, prevKeyHash)
 
@@ -189,15 +237,21 @@ func assertClaimReferences(api frontend.API, r *reader, claimLen frontend.Variab
 			// An entry map finishing: the entry's references are counted.
 			endsEntry := api.Mul(pending, inCA, isEq(cur, 3), api.IsZero(remCur))
 			for k := range refs {
-				found[k] = api.Add(found[k], api.Mul(endsEntry, elemURL[k], elemHash[k]))
+				matched := api.Mul(endsEntry, elemURL[k], elemHash[k])
+				foundOwn[k] = api.Add(foundOwn[k], api.Mul(matched, algKeys, elemAlgSHA))
+				foundDefault[k] = api.Add(foundDefault[k], api.Mul(matched, not(algKeys)))
+				urlCount[k] = api.Add(urlCount[k], api.Mul(endsEntry, elemURL[k]))
 				elemURL[k] = api.Select(endsEntry, 0, elemURL[k])
 				elemHash[k] = api.Select(endsEntry, 0, elemHash[k])
 			}
-			// At most one url and one hash per entry.
+			// At most one url, one hash, and one alg per entry.
 			api.AssertIsEqual(api.Mul(endsEntry, urlKeys, api.Sub(urlKeys, 1)), 0)
 			api.AssertIsEqual(api.Mul(endsEntry, hashKeys, api.Sub(hashKeys, 1)), 0)
+			api.AssertIsEqual(api.Mul(endsEntry, algKeys, api.Sub(algKeys, 1)), 0)
 			urlKeys = api.Select(endsEntry, 0, urlKeys)
 			hashKeys = api.Select(endsEntry, 0, hashKeys)
+			algKeys = api.Select(endsEntry, 0, algKeys)
+			elemAlgSHA = api.Select(endsEntry, 0, elemAlgSHA)
 			// The created_assertions array finishing.
 			endsCA := api.Mul(pending, inCA, isEq(cur, 2), api.IsZero(remCur))
 			inCA = api.Select(endsCA, 0, inCA)
@@ -214,8 +268,13 @@ func assertClaimReferences(api frontend.API, r *reader, claimLen frontend.Variab
 	api.AssertIsEqual(rem[0], 0)   // the whole claim walked
 	api.AssertIsEqual(p, claimLen) // and nothing after it
 	api.AssertIsEqual(caKeys, 1)
-	for k := range refs {
-		api.AssertIsEqual(found[k], 1)
+	api.AssertIsEqual(api.Mul(rootAlgKeys, api.Sub(rootAlgKeys, 1)), 0) // at most one claim alg
+	for k, ref := range refs {
+		// Found once, with SHA-256 as its effective algorithm (its own, or
+		// else the claim's), and its URL referenced by no other entry.
+		found := api.Add(foundOwn[k], api.Mul(foundDefault[k], claimAlgSHA))
+		r.assertIf(ref.Active, found, 1)
+		r.assertIf(ref.Active, urlCount[k], 1)
 	}
 }
 
@@ -234,9 +293,9 @@ type ClaimRefCircuit struct {
 	Refs     []ClaimRef `gnark:",public"`
 }
 
-// NewClaimRefCircuit allocates the circuit for n references.
-func NewClaimRefCircuit(s ClaimRefSizes, n int) *ClaimRefCircuit {
-	c := &ClaimRefCircuit{Sizes: s, Claim: make([]frontend.Variable, s.MaxClaim), Refs: make([]ClaimRef, n)}
+// NewClaimRefCircuit allocates the circuit, with its MaxRefs reference slots.
+func NewClaimRefCircuit(s ClaimRefSizes) *ClaimRefCircuit {
+	c := &ClaimRefCircuit{Sizes: s, Claim: make([]frontend.Variable, s.MaxClaim), Refs: make([]ClaimRef, s.MaxRefs)}
 	for k := range c.Refs {
 		c.Refs[k].URL = make([]frontend.Variable, s.MaxURL)
 	}

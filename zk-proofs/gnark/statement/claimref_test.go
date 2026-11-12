@@ -76,25 +76,24 @@ type ref struct {
 	hash []byte
 }
 
-var compiledClaimRef sync.Map // number of refs -> constraint.ConstraintSystem
+var compiledClaimRef = sync.OnceValues(func() (constraint.ConstraintSystem, error) {
+	return frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, NewClaimRefCircuit(DefaultClaimRefSizes))
+})
 
-func claimRefCS(t *testing.T, n int) constraint.ConstraintSystem {
+func claimRefCS(t *testing.T) constraint.ConstraintSystem {
 	t.Helper()
-	if v, ok := compiledClaimRef.Load(n); ok {
-		return v.(constraint.ConstraintSystem)
-	}
-	ccs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, NewClaimRefCircuit(DefaultClaimRefSizes, n))
+	ccs, err := compiledClaimRef()
 	if err != nil {
 		t.Fatal(err)
 	}
-	compiledClaimRef.Store(n, ccs)
 	return ccs
 }
 
-func claimRefAccepts(t *testing.T, claim []byte, claimLen int, refs ...ref) bool {
-	t.Helper()
+// claimRefAssignment assigns the claim and the references to the first
+// slots, the others unused (all zero).
+func claimRefAssignment(claim []byte, claimLen int, refs ...ref) *ClaimRefCircuit {
 	s := DefaultClaimRefSizes
-	c := NewClaimRefCircuit(s, len(refs))
+	c := NewClaimRefCircuit(s)
 	for i := range c.Claim {
 		if i < len(claim) {
 			c.Claim[i] = claim[i]
@@ -103,7 +102,11 @@ func claimRefAccepts(t *testing.T, claim []byte, claimLen int, refs ...ref) bool
 		}
 	}
 	c.ClaimLen = claimLen
-	for k, r := range refs {
+	for k := range c.Refs {
+		var r ref
+		if k < len(refs) {
+			r = refs[k]
+		}
 		for i := range c.Refs[k].URL {
 			if i < len(r.url) {
 				c.Refs[k].URL[i] = r.url[i]
@@ -112,13 +115,28 @@ func claimRefAccepts(t *testing.T, claim []byte, claimLen int, refs ...ref) bool
 			}
 		}
 		c.Refs[k].URLLen = len(r.url)
-		c.Refs[k].Hash = [2]frontend.Variable{new(big.Int).SetBytes(r.hash[:16]), new(big.Int).SetBytes(r.hash[16:])}
+		c.Refs[k].Active = 0
+		c.Refs[k].Hash = [2]frontend.Variable{0, 0}
+		if k < len(refs) {
+			c.Refs[k].Active = 1
+			c.Refs[k].Hash = [2]frontend.Variable{new(big.Int).SetBytes(r.hash[:16]), new(big.Int).SetBytes(r.hash[16:])}
+		}
 	}
+	return c
+}
+
+func claimRefSolved(t *testing.T, c *ClaimRefCircuit) bool {
+	t.Helper()
 	w, err := frontend.NewWitness(c, ecc.BN254.ScalarField())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return claimRefCS(t, len(refs)).IsSolved(w) == nil
+	return claimRefCS(t).IsSolved(w) == nil
+}
+
+func claimRefAccepts(t *testing.T, claim []byte, claimLen int, refs ...ref) bool {
+	t.Helper()
+	return claimRefSolved(t, claimRefAssignment(claim, claimLen, refs...))
 }
 
 var (
@@ -142,8 +160,7 @@ func TestClaimReferencesAreFound(t *testing.T) {
 	if !claimRefAccepts(t, c2, len(c2), hb) {
 		t.Error("an entry with alg, hash before url: rejected")
 	}
-	t.Logf("claim reference gadget: %d constraints for one reference, %d for two (default sizes)",
-		claimRefCS(t, 1).GetNbConstraints(), claimRefCS(t, 2).GetNbConstraints())
+	t.Logf("claim reference gadget: %d constraints with %d reference slots (default sizes)", claimRefCS(t).GetNbConstraints(), DefaultClaimRefSizes.MaxRefs)
 }
 
 // A reference is accepted only as an entry of created_assertions, read where
@@ -238,4 +255,108 @@ func splitComma(s string) []string {
 		}
 	}
 	return out
+}
+
+// URLs are compared whole: a public URL is at most MaxURL bytes, and must
+// have the encoded URL's length (PR #43 review).
+func TestClaimReferenceURLsAreCompared(t *testing.T) {
+	max := DefaultClaimRefSizes.MaxURL
+	prefix := "self#jumbf=c2pa.assertions/c2pa.hash.data"
+	long := prefix + string(make([]byte, 0))
+	for len(long) < max {
+		long += "x"
+	}
+	claim := testClaim("g", hashedURI(long, hardBindingHash[:]))
+	if !claimRefAccepts(t, claim, len(claim), ref{long, hardBindingHash[:]}) {
+		t.Errorf("a %d-byte URL (the limit): rejected", max)
+	}
+	// A longer URL whose first MaxURL bytes match, with a different suffix.
+	actual, forged := long+"actual", long+"forged"
+	c2 := testClaim("g", hashedURI(actual, hardBindingHash[:]))
+	c := claimRefAssignment(c2, len(c2), ref{forged[:max], hardBindingHash[:]})
+	c.Refs[0].URLLen = len(forged)
+	if claimRefSolved(t, c) {
+		t.Error("a URL beyond the limit, its first bytes equal: accepted")
+	}
+	// Equal lengths within the limit, different last byte.
+	c3 := testClaim("g", hashedURI(long[:max-1]+"a", hardBindingHash[:]))
+	if claimRefAccepts(t, c3, len(c3), ref{long[:max-1] + "b", hardBindingHash[:]}) {
+		t.Error("a different last byte: accepted")
+	}
+}
+
+// The effective hash algorithm must be SHA-256: the entry's own alg, or else
+// the claim's (C2PA 2.5, §10.2.2, §12.1; PR #43 review).
+func TestClaimReferenceAlgorithms(t *testing.T) {
+	entry := func(alg string) []byte {
+		if alg == "" {
+			return hashedURI(hardBindingURL, hardBindingHash[:])
+		}
+		return cMap(cText("url"), cText(hardBindingURL), cText("hash"), cBytes(hardBindingHash[:]), cText("alg"), cText(alg))
+	}
+	claimWith := func(claimAlg string, entries ...[]byte) []byte {
+		kv := [][]byte{cText("instanceID"), cText("x"), cText("claim_generator_info"), cMap(cText("name"), cText("g")),
+			cText("created_assertions"), cArray(entries...), cText("signature"), cText("self#jumbf=c2pa.signature")}
+		if claimAlg != "" {
+			kv = append(kv, cText("alg"), cText(claimAlg))
+		}
+		return cMap(kv...)
+	}
+	accepted := map[string][]byte{
+		"inherited sha256":                           claimWith("sha256", entry("")),
+		"the entry's sha256":                         claimWith("", entry("sha256")),
+		"the entry's sha256 over the claim's sha384": claimWith("sha384", entry("sha256")),
+	}
+	refused := map[string][]byte{
+		"the entry's sha384": claimWith("sha256", entry("sha384")),
+		"inherited sha384":   claimWith("sha384", entry("")),
+		"no algorithm":       claimWith("", entry("")),
+		"two claim algs": cMap(cText("instanceID"), cText("x"), cText("created_assertions"), cArray(entry("")),
+			cText("alg"), cText("sha256"), cText("alg"), cText("sha384")),
+		"two entry algs": claimWith("sha256", cMap(cText("url"), cText(hardBindingURL), cText("hash"), cBytes(hardBindingHash[:]), cText("alg"), cText("sha256"), cText("alg"), cText("sha256"))),
+		"a non-text alg": claimWith("", cMap(cText("url"), cText(hardBindingURL), cText("hash"), cBytes(hardBindingHash[:]), cText("alg"), cBytes([]byte("sha256")))),
+		"the URL twice":  claimWith("sha256", entry(""), cMap(cText("url"), cText(hardBindingURL), cText("hash"), cBytes(actionsHash[:]), cText("alg"), cText("sha384"))),
+	}
+	for name, claim := range accepted {
+		if !claimRefAccepts(t, claim, len(claim), hb) {
+			t.Errorf("%s: rejected", name)
+		}
+	}
+	for name, claim := range refused {
+		if claimRefAccepts(t, claim, len(claim), hb) {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+// One circuit covers every disclosure count: slot 0 (the hard binding) is
+// always used, the others are optional, and an unused slot is all zero.
+func TestClaimReferenceSlots(t *testing.T) {
+	extra := func(name string) ([]byte, ref) {
+		h := sha256.Sum256([]byte(name))
+		url := "self#jumbf=c2pa.assertions/" + name
+		return hashedURI(url, h[:]), ref{url, h[:]}
+	}
+	e1, r1 := extra("c2pa.thumbnail.claim")
+	e2, r2 := extra("stds.exif")
+	claim := testClaim("g", hashedURI(hardBindingURL, hardBindingHash[:]), hashedURI(actionsURL, actionsHash[:]), e1, e2)
+	for name, refs := range map[string][]ref{"none optional": {hb}, "one optional": {hb, ac}, "three optional": {hb, ac, r1, r2}} {
+		if !claimRefAccepts(t, claim, len(claim), refs...) {
+			t.Errorf("%s: rejected", name)
+		}
+	}
+	for name, change := range map[string]func(c *ClaimRefCircuit){
+		"slot 0 unused":                    func(c *ClaimRefCircuit) { c.Refs[0].Active = 0 },
+		"an unused slot with a URL length": func(c *ClaimRefCircuit) { c.Refs[2].URLLen = 3 },
+		"an unused slot with a hash":       func(c *ClaimRefCircuit) { c.Refs[2].Hash[1] = 1 },
+		"an unused slot with a URL byte":   func(c *ClaimRefCircuit) { c.Refs[2].URL[0] = 's' },
+		"an active flag of 2":              func(c *ClaimRefCircuit) { c.Refs[1].Active = 2 },
+		"an active empty URL":              func(c *ClaimRefCircuit) { c.Refs[2].Active = 1 },
+	} {
+		c := claimRefAssignment(claim, len(claim), hb, ac)
+		change(c)
+		if claimRefSolved(t, c) {
+			t.Errorf("%s: accepted", name)
+		}
+	}
 }

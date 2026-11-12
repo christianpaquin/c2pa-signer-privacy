@@ -659,7 +659,7 @@ Replace the single-party local setup with a multi-party ceremony, or adopt a pro
 
 Removing the certificate is necessary but not sufficient. The anonymizer should also check or scrub other identifying data: the claim generator and manifest identifiers, ingredients, and the asset's own metadata (for example EXIF camera serial numbers and GPS). Disclosure from the original claim is designed in E2a; regression scans for each source are part of F3.
 
-Status: **design proposed** in [CLAIM-PRIVACY.md](CLAIM-PRIVACY.md), for review: redaction cannot hide a claim's own generator or actions (C2PA 2.5, §8.8, §14.10.2), so the proposal keeps the original claim private and proves it references the disclosed assertions (a measured spike: 158,484 constraints for the hard binding's reference); metadata scrubbing first.
+Status: **design proposed** in [CLAIM-PRIVACY.md](CLAIM-PRIVACY.md), for review: redaction cannot hide a claim's own generator or actions (C2PA 2.5, §8.8, §14.10.2), so the proposal keeps the original claim private and proves it references the disclosed assertions (a measured spike: 510,920 constraints for four reference slots, +8%); metadata scrubbing first.
 
 #### H7. Build, setup, and test infrastructure
 

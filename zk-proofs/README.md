@@ -13,7 +13,7 @@ This approach keeps standard X.509/ECDSA-P256 signing, then adds a post-processi
 
 The verifier can confirm the asset was anonymized from an asset signed by *someone* with a certificate from a trusted CA, without learning *who*.
 
-**Two modes.** [Third-party mode](#quick-start-third-party-mode) is the current one: it proves the asset's *original* signature (in gnark), needs no private key, and replaces the signature in place. The signer-side mode described in the rest of this overview and in [V0 Baseline Reproduction](#v0-baseline-reproduction-frozen) is the **V0 baseline, frozen**: kept so its results can be reproduced and compared, but no longer developed. The anonymizer still runs V0 unless given `--third-party`; the verifier detects the mode from the asset. [HISTORY.md](HISTORY.md) traces how the project moved from one to the other. The anonymized asset's `x5chain` carries the issuing CA chain (never the signer's certificate), which the verifier validates against a trust list.
+**Two modes.** [Third-party mode](#quick-start-third-party-mode) is the current one: it proves the asset's *original* signature (in gnark), needs no private key, and replaces the signature in place. The signer-side mode described in the rest of this overview and in [M0 Baseline Reproduction](#v0-baseline-reproduction-frozen) is the **M0 baseline, frozen**: kept so its results can be reproduced and compared, but no longer developed. The anonymizer still runs M0 unless given `--third-party`; the verifier detects the mode from the asset. [HISTORY.md](HISTORY.md) traces how the project moved from one to the other. The anonymized asset's `x5chain` carries the issuing CA chain (never the signer's certificate), which the verifier validates against a trust list.
 
 ## Quick Start (Third-Party Mode)
 
@@ -67,9 +67,9 @@ echo '{"snapshots": [{"name": "mirror-list", "trust_list": "fixtures/mirror/trus
 
 **The verifier** detects third-party assets and derives every public input from the asset. It decodes the ZK signature strictly (exactly the specified fields, all-zero padding, a fixed-length proof, nothing after it), checks `--issuer` if given, and validates the time-stamp token against the TSA trust list at its attested time (OpenSSL), the `x5chain` issuing chain against the trust list at that time, the claim's assertions and hard binding (c2pa; only the expected failures of the claim signature itself are ignored), and the proof. Not established: revocation of the signer certificate, and the full certificate profile ([shortcuts](THIRD-PARTY-STATEMENT.md#guarantees-and-shortcuts)). Standard C2PA validators reject the ZK signature (unknown critical algorithm).
 
-## V0 Baseline Reproduction (frozen)
+## M0 Baseline Reproduction (frozen)
 
-The signer-side V0 baseline, kept so its results can be reproduced; for current use, see [Quick Start](#quick-start-third-party-mode) above.
+The signer-side M0 baseline, kept so its results can be reproduced; for current use, see [Quick Start](#quick-start-third-party-mode) above.
 
 > **Prerequisites**: Complete the [Building Circuits](#building-circuits) setup before running these commands — you need the compiled circuit and trusted setup keys. For testing without that setup, see [Placeholder Mode](#placeholder-mode).
 
@@ -479,7 +479,7 @@ What the prototype does not establish, in third-party mode. Every experiment sta
 - **Cost.** 79 s and 7.5 GiB per asset, three quarters of it loading the proving key ([FEASIBILITY.md](FEASIBILITY.md#v1-third-party-e2b-measured-detail)).
 - **Tool display.** Standard C2PA validators reject the ZK signature, an unknown critical algorithm ([H8](#h8-c2patool-support)).
 
-The frozen **V0 baseline** (signer-side) additionally binds only to the asset bytes rather than the claim, makes no historical-validity claim (its timestamp is chosen by the prover), pins certificate fields by byte pattern rather than structure, supports P-256 CAs only, and takes ~10 minutes and ~11 GiB per asset.
+The frozen **M0 baseline** (signer-side) additionally binds only to the asset bytes rather than the claim, makes no historical-validity claim (its timestamp is chosen by the prover), pins certificate fields by byte pattern rather than structure, supports P-256 CAs only, and takes ~10 minutes and ~11 GiB per asset.
 
 ## Roadmap
 
@@ -556,7 +556,7 @@ Status:
 - **Fixtures (done).** The [mirror PKI profile](#test-pki-and-trust-lists) and a local test TSA produce standard, trusted, time-stamped assets with the structure of real device assets. `jumbf.rs` locates the active manifest's claim and claim signature (with its position, for the in-place replacement), and `original_signature.rs` rebuilds the exact bytes the circuit must hash, confirmed on a real device-signed asset.
 - **Statement and prover (done).** The statement is a gnark circuit ([`gnark/`](gnark/)): 4.7M constraints at the E2a size limits, with the structural certificate walk. `c2pa-x509-zk-statement-inputs` prepares its inputs from a signed asset, and the `c2pa-zk-gnark` CLI checks, proves, and verifies. A real c2pa-signed fixture is proved and verified at the default sizes. Forgery tests cover the claim, time, imprint, CA, signatures, and certificate purpose.
 - **Anonymizer and verifier (done).** [Third-party mode](#quick-start-third-party-mode) end to end: the anonymizer refuses what the statement excludes before proving, checks its own proof, and replaces the claim signature in place at its exact size, keeping the claim and its hard binding; the verifier derives every public input from the asset and checks the time stamp (TSA trust list), the issuing chain, the claim's assertions and hard binding (c2pa), and the proof.
-- **Benchmark (done).** `c2pa-x509-zk-bench run --variant third-party`, under V0's accounting: **79 s per asset** (V0: 611 s), 7.5 GiB, 30 ms verification; 74% of the time is loading the proving key, CPU-bound. Row V1 in [FEASIBILITY.md](FEASIBILITY.md#v1-third-party-e2b-measured-detail).
+- **Benchmark (done).** `c2pa-x509-zk-bench run --variant third-party`, under M0's accounting: **79 s per asset** (M0: 611 s), 7.5 GiB, 30 ms verification; 74% of the time is loading the proving key, CPU-bound. Row V1 in [FEASIBILITY.md](FEASIBILITY.md#v1-third-party-e2b-measured-detail).
 
 #### E3. Trust model B: Merkle membership
 

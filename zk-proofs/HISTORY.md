@@ -52,7 +52,7 @@ Recorded in [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIONS.md) (D1–D7) and
 - **The hidden issuer is opt-in, under verifier-approved roots** (#34): a root supplied by the asset alone proves nothing, and an old root proves trust only within its snapshot's period. Without `x5chain`, c2pa-rs 0.77 does not read a manifest at all, so removing the certificate also affects the verifier's own assertion and hard-binding checks ([HIDING-THE-ISSUER.md](HIDING-THE-ISSUER.md)).
 - **The token can be hidden too, under a stated reduced profile** (#37–#41): moving OpenSSL's token checks into the circuit made the accepted profile explicit (structural parsing, attribute cardinality, the `SET OF` preimage, a critical time-stamping-only EKU), with deliberate omissions listed. The exact time would still link for the TSA operator, so only an aligned window (a UTC day by default) is published. The issuer and TSA trees are separated in the circuit by their leaf tags, against root and path mix-ups; correct filtering for each purpose stays the verifier's job.
 - **Single-manifest assets only** (#31): later claims commit to their ingredients' signatures, so an earlier signer cannot be anonymized afterwards without breaking the provenance links; anonymizing before editing works with c2pa-rs, at the cost of standard validators rating the edited asset invalid ([E8](README.md#e8-ingredient-manifests)).
-- **V0 kept as a frozen baseline** rather than retired, so the comparison can be reproduced. Moving past it was a decision (Q2), not a dominance result: the two disclose different information and accept different inputs.
+- **M0 kept as a frozen baseline** rather than retired, so the comparison can be reproduced. Moving past it was a decision (Q2), not a dominance result: the two disclose different information and accept different inputs.
 
 ## Measurements over time
 
@@ -62,9 +62,9 @@ All on the same laptop ([reference machine](FEASIBILITY.md#reference-machine)); 
 |---|---|---|---|---|
 | Original circuit, before #11 (informal) | Signer-side, P-256 CA, asset digest | ~20 min | ~28 GB | 12.2M constraints, most of them reading certificate bytes at variable offsets |
 | After #11 (informal) | Same | ~10.5 min | ~11.8 GB | 4.78M constraints; proving key 2.5 GB → 1.0 GB |
-| [V0 baseline](bench/results/2026-11-03-baseline.json) (#17) | Signer-side, P-256 CA, asset digest, no time policy | 611 s | 11.1 GiB | 57% loading the proving key, 37% WASM witness generation; the proof itself 32 s |
+| [M0 baseline](bench/results/2026-11-03-baseline.json) (#17) | Signer-side, P-256 CA, asset digest, no time policy | 611 s | 11.1 GiB | 57% loading the proving key, 37% WASM witness generation; the proof itself 32 s |
 | [E1 primitives](bench/results/2026-11-04-e1-p384-gnark.json) (#19) | A P-384 CA signature over a 1.5 KB TBS, in gnark | 5 s (key resident; not comparable) | 3.7 GiB | P-384 and SHA-384 cost 1.3–1.5× P-256 and SHA-256 |
-| [Proving-key loading](bench/results/2026-11-04-proving-key-load.json) (#21) | V0's key, loading only | 345 s → 7 s possible | — | Uncompressed key with a recorded hash; not adopted |
+| [Proving-key loading](bench/results/2026-11-04-proving-key-load.json) (#21) | M0's key, loading only | 345 s → 7 s possible | — | Uncompressed key with a recorded hash; not adopted |
 | [V1 third-party](bench/results/2026-11-05-third-party.json) (#24) | The E2a statement, P-384 CA, `sigTst2`, in gnark | **79 s** | 7.5 GiB | 74% loading the proving key (CPU-bound); the proof 19.5 s |
 | [V1 on a real photo](bench/results/2026-11-06-r2-device-photo.json) (#26) | Same, on a real asset under the official lists | 133 s | 7.4 GiB | The fixture took 110 s in the same session: consistent with similar cost; the machine ran 40% slower that day |
 | [V1, key loading variants](bench/results/2026-11-06-e6/) (E6) | Same as V1 | 77 s → **25–28 s** | 7.4 → 9.2 GiB | Raw or dumped proving key, points not validated on load, behind its setup hash. Adopted as an opt-in raw path with provenance records and streamed loading: 49 s against 97 s in a slower session, 6.7 GiB |

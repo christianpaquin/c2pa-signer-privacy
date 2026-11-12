@@ -41,9 +41,9 @@ Three statements, each with its own keys; the first is the default, the others o
 
 Further options, measured on the disclosed statement: loading the proving key without point checks, behind a hash recorded at setup, takes per-asset anonymization to 25–33 s ([E6](FEASIBILITY.md#e6-proving-key-loading-in-gnark)); BLS12-381 instead of BN254 raises the security estimate from about 100 to about 120 bits, at 88 s per asset with that key path ([E7](FEASIBILITY.md#e7-bls12-381-as-an-option)).
 
-## From V0 to Milestone 1
+## From M0 to Milestone 1
 
-| | **V0** (the starting point) | **Milestone 1** |
+| | **M0** (the starting point) | **Milestone 1** |
 |---|---|---|
 | Who anonymizes | The signer, with its key | Anyone, without the key (the signer can too) |
 | What the proof covers | A digest of the asset, and possession of the key | The original signature over the original claim: the claim and its hard binding stay valid |
@@ -54,7 +54,7 @@ Further options, measured on the disclosed statement: loading the proving key wi
 | Proof system | circom, Groth16 | gnark, Groth16 (BN254, or BLS12-381) |
 | Per-asset anonymization | 611 s, 11.1 GiB | 72–97 s, 6.7–8.5 GiB (25–33 s with the fast key path) |
 
-V0 is kept frozen for comparison ([HISTORY.md](HISTORY.md#decisions)).
+M0, Milestone 0, is the prototype's starting point: the signer-side circom implementation. Earlier documents and the benchmark records call it V0, and the harness still selects it with `--variant v0`. It is kept frozen for comparison ([HISTORY.md](HISTORY.md#decisions)). V1, in the other documents, is Milestone 1's disclosed statement.
 
 ## Real content
 

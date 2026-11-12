@@ -104,6 +104,11 @@ func NewTokenInputs(s TokenSizes) TokenInputs {
 // newByteReader range-checks bytes, indexes them (with tokenPad zero bytes
 // after) for lookups, and returns the reader and the bytes.
 func newByteReader(api frontend.API, bapi *uints.Bytes, in []frontend.Variable) (*reader, []uints.U8) {
+	return newByteReaderPad(api, bapi, in, tokenPad)
+}
+
+// newByteReaderPad is newByteReader with pad zero bytes after the input.
+func newByteReaderPad(api frontend.API, bapi *uints.Bytes, in []frontend.Variable, pad int) (*reader, []uints.U8) {
 	r := &reader{
 		api:   api,
 		table: logderivlookup.New(api),
@@ -115,7 +120,7 @@ func newByteReader(api frontend.API, bapi *uints.Bytes, in []frontend.Variable) 
 		out[i] = bapi.ValueOf(v)
 		r.table.Insert(v)
 	}
-	for i := 0; i < tokenPad; i++ {
+	for i := 0; i < pad; i++ {
 		r.table.Insert(0)
 	}
 	return r, out

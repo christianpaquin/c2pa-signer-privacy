@@ -27,6 +27,8 @@ const EXIF: &[u8] = b"Exif\0\0";
 const XMP: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
 const XMP_EXTENDED: &[u8] = b"http://ns.adobe.com/xmp/extension/\0";
 const JUMBF: &[u8] = b"JP";
+/// The C2PA manifest store's JUMBF description type (C2PA 2.5, §11.1.4.2).
+const C2PA_STORE_UUID: [u8; 16] = [0x63, 0x32, 0x70, 0x61, 0x00, 0x11, 0x00, 0x10, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71];
 
 /// What scrubbing removed, and the metadata it had to leave.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -89,19 +91,75 @@ fn kind(marker: u8, payload: &[u8]) -> Option<&'static str> {
         0xe1 if payload.starts_with(EXIF) => Some("EXIF"),
         0xe1 if payload.starts_with(XMP) => Some("XMP"),
         0xe1 if payload.starts_with(XMP_EXTENDED) => Some("extended XMP"),
-        0xe1 if payload.starts_with(SCRUBBED) => Some("scrubbed"),
-        0xeb if payload.starts_with(JUMBF) => Some("manifest store"),
+        // Already scrubbed: exactly the marker and zeros. With anything else
+        // after the marker, it is data like any other, and is overwritten.
+        0xe1 if payload.starts_with(SCRUBBED) && payload[SCRUBBED.len()..].iter().all(|&b| b == 0) => Some("scrubbed"),
+        0xe1 if payload.starts_with(SCRUBBED) => Some("other data after the scrub marker"),
         _ => None,
     }
+}
+
+/// Whether the segments `run` (indices, consecutive) carry the C2PA manifest
+/// store, as JPEG's JUMBF transport splits it: each an APP11 payload of
+/// `JP`, the same box instance number, sequence numbers 1, 2, ... in order,
+/// and the same superbox header (a `jumb` box); the first one's content
+/// starting with a description box of the C2PA manifest store's type, labelled
+/// `c2pa`. Bytes that merely start with `JP` are not the store.
+fn is_c2pa_store(jpeg: &[u8], segments: &[Segment], run: &[usize]) -> bool {
+    let mut first_header: Option<&[u8]> = None;
+    let mut instance: Option<&[u8]> = None;
+    for (n, &i) in run.iter().enumerate() {
+        let s = &segments[i];
+        if s.marker != 0xeb {
+            return false;
+        }
+        let (ps, pl) = s.payload();
+        let p = &jpeg[ps..ps + pl];
+        // JP, En (2), Z (4), then the superbox header LBox (4) TBox (4).
+        if p.len() < 16 || &p[..2] != JUMBF {
+            return false;
+        }
+        if *instance.get_or_insert(&p[2..4]) != &p[2..4] {
+            return false;
+        }
+        if u32::from_be_bytes([p[4], p[5], p[6], p[7]]) != n as u32 + 1 {
+            return false;
+        }
+        let header = &p[8..16];
+        if &header[4..8] != b"jumb" || *first_header.get_or_insert(header) != header {
+            return false;
+        }
+        if n == 0 {
+            // The description box: LBox (4) 'jumd' (4) UUID (16) toggles (1) label.
+            let d = &p[16..];
+            if d.len() < 30 || &d[4..8] != b"jumd" || d[8..24] != C2PA_STORE_UUID || d[24] & 0x02 == 0 || &d[25..30] != b"c2pa\0" {
+                return false;
+            }
+        }
+    }
+    !run.is_empty()
 }
 
 /// Scrub `asset` (in memory, `format` its file extension) given its hard
 /// binding's exclusions, (start, length) each.
 pub fn scrub(asset: &mut [u8], format: &str, exclusions: &[(u64, u64)]) -> Result<ScrubReport> {
+    // Every exclusion validated first, with checked arithmetic: a malformed
+    // one is an error, and the asset is unchanged.
+    let ranges = exclusions
+        .iter()
+        .map(|&(start, length)| {
+            let end = start.checked_add(length).ok_or_else(|| anyhow!("an exclusion overflows ({start} + {length})"))?;
+            let (s, e) = (usize::try_from(start)?, usize::try_from(end)?);
+            if e > asset.len() {
+                bail!("the exclusion [{start}, {end}) runs past the file ({} bytes)", asset.len());
+            }
+            Ok((s, e - s))
+        })
+        .collect::<Result<Vec<(usize, usize)>>>()?;
     let original = asset.to_vec();
     let mut report = ScrubReport::default();
     match format.to_ascii_lowercase().as_str() {
-        "jpg" | "jpeg" => scrub_jpeg(asset, exclusions, &mut report)?,
+        "jpg" | "jpeg" => scrub_jpeg(asset, &ranges, &mut report)?,
         other => {
             // Nothing to scrub only if the sole exclusion is the store.
             if exclusions.len() > 1 {
@@ -111,12 +169,8 @@ pub fn scrub(asset: &mut [u8], format: &str, exclusions: &[(u64, u64)]) -> Resul
     }
     // The invariant: no byte outside the exclusions has changed.
     let mut excluded = vec![false; asset.len()];
-    for &(start, length) in exclusions {
-        let (s, e) = (start as usize, (start + length) as usize);
-        if e > asset.len() {
-            bail!("an exclusion runs past the file");
-        }
-        excluded[s..e].iter_mut().for_each(|x| *x = true);
+    for &(s, l) in &ranges {
+        excluded[s..s + l].iter_mut().for_each(|x| *x = true);
     }
     if asset.iter().zip(&original).zip(&excluded).any(|((a, o), x)| a != o && !x) {
         bail!("internal error: scrubbing changed a byte the hard binding covers");
@@ -124,13 +178,12 @@ pub fn scrub(asset: &mut [u8], format: &str, exclusions: &[(u64, u64)]) -> Resul
     Ok(report)
 }
 
-fn scrub_jpeg(jpeg: &mut [u8], exclusions: &[(u64, u64)], report: &mut ScrubReport) -> Result<()> {
+fn scrub_jpeg(jpeg: &mut [u8], exclusions: &[(usize, usize)], report: &mut ScrubReport) -> Result<()> {
     let segments = segments(jpeg)?;
     let mut covered = vec![false; segments.len()];
     // First recognize every excluded range, so that a refusal changes nothing.
     let mut plan = Vec::new();
     for &(start, length) in exclusions {
-        let (start, length) = (start as usize, length as usize);
         // The manifest store: one or more consecutive whole APP11 JUMBF segments.
         if let Some(first) = segments.iter().position(|s| s.start == start) {
             let mut end = start;
@@ -142,13 +195,7 @@ fn scrub_jpeg(jpeg: &mut [u8], exclusions: &[(u64, u64)], report: &mut ScrubRepo
                 end += s.len;
                 run.push(i);
             }
-            let is_store = end == start + length
-                && !run.is_empty()
-                && run.iter().all(|&i| {
-                    let (ps, pl) = segments[i].payload();
-                    kind(0xeb, &jpeg[ps..ps + pl]) == Some("manifest store")
-                });
-            if is_store {
+            if end == start + length && is_c2pa_store(jpeg, &segments, &run) {
                 run.iter().for_each(|&i| covered[i] = true);
                 continue;
             }
@@ -158,10 +205,14 @@ fn scrub_jpeg(jpeg: &mut [u8], exclusions: &[(u64, u64)], report: &mut ScrubRepo
             .position(|s| s.payload() == (start, length))
             .ok_or_else(|| anyhow!("the excluded range at {start} ({length} bytes) is neither whole manifest-store segments nor exactly one segment's payload; not scrubbing what is not recognized"))?;
         covered[index] = true;
+        // The store's payload alone, in a single segment.
+        if is_c2pa_store(jpeg, &segments, &[index]) {
+            continue;
+        }
         let segment = &segments[index];
         let kind = kind(segment.marker, &jpeg[start..start + length])
             .ok_or_else(|| anyhow!("the excluded range at {start} is an unrecognized segment (marker {:#04x}); not scrubbing what is not recognized", segment.marker))?;
-        if kind != "manifest store" && kind != "scrubbed" {
+        if kind != "scrubbed" {
             plan.push((kind, start, length));
         }
     }
@@ -229,31 +280,72 @@ mod tests {
         [&[0xff, marker][..], &len.to_be_bytes(), payload].concat()
     }
 
-    /// A JPEG with EXIF, a manifest store, XMP, extended XMP, an ICC profile,
-    /// a tiny scan, and data after the image; and the exclusions of its
-    /// EXIF, store, XMP, and extended XMP payloads.
+    /// The C2PA manifest store as JPEG's JUMBF transport carries it, split
+    /// into `parts` APP11 segments: a `jumb` superbox whose description box
+    /// has the store's type and label, then `content`. `uuid` and the
+    /// sequence numbers can be changed for negative tests.
+    fn store_segments(content: &[u8], parts: usize, uuid: [u8; 16], sequence: impl Fn(usize) -> u32) -> Vec<Vec<u8>> {
+        let mut desc = Vec::new();
+        desc.extend(((8 + 16 + 1 + 5) as u32).to_be_bytes());
+        desc.extend(b"jumd");
+        desc.extend(uuid);
+        desc.push(0x03); // requestable, label present
+        desc.extend(b"c2pa\0");
+        let body = [desc.as_slice(), content].concat();
+        let header = [((body.len() + 8) as u32).to_be_bytes().as_slice(), b"jumb"].concat();
+        let chunk = body.len().div_ceil(parts);
+        body.chunks(chunk)
+            .enumerate()
+            .map(|(n, c)| {
+                let payload = [JUMBF, &[0, 1][..], &sequence(n).to_be_bytes(), &header, c].concat();
+                segment(0xeb, &payload)
+            })
+            .collect()
+    }
+
+    /// The store's boxes: long enough that, split in three, the first
+    /// segment holds the whole description box, as in real stores.
+    fn canonical_store(parts: usize) -> Vec<Vec<u8>> {
+        store_segments(&[b'b'; 200], parts, C2PA_STORE_UUID, |n| n as u32 + 1)
+    }
+
+    /// A JPEG with EXIF, the manifest store, XMP, extended XMP, an ICC
+    /// profile, a tiny scan, and data after the image; and the exclusions of
+    /// its EXIF, store (whole segments, as real assets exclude it), XMP, and
+    /// extended XMP.
     fn jpeg() -> (Vec<u8>, Vec<(u64, u64)>) {
+        jpeg_with_store(canonical_store(1))
+    }
+
+    fn jpeg_with_store(store: Vec<Vec<u8>>) -> (Vec<u8>, Vec<(u64, u64)>) {
         let exif = [EXIF, b"II*\0\x08\0\0\0Make: Example Phone 9"].concat();
-        let store = [JUMBF, b"\0\x01 the manifest store"].concat();
         let xmp = [XMP, b"<x:xmpmeta>Example Phone 9</x:xmpmeta>"].concat();
         let ext = [XMP_EXTENDED, b"0123456789abcdef0123456789abcdef secret depth data"].concat();
         let icc = [b"ICC_PROFILE\0".as_slice(), b"\x01\x01 profile"].concat();
         let mut out = vec![0xff, 0xd8];
         let mut exclusions = Vec::new();
-        for (marker, payload, excluded) in [(0xe1, &exif, true), (0xeb, &store, true), (0xe1, &xmp, true), (0xe1, &ext, true), (0xe2, &icc, false)] {
-            if marker == 0xeb {
-                // The store, as real assets exclude it: the whole segment.
-                exclusions.push((out.len() as u64, payload.len() as u64 + 4));
-            } else if excluded {
-                exclusions.push((out.len() as u64 + 4, payload.len() as u64));
-            }
-            out.extend(segment(marker, payload));
+        exclusions.push((out.len() as u64 + 4, exif.len() as u64));
+        out.extend(segment(0xe1, &exif));
+        let store_start = out.len() as u64;
+        store.iter().for_each(|s| out.extend(s));
+        exclusions.push((store_start, out.len() as u64 - store_start));
+        for payload in [&xmp, &ext] {
+            exclusions.push((out.len() as u64 + 4, payload.len() as u64));
+            out.extend(segment(0xe1, payload));
         }
+        out.extend(segment(0xe2, &icc));
         out.extend(segment(0xda, b"\x01\x01\0\0?\0")); // start of scan
         out.extend(b"\x12\x34\xff\x00\x56"); // entropy-coded data, with a stuffed byte
         out.extend([0xff, 0xff, 0xd9]); // end of image, after a fill byte
         out.extend(b"\xff\xd8 appended gain map, Example Phone 9");
         (out, exclusions)
+    }
+
+    fn refused(asset: &[u8], exclusions: &[(u64, u64)]) -> String {
+        let mut a = asset.to_vec();
+        let err = scrub(&mut a, "jpg", exclusions).unwrap_err().to_string();
+        assert_eq!(a, asset, "a refused scrub changed the asset");
+        err
     }
 
     #[test]
@@ -264,18 +356,16 @@ mod tests {
         assert_eq!(scrubbed.len(), original.len());
         let kinds: Vec<_> = report.removed.iter().map(|(k, _, _)| *k).collect();
         assert_eq!(kinds, ["EXIF", "XMP", "extended XMP"]);
-        // The identifying strings are gone from the excluded ranges...
         for &(s, l) in &exclusions {
             let range = &scrubbed[s as usize..(s + l) as usize];
             assert!(!range.windows(7).any(|w| w == b"Example"), "an excluded range still holds the metadata");
         }
-        // ...the store is untouched, and so is every byte outside the exclusions.
         let (store_start, store_len) = exclusions[1];
-        assert_eq!(scrubbed[store_start as usize..(store_start + store_len) as usize], original[store_start as usize..(store_start + store_len) as usize]);
-        // Bound metadata is reported: the ICC profile, and the appended image.
+        let store = store_start as usize..(store_start + store_len) as usize;
+        assert_eq!(scrubbed[store.clone()], original[store]);
         assert!(report.bound.iter().any(|b| b.starts_with("ICC profile")), "{:?}", report.bound);
         assert!(report.bound.iter().any(|b| b.starts_with("data after the main image")), "{:?}", report.bound);
-        // Scrubbing again changes nothing.
+        // Scrubbing again changes nothing: the scrubbed payloads are canonical.
         let mut again = scrubbed.clone();
         let report2 = scrub(&mut again, "jpg", &exclusions).unwrap();
         assert_eq!(again, scrubbed);
@@ -284,20 +374,17 @@ mod tests {
 
     #[test]
     fn refuses_what_it_does_not_recognize() {
-        let (original, mut exclusions) = jpeg();
-        // An exclusion covering part of a payload.
-        let mut a = original.clone();
+        let (original, exclusions) = jpeg();
         let mut partial = exclusions.clone();
         partial[0].1 -= 1;
-        assert!(scrub(&mut a, "jpg", &partial).unwrap_err().to_string().contains("not scrubbing what is not recognized"));
+        assert!(refused(&original, &partial).contains("not scrubbing what is not recognized"));
         // An excluded ICC profile (an unrecognized kind).
         let segs = segments(&original).unwrap();
         let icc = segs.iter().find(|s| s.marker == 0xe2).unwrap();
         let (s, l) = icc.payload();
-        exclusions.push((s as u64, l as u64));
-        let mut b = original.clone();
-        assert!(scrub(&mut b, "jpg", &exclusions).unwrap_err().to_string().contains("unrecognized segment"));
-        assert_eq!(b, original, "a refused scrub must not change the asset");
+        let mut with_icc = exclusions.clone();
+        with_icc.push((s as u64, l as u64));
+        assert!(refused(&original, &with_icc).contains("unrecognized segment"));
         // Other formats: only the store may be excluded.
         let mut c = original.clone();
         assert!(scrub(&mut c, "png", &[(8, 100)]).is_ok());
@@ -311,34 +398,77 @@ mod tests {
         let report = scrub(&mut a, "jpg", &exclusions[1..2]).unwrap();
         assert_eq!(a, original);
         assert!(report.removed.is_empty());
-        // EXIF and XMP not excluded: signed, reported as bound.
         assert!(report.bound.iter().any(|b| b.starts_with("EXIF")), "{:?}", report.bound);
         assert!(report.bound.iter().any(|b| b.starts_with("XMP")), "{:?}", report.bound);
     }
 
+    /// The store is recognized by its structure, not by `JP` (PR #44 review):
+    /// a split store is accepted; unrelated JUMBF, a malformed JP payload, or
+    /// unexpected continuations are refused.
     #[test]
-    fn the_store_may_span_several_segments_or_be_excluded_as_a_payload() {
-        let store1 = [JUMBF, b"\0\x01 first part"].concat();
-        let store2 = [JUMBF, b"\0\x01 second part"].concat();
-        let exif = [EXIF, b"II*\0 Example Phone 9"].concat();
-        let mut out = vec![0xff, 0xd8];
-        let store_start = out.len() as u64;
-        out.extend(segment(0xeb, &store1));
-        out.extend(segment(0xeb, &store2));
-        let store_len = out.len() as u64 - store_start;
-        let exif_payload = (out.len() as u64 + 4, exif.len() as u64);
-        out.extend(segment(0xe1, &exif));
-        out.extend(segment(0xda, b"\x01\x01\0\0?\0"));
-        out.extend([0x12, 0xff, 0xd9]);
-        let mut a = out.clone();
-        let report = scrub(&mut a, "jpeg", &[(store_start, store_len), exif_payload]).unwrap();
-        assert_eq!(report.removed.len(), 1);
-        assert_eq!(a[..store_start as usize + store_len as usize], out[..store_start as usize + store_len as usize]);
-        // A run that ends inside a segment is not the store.
-        let mut b = out.clone();
-        assert!(scrub(&mut b, "jpeg", &[(store_start, store_len - 1)]).is_err());
-        // The store's payload alone is accepted too.
-        let mut c = out.clone();
-        assert!(scrub(&mut c, "jpeg", &[(store_start + 4, store1.len() as u64)]).is_ok());
+    fn the_store_is_recognized_by_its_structure() {
+        // A store split over three segments.
+        let (asset, exclusions) = jpeg_with_store(canonical_store(3));
+        let mut a = asset.clone();
+        assert_eq!(scrub(&mut a, "jpg", &exclusions).unwrap().removed.len(), 3);
+        // The store's payload alone, in one segment, is accepted too.
+        let (asset1, ex1) = jpeg();
+        let mut b = asset1.clone();
+        assert!(scrub(&mut b, "jpg", &[(ex1[1].0 + 4, ex1[1].1 - 4)]).is_ok());
+
+        let other_uuid = [0x11; 16];
+        let cases: Vec<(&str, Vec<Vec<u8>>)> = vec![
+            ("unrelated JUMBF", store_segments(b"another standard's boxes", 1, other_uuid, |n| n as u32 + 1)),
+            ("a malformed JP payload", vec![segment(0xeb, b"JP arbitrary data; private-camera-serial-123456")]),
+            ("continuations out of order", store_segments(&[b'b'; 200], 3, C2PA_STORE_UUID, |n| [1, 3, 2][n])),
+            ("a sequence not starting at 1", store_segments(b"the manifest store's boxes", 1, C2PA_STORE_UUID, |_| 2)),
+        ];
+        for (name, store) in cases {
+            let (asset, exclusions) = jpeg_with_store(store);
+            let err = refused(&asset, &exclusions);
+            assert!(err.contains("not recognized"), "{name}: {err}");
+        }
+        // A continuation of another instance in the run.
+        let mut store = canonical_store(2);
+        let mut second = store[1].clone();
+        second[4 + 2..4 + 4].copy_from_slice(&[0, 2]); // En
+        store[1] = second;
+        let (asset, exclusions) = jpeg_with_store(store);
+        assert!(refused(&asset, &exclusions).contains("not recognized"));
+    }
+
+    /// A payload starting with the scrub marker is already scrubbed only if
+    /// the rest is zeros (PR #44 review); otherwise it is overwritten.
+    #[test]
+    fn a_marker_with_data_after_it_is_overwritten() {
+        let (mut asset, exclusions) = jpeg();
+        let payload = [SCRUBBED, b"private-camera-serial-123456"].concat();
+        // Replace the extended XMP payload (same length) with the marker and data.
+        let (s, l) = (exclusions[3].0 as usize, exclusions[3].1 as usize);
+        assert!(l >= payload.len());
+        let mut fake = vec![0u8; l];
+        fake[..payload.len()].copy_from_slice(&payload);
+        asset[s..s + l].copy_from_slice(&fake);
+        let report = scrub(&mut asset, "jpg", &exclusions).unwrap();
+        assert!(report.removed.iter().any(|(k, _, _)| *k == "other data after the scrub marker"), "{report:?}");
+        assert!(!asset.windows(14).any(|w| w == b"private-camera"), "the identifier survived");
+    }
+
+    /// Malformed exclusions are errors, never panics, and change nothing
+    /// (PR #44 review).
+    #[test]
+    fn malformed_exclusions_are_refused() {
+        let (asset, _) = jpeg();
+        for (name, exclusions) in [
+            ("overflowing", vec![(1, u64::MAX)]),
+            ("past the end", vec![(asset.len() as u64 - 1, 2)]),
+            ("starting past the end", vec![(asset.len() as u64 + 5, 0)]),
+        ] {
+            for format in ["jpg", "png"] {
+                let mut a = asset.clone();
+                assert!(scrub(&mut a, format, &exclusions).is_err(), "{name} ({format}): accepted");
+                assert_eq!(a, asset, "{name} ({format}): changed the asset");
+            }
+        }
     }
 }

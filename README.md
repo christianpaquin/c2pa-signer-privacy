@@ -12,6 +12,8 @@ Two proof-of-concept implementations demonstrate different privacy strategies:
 | **X.509 + ZK Proofs** | Keep standard X.509/ECDSA signing, add a post-processing step that replaces the signature with a zero-knowledge proof | [zk-proofs/](zk-proofs/README.md) |
 | **Web UI Demo** | Flask web interface for both prototypes | [web-ui/](web-ui/README.md) |
 
+The X.509 + ZK approach reached its [Milestone 1](zk-proofs/MILESTONE-1.md): a third party anonymizes content signed by a real device under the official C2PA trust list, hiding the signer, its issuing CA, its time-stamp authority, and the exact time.
+
 ## Comparison
 
 | Feature | BBS Signatures | X.509 + ZK Proofs |

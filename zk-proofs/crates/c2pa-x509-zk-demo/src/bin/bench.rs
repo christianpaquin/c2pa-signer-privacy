@@ -599,7 +599,7 @@ struct ThirdParty {
     hide_time_stamp: bool,
 }
 
-/// `third_party`: measure the third-party variant instead of V0.
+/// `third_party`: measure the third-party variant instead of M0.
 fn run(
     work_dir: Option<PathBuf>,
     circuits_dir: &Path,

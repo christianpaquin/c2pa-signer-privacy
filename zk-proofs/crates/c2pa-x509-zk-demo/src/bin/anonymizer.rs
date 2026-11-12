@@ -10,7 +10,7 @@
 //!
 //! Third-party mode (roadmap E2b; --third-party) proves the original signature
 //! and replaces it in place; it is the current mode. Without it, the anonymizer
-//! runs the frozen V0 baseline (signer-side: re-signs with the signer's key),
+//! runs the frozen M0 baseline (signer-side: re-signs with the signer's key),
 //! kept so its results can be reproduced (zk-proofs/HISTORY.md).
 
 use anyhow::{anyhow, Result};
@@ -27,7 +27,7 @@ use c2pa_x509_zk_demo::{
 
 #[derive(Parser, Debug)]
 #[command(name = "c2pa-x509-zk-anonymizer")]
-#[command(about = "Anonymize a C2PA asset by replacing its X.509 signature with a ZK proof (--third-party: the current mode; otherwise the frozen V0 baseline)")]
+#[command(about = "Anonymize a C2PA asset by replacing its X.509 signature with a ZK proof (--third-party: the current mode; otherwise the frozen M0 baseline)")]
 struct Args {
     /// Path to the input asset (must have a valid C2PA X.509 signature)
     #[arg(short, long)]

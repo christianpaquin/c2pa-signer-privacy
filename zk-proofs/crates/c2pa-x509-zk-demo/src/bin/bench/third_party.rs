@@ -1,5 +1,5 @@
 //! `c2pa-x509-zk-bench run --variant third-party`: the third-party statement
-//! (roadmap E2b; gnark) under the same accounting as V0. Every phase is a
+//! (roadmap E2b; gnark) under the same accounting as M0. Every phase is a
 //! separate process; steps inside the gnark CLI's phases come from the
 //! timings it prints.
 //!
@@ -49,7 +49,7 @@ public claim; and the public sigTst2 imprint is the SHA-256 of the countersignat
 Off-circuit: the time-stamp token against the TSA trust list at its time t, the issuing chain against the trust \
 list at t, and the claim's assertions and hard binding with c2pa.";
 
-const ACCOUNTING: &str = "As V0: one_time = setup (here one process compiling the circuit and running the Groth16 \
+const ACCOUNTING: &str = "As M0: one_time = setup (here one process compiling the circuit and running the Groth16 \
 setup). anonymization_per_asset = prepare + prove + self_verify + package: the complete latency from a signed \
 asset to an anonymized one; prove is measured cold (the constraint system and proving key evicted from the Linux \
 page cache before it, the observed residency recorded) and includes loading both files, solving the witness, and \

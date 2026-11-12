@@ -28,6 +28,7 @@ How the X.509 + ZK prototype evolved, for reporting. Details live in the pull re
 | Hiding the time stamp | Nov 11–12 | #37–#41 | I6: the time-stamp token verified in the circuit under a reduced profile, the TSA hidden in its own tree (leaf tag 4), a UTC day disclosed by default; opt-in, +28% per asset |
 | A real photo, issuer and token hidden | Nov 12 | #42 | R2 with the issuer and the time stamp hidden: a real device photo anonymizes and verifies against the official lists; the unchanged claim is now the main disclosure |
 | Claim privacy (design), metadata scrubbing | Nov 12 | #43, #44 | Redaction cannot hide a claim's own generator or actions, so the claim must stay private (proposed, spike measured); EXIF and XMP outside the hard binding scrubbed in place, signed metadata reported |
+| Milestone 1 | Nov 12 | #45 | Implementation paused to present the work: [MILESTONE-1.md](MILESTONE-1.md) summarizes what is reached, measured, and postponed |
 
 ## Defects found in the original prototype
 

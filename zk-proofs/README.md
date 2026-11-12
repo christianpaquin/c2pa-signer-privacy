@@ -2,6 +2,8 @@
 
 This project implements privacy-preserving signatures for C2PA manifests using zero-knowledge proofs. It replaces an existing X.509/COSE signature with a ZK proof that the asset was signed by a certificate issued by a CA that chains to a trust list, without revealing the signer's identity.
 
+**Milestone 1 reached** (November 12, 2026): third-party anonymization of real C2PA content, with the signer, its issuing CA, its time-stamp authority, and the exact time hidden. Summary, results, assumptions, and what is postponed: [MILESTONE-1.md](MILESTONE-1.md).
+
 ## Overview
 
 This approach keeps standard X.509/ECDSA-P256 signing, then adds a post-processing step that:

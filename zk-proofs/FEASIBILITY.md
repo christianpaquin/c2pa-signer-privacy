@@ -249,6 +249,27 @@ Measured in one session through the harness with existing keys (setup not measur
 - **The anonymity sets** on the official lists (`a95f2c4`): the issuer among 28 P-384 CAs from 18 organizations; the TSA among 19 P-384 CAs from 14 organizations, all eligible for time stamping.
 - **What it does not hide:** the claim and its assertions, as before; and the window, by default the UTC day, which remains a correlation channel for the TSA operator, narrower for a TSA with few requests ([HIDING-THE-TIME-STAMP.md](HIDING-THE-TIME-STAMP.md#guarantees-and-shortcuts)).
 
+## Milestone 1: every mode in one session
+
+The four configurations of [Milestone 1](MILESTONE-1.md) measured back to back, so that they compare directly; the earlier figures came from separate sessions, between which this laptop varies by 10–40%. Through the harness with existing keys (setup not measured), on the mirror fixture, three cold and three warm proves each, median reported; [records](bench/results/2026-11-13-all-modes/), clean commit `dce2661`, every cold run confirmed cold. Windows was kept from sleeping, on AC power, and a heartbeat every 10 s showed no suspend (largest gap 12 s, 35 minutes in all). The disclosed baseline ran first and last.
+
+| Mode (run order) | Per-asset anonymization | Single cold proves | Load key (parse) | Proof | Peak RAM | Verify (full verifier) | Proving key |
+|---|---|---|---|---|---|---|---|
+| Disclosed (1st) | 81.0 s | 73.6–81.9 s | 57.8 s | 18.1 s | 6.6 GiB | 32 ms (61 ms) | 1.15 GB |
+| Hidden issuer (2nd) | 71.2 s | 69.8–71.4 s | 52.3 s | 16.3 s | 6.7 GiB | 32 ms (83 ms) | 1.15 GB |
+| Hidden issuer and time stamp (3rd) | 91.3 s | 88.4–94.9 s | 66.9 s | 20.4 s | 8.5 GiB | 31 ms (108 ms) | 1.49 GB |
+| Disclosed, fast key path (4th) | 28.1 s | 27.7–30.1 s | 7.8 s | 16.4 s | 6.7 GiB | 37 ms (48 ms) | 2.29 GB (raw) |
+| Disclosed (5th) | 71.0 s | 70.3–71.4 s | 51.1 s | 17.2 s | 6.7 GiB | 32 ms (55 ms) | 1.15 GB |
+
+### Observations
+
+- **The baseline drifted by 12% within the session** (81.0 s first, 71.0 s last), mostly in loading the proving key (57.8 s against 51.1 s); comparisons below are with the adjacent runs and that range.
+- **Hiding the issuer costs nothing measurable:** 71.2 s, within the disclosed runs' range (71.0–81.0 s), as in the H4 session.
+- **Hiding the time stamp too costs +28%** over the adjacent hidden-issuer run (91.3 s against 71.2 s), the same as in the I6 session; +13–29% over the disclosed runs. Its slowest and the others' fastest single proves do not overlap (88.4 s against at most 81.9 s).
+- **The fast key path** brings the disclosed mode to 28.1 s, 60–65% less than the compressed key, by cutting the key's parse from 51–58 s to 7.8 s; the proof itself (16–18 s) is unchanged.
+- **Peak memory** is 6.6–6.7 GiB for every mode but the hidden time stamp (8.5 GiB); verification costs 31–37 ms for the proof in every mode, and the full verifier 48–108 ms, the hidden modes building the trees from the policy's snapshots.
+- **Consistent with the earlier sessions:** disclosed 72–77 s (H4 session), hidden issuer 75–77 s and hidden-all 97 s (I6 session), fast path 25–33 s (E6, E7): this session runs a few percent faster, and the ratios between modes are unchanged.
+
 ## E1: P-384 and SHA-384 primitives
 
 What the algorithms of the official trust list's CAs cost in a circuit, next to the P-256 and SHA-256 the current circuit uses ([E1](README.md#e1-cost-of-reality-p-384-sha-384-and-rsa-in-circuit); code and how to run it in [`experiments/e1-p384`](experiments/e1-p384/)). Both curves are measured in the same stack, gnark v0.16.4 with Groth16 on BN254, because the current circom ECDSA library is specific to P-256 and the project has no circom SHA-384: porting both would have been a substantial job, and gnark is the leading second-stack candidate for E6 anyway. Records: [2026-11-04-e1-p384-gnark](bench/results/2026-11-04-e1-p384-gnark.json) (all circuits) and [its repeat](bench/results/2026-11-04-e1-p384-gnark-repeat.json) (the two 1,500-byte CA circuits, measured twice more).

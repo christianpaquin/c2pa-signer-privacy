@@ -73,6 +73,7 @@ All on the same laptop ([reference machine](FEASIBILITY.md#reference-machine)); 
 | [E1 RSA primitives](bench/results/2026-11-10-e1-rsa-gnark-review.json) (#30) | RSA CA and PS256 signatures, next to ECDSA, in gnark | 4.6 s for an RSA-4096 CA over a 1.5 KB TBS (key resident; not comparable) | 3.4 GiB | RSA-4096 costs about as much as ECDSA P-256 (exponent 65537); RSA CAs 0.75–0.86× P-384 ones; PS256 3.5–6.0× ES256, mostly MGF1 hashing |
 | [V1, hidden issuer](bench/results/2026-11-11-h4/) (H4) | Same, with the issuing CA hidden among the trust list's eligible CAs (opt-in) | 107 s against 104 s for V1 in the same session (within noise) | 6.7 GiB | The machine slowed by ~40% within the session without suspending; compared with the adjacent run |
 | [V1, hidden issuer and time stamp](bench/results/2026-11-12-i6/) (I6) | Same, with the time-stamp token verified in the circuit (opt-in) | 97 s against 75–77 s for the hidden issuer in the same session | 8.5 GiB | Clean session (heartbeat, no suspend); an earlier one, spoiled by a laptop sleep, was discarded |
+| [Milestone 1, every mode](bench/results/2026-11-13-all-modes/) | The four configurations in one session, the baseline first and last | Disclosed 71–81 s, hidden issuer 71 s, hidden issuer and time stamp 91 s, fast key path 28 s | 6.7–8.5 GiB | Clean session (heartbeat, AC power); the baseline drifted 12% within it; ratios as in the separate sessions |
 
 ## Lessons
 

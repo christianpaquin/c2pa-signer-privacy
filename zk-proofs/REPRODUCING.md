@@ -95,12 +95,14 @@ Each run takes 8–12 minutes: three cold proves (the key files evicted from the
 - **Kept awake, with a heartbeat:** on WSL, a PowerShell script holding `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` keeps Windows from sleeping while the screen may lock; a loop appending `date +%s` to a file every 10 s shows any suspend as a gap. A session with a gap is discarded. Closing the lid or choosing Sleep overrides the keep-awake request.
 - **Check the record:** every cold run's observed cache state, the commit (`git_commit`, with no changed tracked files), and the peak memory per phase are in the record.
 
-| Mode | Fixture, per asset (cold) | Peak memory | Record |
-|---|---|---|---|
-| Disclosed | 72–77 s | 6.7 GiB | [2026-11-11-h4](bench/results/2026-11-11-h4/) (first run) |
-| Hidden issuer | 75–77 s | 6.7 GiB | [2026-11-12-i6](bench/results/2026-11-12-i6/) |
-| Hidden issuer and time stamp | 97 s | 8.5 GiB | [2026-11-12-i6](bench/results/2026-11-12-i6/) |
-| Disclosed, fast key path | 25–33 s | 6.7 GiB | [2026-11-09-e7](bench/results/2026-11-09-e7/) |
+All four modes were measured in one session, in the order shown, the disclosed baseline repeated last ([FEASIBILITY.md](FEASIBILITY.md#milestone-1-every-mode-in-one-session); records in [2026-11-13-all-modes](bench/results/2026-11-13-all-modes/)):
+
+| Mode | Fixture, per asset (cold) | Peak memory |
+|---|---|---|
+| Disclosed | 81.0 s first, 71.0 s last | 6.7 GiB |
+| Hidden issuer | 71.2 s | 6.7 GiB |
+| Hidden issuer and time stamp | 91.3 s (+28% over the hidden issuer) | 8.5 GiB |
+| Disclosed, fast key path | 28.1 s | 6.7 GiB |
 
 ## Real assets
 

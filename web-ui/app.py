@@ -38,14 +38,19 @@ BBS_BIN = ROOT / "bbs-signatures" / "target" / "release"
 ZK_BIN = ROOT / "zk-proofs" / "target" / "release"
 BBS_FIXTURES = ROOT / "bbs-signatures" / "fixtures"
 ZK_FIXTURES = ROOT / "zk-proofs" / "fixtures"
-ZK_PKI = ZK_FIXTURES / "pki"
-ZK_CIRCUITS = ROOT / "zk-proofs" / "circuits"
+# The web demo's own PKI: the mirror profile (P-384 CAs, a P-256 signer, a local TSA).
+ZK_PKI = ZK_FIXTURES / "web-pki"
+# The statements' key directories (override with C2PA_ZK_KEYS_ROOT).
+# Absolute, since the CLIs run from zk-proofs/ and a relative root would name another directory there.
+ZK_KEYS_ROOT = Path(os.environ.get("C2PA_ZK_KEYS_ROOT", ROOT / "zk-proofs" / "target")).resolve()
 
 UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="c2pa_web_"))
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg"}
 
 # Background jobs for long-running operations (ZK proof generation)
 jobs: dict[str, dict] = {}
+# One proof at a time: each needs up to ~9 GB.
+proof_lock = threading.Lock()
 
 # In-memory wallet for BBS credentials (simulates holder wallet)
 wallet: list[dict] = []
@@ -95,14 +100,14 @@ def ensure_zk_pki() -> None:
     """
     script = ROOT / "zk-proofs" / "generate-test-pki.sh"
     if not (ZK_PKI / "trust-list.pem").exists():
-        subprocess.run(["bash", str(script), str(ZK_PKI)], check=True, capture_output=True)
+        subprocess.run(["bash", str(script), "--mirror", str(ZK_PKI), "Web Demo"], check=True, capture_output=True)
         return
     expiring = subprocess.run(
         ["openssl", "x509", "-checkend", "86400", "-noout", "-in", str(ZK_PKI / "signer.pem")],
         capture_output=True,
     ).returncode != 0
     if expiring:
-        subprocess.run(["bash", str(script), "--renew-signer", str(ZK_PKI)], check=True, capture_output=True)
+        subprocess.run(["bash", str(script), "--renew-signer", "--mirror", str(ZK_PKI)], check=True, capture_output=True)
 
 
 def run_cli(args: list[str], cwd: str | None = None) -> subprocess.CompletedProcess:
@@ -119,6 +124,11 @@ def run_cli(args: list[str], cwd: str | None = None) -> subprocess.CompletedProc
 def run_cli_background(job_id: str, args: list[str], output_filename: str,
                        cwd: str | None = None) -> None:
     """Run a CLI binary in a background thread, updating job status."""
+    with proof_lock:
+        _run_job(job_id, args, output_filename, cwd)
+
+
+def _run_job(job_id: str, args: list[str], output_filename: str, cwd: str | None) -> None:
     jobs[job_id]["status"] = "running"
     jobs[job_id]["started"] = time.time()
     try:
@@ -132,7 +142,7 @@ def run_cli_background(job_id: str, args: list[str], output_filename: str,
             jobs[job_id]["output_filename"] = output_filename
         else:
             jobs[job_id]["status"] = "error"
-            jobs[job_id]["output"] = result.stderr.strip()
+            jobs[job_id]["output"] = (result.stdout + result.stderr).strip()
     except subprocess.TimeoutExpired:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["output"] = "Proof generation timed out (>1 hour)."
@@ -281,13 +291,61 @@ def bbs_verify():
 
 
 # ---------------------------------------------------------------------------
-# ZK Proofs
+# ZK Proofs (Milestone 1: third-party anonymization in gnark)
 # ---------------------------------------------------------------------------
+
+# The anonymization modes, each with the key directory of its statement
+# (from `c2pa-zk-gnark setup`, see zk-proofs/REPRODUCING.md#keys).
+ZK_MODES = {
+    "disclosed": {
+        "label": "Disclosed issuer",
+        "keys": ZK_KEYS_ROOT / "gnark-keys",
+        "statement": "disclosed",
+    },
+    "hidden-issuer": {
+        "label": "Hidden issuer",
+        "keys": ZK_KEYS_ROOT / "gnark-keys-hidden",
+        "statement": "hidden-issuer",
+    },
+    "hidden-all": {
+        "label": "Hidden issuer and time stamp",
+        "keys": ZK_KEYS_ROOT / "gnark-keys-hidden-all",
+        "statement": "hidden-all",
+    },
+}
+# The names the anonymizer writes into hidden-issuer assets as hints, and the
+# verifier's policy approving them (the demo PKI's lists, from its creation).
+ISSUER_LIST_NAME = "web-demo-list"
+TSA_LIST_NAME = "web-demo-tsa"
+TIME_WINDOWS = {"1h": "1 hour", "1d": "1 day (UTC)"}
+MAX_TIME_WINDOW = 86400
+
+
+def issuer_policy() -> Path:
+    """The verifier's policy for assets hiding their issuer (and time stamp)."""
+    path = UPLOAD_DIR / "issuer-policy.json"
+    path.write_text(json.dumps({
+        "snapshots": [{"name": ISSUER_LIST_NAME, "trust_list": str(ZK_PKI / "trust-list.pem"), "from": 0}],
+        "tsa_snapshots": [{"name": TSA_LIST_NAME, "trust_list": str(ZK_PKI / "tsa-trust-list.pem"), "from": 0}],
+        "max_time_window": MAX_TIME_WINDOW,
+    }))
+    return path
+
+
+def setup_command(mode: dict) -> str:
+    """The one-time setup for a mode's keys, at the configured path (run from zk-proofs/)."""
+    statement = "" if mode["statement"] == "disclosed" else f" --statement {mode['statement']}"
+    return f"./target/c2pa-zk-gnark setup --keys {mode['keys']}{statement}"
+
+
+def zk_modes_view() -> list[dict]:
+    return [{"id": k, "label": m["label"], "ready": (m["keys"] / "statement.pk").exists(),
+             "setup": setup_command(m)} for k, m in ZK_MODES.items()]
 
 
 @app.route("/zk")
 def zk_index():
-    return render_template("zk/index.html")
+    return render_template("zk/index.html", modes=zk_modes_view())
 
 
 @app.route("/zk/sign", methods=["GET", "POST"])
@@ -301,6 +359,7 @@ def zk_sign():
 
         output_path = unique_path(UPLOAD_DIR, input_path.suffix)
 
+        # Signed and time-stamped (sigTst2, by a local TSA), as on a real device.
         result = run_cli([
             str(ZK_BIN / "c2pa-x509-zk-sign"),
             "--input", str(input_path),
@@ -308,6 +367,8 @@ def zk_sign():
             "--cert", str(ZK_PKI / "signer.pem"),
             "--key", str(ZK_PKI / "signer.key"),
             "--ca", str(ZK_PKI / "issuing-ca.pem"),
+            "--tsa-cert", str(ZK_PKI / "tsa.pem"),
+            "--tsa-key", str(ZK_PKI / "tsa.key"),
         ])
 
         if result.returncode != 0:
@@ -326,14 +387,31 @@ def zk_sign():
 
 @app.route("/zk/anonymize", methods=["GET", "POST"])
 def zk_anonymize():
+    view = {"modes": zk_modes_view(), "time_windows": TIME_WINDOWS,
+            "selected_mode": "disclosed", "selected_window": "1d", "scrub": False}
     if request.method == "POST":
         ensure_zk_pki()
         image = request.files.get("image")
-        use_placeholder = "placeholder" in request.form
+        # No default: a missing mode (such as a disabled option) must not mean "disclosed".
+        mode_id = request.form.get("mode", "")
+        window = request.form.get("time_window", "1d")
+        scrub = "scrub_metadata" in request.form
+        # Keep the privacy choices when the form comes back with an error, so
+        # that a retry does not silently fall back to disclosing more.
+        view.update(scrub=scrub,
+                    selected_mode=mode_id if mode_id in ZK_MODES else view["selected_mode"],
+                    selected_window=window if window in TIME_WINDOWS else view["selected_window"])
 
         if not image or not allowed_file(image.filename):
             flash("Please upload a signed PNG or JPEG image.", "error")
-            return render_template("zk/anonymize.html")
+            return render_template("zk/anonymize.html", **view)
+        mode = ZK_MODES.get(mode_id)
+        if mode is None or window not in TIME_WINDOWS:
+            flash("Choose an available mode and time window.", "error")
+            return render_template("zk/anonymize.html", **view)
+        if not (mode["keys"] / "statement.pk").exists():
+            flash(f"No keys for this mode in {mode['keys']}. Run once, from zk-proofs/: {setup_command(mode)}", "error")
+            return render_template("zk/anonymize.html", **view)
 
         suffix = Path(image.filename).suffix
         input_path = unique_path(UPLOAD_DIR, suffix)
@@ -341,34 +419,27 @@ def zk_anonymize():
         image.save(str(input_path))
 
         cmd = [
-            str(ZK_BIN / "c2pa-x509-zk-anonymizer"),
+            str(ZK_BIN / "c2pa-x509-zk-anonymizer"), "--third-party",
+            "--keys", str(mode["keys"]),
             "--input", str(input_path),
             "--output", str(output_path),
-            "--trust-list", str(ZK_PKI / "trust-list.json"),
-            "--signer-key", str(ZK_PKI / "signer.key"),
-            "--cert", str(ZK_PKI / "signer.pem"),
-            "--circuits-dir", str(ZK_CIRCUITS),
+            "--trust-list", str(ZK_PKI / "trust-list.pem"),
         ]
-        if use_placeholder:
-            cmd.append("--placeholder")
+        if mode_id in ("hidden-issuer", "hidden-all"):
+            cmd += ["--hide-issuer", ISSUER_LIST_NAME]
+        if mode_id == "hidden-all":
+            cmd += ["--hide-time-stamp", TSA_LIST_NAME,
+                    "--tsa-trust-list", str(ZK_PKI / "tsa-trust-list.pem"),
+                    "--time-window", window]
+        if scrub:
+            cmd.append("--scrub-metadata")
 
-        # Placeholder mode runs synchronously (fast)
-        if use_placeholder:
-            result = run_cli(cmd, cwd=str(ROOT / "zk-proofs"))
-            if result.returncode != 0:
-                flash(f"Anonymization failed: {result.stderr}", "error")
-                return render_template("zk/anonymize.html")
-            return render_template(
-                "zk/anonymize.html",
-                success=True,
-                output=(result.stdout + result.stderr).strip(),
-                output_filename=output_path.name,
-            )
-
-        # Real ZK proof: run in background thread
+        # Proving takes 1.5-2.5 minutes and up to ~9 GB: run in the background,
+        # one proof at a time.
         job_id = uuid.uuid4().hex
         jobs[job_id] = {"status": "queued", "started": None, "output": "",
-                        "output_filename": None, "elapsed": None}
+                        "output_filename": None, "elapsed": None,
+                        "mode": mode["label"]}
         thread = threading.Thread(
             target=run_cli_background,
             args=(job_id, cmd, output_path.name),
@@ -378,7 +449,7 @@ def zk_anonymize():
         thread.start()
         return redirect(url_for("zk_anonymize_status", job_id=job_id))
 
-    return render_template("zk/anonymize.html")
+    return render_template("zk/anonymize.html", **view)
 
 
 @app.route("/zk/anonymize/status/<job_id>")
@@ -411,7 +482,7 @@ def job_status_api(job_id: str):
 @app.route("/zk/verify", methods=["GET", "POST"])
 def zk_verify():
     if request.method == "POST":
-        # Verification only reads the trust list; it never creates or renews keys.
+        # Verification only reads the trust lists; it never creates or renews keys.
         if not (ZK_PKI / "trust-list.pem").exists():
             flash("No test PKI yet: sign an image first.", "error")
             return render_template("zk/verify.html")
@@ -424,12 +495,25 @@ def zk_verify():
         input_path = unique_path(UPLOAD_DIR, suffix)
         image.save(str(input_path))
 
-        result = run_cli([
-            str(ZK_BIN / "c2pa-x509-zk-verify"),
-            "--input", str(input_path),
-            "--trust-list", str(ZK_PKI / "trust-list.pem"),
-            "--circuits-dir", str(ZK_CIRCUITS),
-        ], cwd=str(ROOT / "zk-proofs"))
+        # The asset says which statement it uses; the verifier refuses keys
+        # for another one before any other check, so try each mode's keys.
+        result = None
+        for mode in ZK_MODES.values():
+            if not (mode["keys"] / "statement.vk").exists():
+                continue
+            result = run_cli([
+                str(ZK_BIN / "c2pa-x509-zk-verify"),
+                "--input", str(input_path),
+                "--keys", str(mode["keys"]),
+                "--trust-list", str(ZK_PKI / "trust-list.pem"),
+                "--tsa-trust-list", str(ZK_PKI / "tsa-trust-list.pem"),
+                "--issuer-policy", str(issuer_policy()),
+            ], cwd=str(ROOT / "zk-proofs"))
+            if "the asset is for" not in result.stderr:
+                break
+        if result is None:
+            flash("No verifying keys found: see zk-proofs/REPRODUCING.md#keys.", "error")
+            return render_template("zk/verify.html")
 
         verified = result.returncode == 0
         output = result.stdout + result.stderr

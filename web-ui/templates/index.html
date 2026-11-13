@@ -17,7 +17,7 @@
     <div class="card">
         <span class="tag">X.509 + ZK Proofs</span>
         <h2>Full Anonymity</h2>
-        <p>Standard X.509 signing + Groth16 ZK proof. Works with existing PKI, ~1 KB proofs.</p>
+        <p>Standard X.509 signing, then a Groth16 proof replaces the signature. Works with existing PKI; optionally hides the issuer and the time stamp.</p>
         <a href="{{ url_for('zk_index') }}" class="btn">Open ZK &rarr;</a>
     </div>
 </div>

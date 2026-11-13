@@ -18,7 +18,7 @@ cargo build --release
 
 ## Keys
 
-One key set per statement, each from a single-party setup on this machine. The paths below are those the tests and this guide use.
+One key set per statement, each from a single-party setup on this machine. No key is committed to the repository: each setup is random, so a clone runs its own, and its proofs verify only with its own keys. The paths below are those the tests and this guide use.
 
 ```bash
 ./target/c2pa-zk-gnark setup --keys target/gnark-keys                                  # disclosed: 4,710,820 constraints

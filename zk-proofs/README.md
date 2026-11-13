@@ -369,7 +369,7 @@ Status: **design proposed** in [CLAIM-PRIVACY.md](CLAIM-PRIVACY.md), for review:
 #### H7. Build, setup, and test infrastructure
 
 - Run the placeholder-mode suite in CI, and periodically run the full real-proof end-to-end test (it needs ~12 GB of RAM).
-- Fix key distribution. The committed `x509_issue_and_possession_native.vk` is not usable on its own: the matching proving key is not committed, so every user who runs setup generates new random keys and overwrites it. Either publish both keys from a single setup (the proving key is ~1 GB), or stop committing the verifying key.
+- ~~Fix key distribution.~~ Done (#47): no key is committed, M0's verifying keys included; every setup is single-party and random, so keys are generated locally by setup, as Milestone 1's always were. Distributing keys to others is a matter for a production setup ([H5](#h5-production-proving-setup)).
 - Bring `circuits/build.sh` in line with the working steps above. It currently uses a snarkjs/pot20 flow that is too small for this circuit and omits the include paths.
 
 #### H8. c2patool support

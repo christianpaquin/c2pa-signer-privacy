@@ -261,6 +261,8 @@ This generates the proving and verifying keys in `circuits/build/`.
 > with them, instead of producing a proof that cannot verify. Re-run setup with
 > `--force` to regenerate the keys.
 >
+> Keys are generated locally by setup and never committed (the verifying keys were until #47).
+>
 > Verification needs only the verifying key (`*_native.vk`), not the proving key or the
 > `.r1cs`. The anonymizer records the circuit and verifying-key hashes in the assertion;
 > the verifier compares them with its own keys as a diagnostic only, never selects keys

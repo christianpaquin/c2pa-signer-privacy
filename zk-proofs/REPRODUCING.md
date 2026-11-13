@@ -55,7 +55,7 @@ What to expect: the anonymizer reports what it hid, what stays visible, and the 
 cargo test --release                          # Rust: everything but real proofs (~1 min)
 ```
 
-Real proofs, opt-in (`--ignored`), each needing its keys and the gnark CLI:
+Real proofs, opt-in (`--ignored`), each needing its keys and the gnark CLI. Run them by name, one at a time, as below: a bare `cargo test --release -- --ignored` also selects the private-asset and M0 tests, which need other inputs (the private-asset test fails at once without `C2PA_R2_ASSET`), and starts several provers at once.
 
 | Test | Needs | Time |
 |---|---|---|
@@ -65,10 +65,11 @@ Real proofs, opt-in (`--ignored`), each needing its keys and the gnark CLI:
 | `anonymized_ingredient_proof_verifies_after_an_edit` | `C2PA_ZK_KEYS` | ~1.5 min |
 | `exported_inputs_satisfy_the_gnark_statement` | Go (`C2PA_ZK_GO`, the `go` binary, if not on the path) | ~1 min |
 | `real_asset_end_to_end` | A real asset ([Real assets](#real-assets)) | ~2.5 min |
-| M0's (`full_e2e_with_real_zk_proof`, `forged_key_*`) | M0's circuit and keys ([M0-BASELINE.md](M0-BASELINE.md)) | ~12 min |
+| M0's (`full_e2e_with_real_zk_proof`, `forged_key_*`) | M0's circuit and keys ([M0-BASELINE.md](M0-BASELINE.md#testing-m0)); run separately, with `--test-threads=1` | ~12 min |
 
 ```bash
-cargo test --release -p c2pa-x509-zk-demo --test third_party_fixtures -- --ignored \
+# One at a time: each proof needs up to ~9 GB, and the test runner would otherwise start them together.
+cargo test --release -p c2pa-x509-zk-demo --test third_party_fixtures -- --ignored --test-threads=1 \
     third_party_anonymization_end_to_end hidden_issuer_end_to_end hidden_all_end_to_end \
     anonymized_ingredient_proof_verifies_after_an_edit
 (cd gnark && C2PA_ZK_GROTH16=1 go test ./statement -run Groth16)   # real Groth16 proofs at test sizes

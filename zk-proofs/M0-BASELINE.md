@@ -336,6 +336,24 @@ Done. Measuring each component showed that per-byte `SelectByte` reads (1,662 of
 
 Setup now also records a hash of the `.r1cs` alongside the keys, and setup and the anonymizer refuse keys from an older circuit (see [Building Circuits](#building-circuits)).
 
+## Benchmarks (M0)
+
+The harness's default variant, `--variant v0`, measures M0 (`--reuse-build` links `circuits/build`'s compiled circuit instead of compiling it; compilation is then not measured). Every phase runs as a separate process, so its wall time and peak memory (`wait4`'s peak RSS for that process) are its own; steps within a phase, such as loading the proving key or serializing the witness, are timed separately so no cost falls between phases. Phases are grouped into categories, and the record carries their totals:
+
+| Category | Phases | Total |
+|---|---|---|
+| Test fixture | Generate the test PKI, sign the sample asset | Not counted |
+| One-time | Compile the circuit, Groth16 setup | `one_time` |
+| Anonymization (per asset) | Prepare (read the signed manifest, validate the issuing chain, build circuit inputs), witness, prove, package (build the assertion, rewrite the manifest, check the digest) | `anonymization_per_asset`, with `anonymization_witness_plus_prove` as the proof-generation subtotal |
+| Verification | Load and prepare the verifying key, verify the proof | `verification` |
+| Full verification | The verifier CLI on the anonymized asset (trust-list chain validation, assertion and digest checks, the proof) | `verification_full` |
+
+The harness works in a directory it creates itself, a new one under `target/bench` by default, with its own compiled circuit and keys; `circuits/build` is not touched. A requested `--work-dir` must not exist, and only the directory the run created is removed afterwards.
+
+The record contains the variant and the exact statement proved, the accounting boundaries above, the environment at the start of the run (CPU, memory, OS, WSL, rustc, circom, git commit and any changed tracked files), artifact hashes and sizes, input sizes, per-phase and per-step measurements with category totals, and output sizes: the Groth16 proof, the embedded proof container, the assertion, `x5chain`, and the whole manifest store added to the asset. A full run takes ~15 minutes and ~11 GiB of RAM. Results are compared in [FEASIBILITY.md](FEASIBILITY.md).
+
+`run --proving-key CONFIG` selects how setup writes the proving key and how the prove phase loads it (by default, compressed and fully checked by arkworks, as the prover does). `c2pa-x509-zk-bench pk-load [--key KEY] [--reps N] [--only CONFIG]...` compares these configurations on their own: it converts a setup key to both encodings, then loads each configuration in its own process, first with the key evicted from the page cache, then warm. Results and a proposal are in [FEASIBILITY.md](FEASIBILITY.md#proving-key-loading).
+
 ## Toolchain (M0)
 
 | Component | Tool | Version |

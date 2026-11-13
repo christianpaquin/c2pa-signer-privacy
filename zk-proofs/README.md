@@ -138,8 +138,9 @@ Every candidate anchor or issuer is tried until one yields a fully valid path, s
 |---|---|---|---|
 | Go (gnark) | `(cd gnark && go test ./...)` | Go; ~4 min | The statements' accept and reject cases on BN254 and BLS12-381 (certificate walk, token gadget, trees, roles, windows, claim references); the CLI |
 | Rust | `cargo test --release` | — | Trust lists and eligibility, the ZK signature format, policies, scrubbing, anonymizer refusals, verifier checks with a stand-in gnark CLI, fixtures, M0 in placeholder mode |
-| Real proofs | `cargo test --release -- --ignored` | Each statement's keys and the gnark CLI; ~8 GB of RAM | End to end per mode (disclosed, hidden issuer, hidden issuer and time stamp), an anonymized ingredient, M0 |
-| Private real assets | Opt-in environment variables ([REPRODUCING.md](REPRODUCING.md#real-assets)) | The private samples | Real tokens and claims in the circuits; scrubbing real photos |
+| Real proofs | The filtered command in [REPRODUCING.md](REPRODUCING.md#tests), one test at a time (`--test-threads=1`) | Each statement's keys and the gnark CLI; ~9 GB of RAM | End to end per mode (disclosed, hidden issuer, hidden issuer and time stamp), and an anonymized ingredient |
+| Private real assets | Opt-in tests with environment variables ([REPRODUCING.md](REPRODUCING.md#real-assets)) | The private samples | A real asset end to end; real tokens and claims in the circuits; scrubbing real photos |
+| M0 | [M0-BASELINE.md](M0-BASELINE.md#testing-m0) | M0's circuit and keys; ~12 GB of RAM | M0 end to end and its forgery tests |
 
 Conventions:
 
@@ -158,29 +159,26 @@ M0's circuit tests and its witness check are described in [M0-BASELINE.md](M0-BA
 cargo build --release
 ./target/release/c2pa-x509-zk-bench run --variant third-party --keys target/gnark-keys --out bench/results/<date>-<name>.json
 # --hide-issuer, or --hide-issuer --hide-time-stamp, select the hidden modes (with their keys)
-# --pk-format raw --pk-check none: the fast proving-key path; --curve bls12-381 for new keys
+# --pk-format raw --pk-check none: the fast proving-key path (keys from convert-pk); --curve bls12-381 for new keys
 # --asset FILE --trust-list L --tsa-trust-list L: an external signed asset instead of the fixture
-# --variant v0 (the default) measures M0; --reuse-build links M0's compiled circuit
-# --reuse-build links circuits/build's compiled circuit instead of compiling (compile is then not measured)
-# --keep keeps the work directory (circuit, keys, witness); by default it is removed
-# --work-dir DIR uses a new directory DIR (refused if it exists); --out must resolve (through symlinks and ..) outside it
+# without --keys, setup runs and is measured
+# --keep keeps the work directory; --work-dir DIR uses a new directory DIR (refused if it exists)
 ```
 
-Every phase runs as a separate process, so its wall time and peak memory (`wait4`'s peak RSS for that process) are its own; steps within a phase, such as loading the proving key or serializing the witness, are timed separately so no cost falls between phases. Phases are grouped into categories, and the record carries their totals:
+Every phase runs as a separate process, so its wall time and peak memory (`wait4`'s peak RSS for that process) are its own; steps inside the gnark CLI's phases come from the timings it prints. For the third-party statements, the phases and totals are:
 
 | Category | Phases | Total |
 |---|---|---|
-| Test fixture | Generate the test PKI, sign the sample asset | Not counted |
-| One-time | Compile the circuit, Groth16 setup | `one_time` |
-| Anonymization (per asset) | Prepare (read the signed manifest, validate the issuing chain, build circuit inputs), witness, prove, package (build the assertion, rewrite the manifest, check the digest) | `anonymization_per_asset`, with `anonymization_witness_plus_prove` as the proof-generation subtotal |
-| Verification | Load and prepare the verifying key, verify the proof | `verification` |
-| Full verification | The verifier CLI on the anonymized asset (trust-list chain validation, assertion and digest checks, the proof) | `verification_full` |
+| Test fixture | Generate the mirror PKI, sign the sample asset with the local TSA | Not counted |
+| One-time | `c2pa-zk-gnark setup`: compile the circuit, Groth16 setup (skipped with `--keys`) | `one_time` |
+| Anonymization (per asset) | Prepare (read the manifest, check the claim, validate the issuing path, build the inputs and, for the hidden modes, the trees, check the size); prove (one `c2pa-zk-gnark prove` process: load the constraint system and proving key, solve the witness, prove), measured cold, three runs; self-verify; package (encode the ZK signature, replace the original in place) | `anonymization_per_asset`, with `anonymization_witness_plus_prove` = prove |
+| Verification | `c2pa-zk-gnark verify` (load the verifying key, verify) | `verification` |
+| Full verification | The verifier CLI on the anonymized asset (time stamp or policy, chain or trees, c2pa checks, the proof) | `verification_full` |
+| Supplementary | Prove again with its files resident (three runs) | In no total |
 
-The harness works in a directory it creates itself, a new one under `target/bench` by default, with its own compiled circuit and keys; `circuits/build` is not touched. A requested `--work-dir` must not exist, and only the directory the run created is removed afterwards.
+"Cold" means the constraint system and proving key are evicted from the page cache before each prove, and the observed residency is recorded; a figure is a cold measurement only when the record says so. The record also carries the statement proved, the environment (CPU, memory, OS, toolchains, git commit and any changed tracked files), artifact hashes and sizes, input sizes, every run, and output sizes (the proof and the ZK signature). A run with existing keys takes 8–12 minutes. Results are compared in [FEASIBILITY.md](FEASIBILITY.md).
 
-The record contains the variant and the exact statement proved, the accounting boundaries above, the environment at the start of the run (CPU, memory, OS, WSL, rustc, circom, git commit and any changed tracked files), artifact hashes and sizes, input sizes, per-phase and per-step measurements with category totals, and output sizes: the Groth16 proof, the embedded proof container, the assertion, `x5chain`, and the whole manifest store added to the asset. A full run takes ~15 minutes and ~11 GiB of RAM. Results are compared in [FEASIBILITY.md](FEASIBILITY.md).
-
-`run --proving-key CONFIG` selects how setup writes the proving key and how the prove phase loads it (by default, compressed and fully checked by arkworks, as the prover does). `c2pa-x509-zk-bench pk-load [--key KEY] [--reps N] [--only CONFIG]...` compares these configurations on their own: it converts a setup key to both encodings, then loads each configuration in its own process, first with the key evicted from the page cache, then warm. Results and a proposal are in [FEASIBILITY.md](FEASIBILITY.md#proving-key-loading).
+M0's accounting (separate witness and assertion phases) and its proving-key loading comparison (`run --proving-key`, `pk-load`) are in [M0-BASELINE.md](M0-BASELINE.md#benchmarks-m0).
 
 ## Current Limitations
 
@@ -360,7 +358,7 @@ Status: **implemented as an opt-in** (`--hide-issuer`, `--issuer-policy`; [quick
 
 #### H5. Production proving setup
 
-Replace the single-party local setup with a multi-party ceremony, or adopt a proof system without a circuit-specific trusted setup (E6). The remaining [optimisations](M0-BASELINE.md#potential-optimisations) (Efficient ECDSA, after a soundness review; folding; public-input compression) apply if the circom/Groth16 stack is kept.
+Replace the single-party local setup with a multi-party ceremony, or adopt a proof system without a circuit-specific trusted setup (E6). M0's remaining [optimisations](M0-BASELINE.md#potential-optimisations) (Efficient ECDSA, after a soundness review; folding; public-input compression) were written for its circom stack; Milestone 1 uses gnark, where the fast key path ([E6](#e6-proof-systems)) is the measured improvement so far.
 
 #### H6. Metadata privacy beyond the signature
 
@@ -381,11 +379,11 @@ Displaying and verifying anonymized assets in `c2patool` (likely in a fork of `c
 ## Toolchain
 
 | Component | Tool | Version |
-|-----------|------|---------|
-| Circuit language | Circom | 2.1+ |
-| Proving system | Groth16 on BN254 | — |
-| Rust prover | ark-circom + ark-groth16 | 0.5 |
-| Powers of Tau | Not needed — `ark-groth16` generates keys locally | — |
+|---|---|---|
+| Circuits and proving (Milestone 1) | Go, gnark and gnark-crypto: Groth16 on BN254 (default) or BLS12-381 | gnark v0.16.4, Go 1.27.3+ |
+| Asset workflow | Rust (stable): c2pa-rs for reading and writing manifests; the anonymizer, verifier, and harness | As in `Cargo.lock` |
+| Time stamps and test PKIs | OpenSSL command line | 3.x |
+| M0 (frozen) | Circom, ark-circom, ark-groth16 | [M0-BASELINE.md](M0-BASELINE.md#toolchain-m0) |
 
 ## References
 

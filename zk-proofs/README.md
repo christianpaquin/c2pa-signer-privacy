@@ -1,19 +1,26 @@
 # X.509 Zero-Knowledge Anonymizer for C2PA
 
-This project implements privacy-preserving signatures for C2PA manifests using zero-knowledge proofs. It replaces an existing X.509/COSE signature with a ZK proof that the asset was signed by a certificate issued by a CA that chains to a trust list, without revealing the signer's identity.
+This project anonymizes C2PA-signed content with zero-knowledge proofs. Given an asset signed with an X.509 certificate, it replaces the claim signature, in place, with a proof that the claim was signed by a certificate a trusted CA issued for C2PA claim signing, at a time a trusted time-stamp authority attested, without revealing the signer, and, optionally, without revealing its issuing CA, its time-stamp authority, or the exact time. A third party can do it, without the signer's key. The claim and its hard binding stay valid, so the content is verified as for any C2PA asset.
 
 **Milestone 1 reached** (November 12, 2026): third-party anonymization of real C2PA content, with the signer, its issuing CA, its time-stamp authority, and the exact time hidden. Summary, results, assumptions, and what is postponed: [MILESTONE-1.md](MILESTONE-1.md).
 
 ## Overview
 
-This approach keeps standard X.509/ECDSA-P256 signing, then adds a post-processing step that:
-- Extracts the original signature and certificate chain
-- Generates a Groth16 ZK proof demonstrating valid CA issuance
-- Replaces the manifest signature with the proof
+The anonymizer reads the asset's original claim signature and proves, in a Groth16 circuit ([gnark](gnark/README.md)), the statement of [THIRD-PARTY-STATEMENT.md](THIRD-PARTY-STATEMENT.md): the original ES256 signature over the original claim was made by a key in a certificate the issuing CA signed (P-384, SHA-384), for C2PA claim signing, not a CA, valid at the time stamp's time, which a `sigTst2` time-stamp token attests. It then replaces the signature with a ZK signature of the same size: a COSE structure with a private-use algorithm, carrying the proof. The verifier derives every public input from the asset and its policy.
 
-The verifier can confirm the asset was anonymized from an asset signed by *someone* with a certificate from a trusted CA, without learning *who*.
+Three statements, each with its own keys:
 
-**Two modes.** [Third-party mode](#quick-start-third-party-mode) is the current one: it proves the asset's *original* signature (in gnark), needs no private key, and replaces the signature in place. The signer-side mode described in the rest of this overview and in [M0 Baseline Reproduction](#m0-baseline-reproduction-frozen) is the **M0 baseline, frozen**: kept so its results can be reproduced and compared, but no longer developed. The anonymizer still runs M0 unless given `--third-party`; the verifier detects the mode from the asset. [HISTORY.md](HISTORY.md) traces how the project moved from one to the other. The anonymized asset's `x5chain` carries the issuing CA chain (never the signer's certificate), which the verifier validates against a trust list.
+| Mode | Hides | The verifier needs | Design |
+|---|---|---|---|
+| Disclosed (the default) | The signer | The trust list and TSA trust list | [THIRD-PARTY-STATEMENT.md](THIRD-PARTY-STATEMENT.md) |
+| Hidden issuer (`--hide-issuer`) | The signer and its issuing CA, among the list's eligible CAs | An issuer policy, and the TSA trust list | [HIDING-THE-ISSUER.md](HIDING-THE-ISSUER.md) |
+| Hidden issuer and time stamp (`--hide-time-stamp`) | Also the TSA, among the TSA list's eligible CAs, and the exact time (a UTC day is shown) | An issuer policy with TSA snapshots | [HIDING-THE-TIME-STAMP.md](HIDING-THE-TIME-STAMP.md) |
+
+In every mode, `--scrub-metadata` also removes EXIF and XMP outside the hard binding ([CLAIM-PRIVACY.md](CLAIM-PRIVACY.md#metadata-outside-the-claim-h6)). What stays visible is the claim itself: its generator and assertions ([CLAIM-PRIVACY.md](CLAIM-PRIVACY.md) designs hiding it).
+
+**Where to start:** [MILESTONE-1.md](MILESTONE-1.md) for the summary; [REPRODUCING.md](REPRODUCING.md) to rerun the results; [FEASIBILITY.md](FEASIBILITY.md) for the measurements; [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md) for real content; [HISTORY.md](HISTORY.md) for how the project evolved; [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIONS.md) for the decisions.
+
+**M0, the starting point** (frozen): a signer-side mode in circom, which the anonymizer still runs without `--third-party`; its reproduction, statement, and circuit are in [M0-BASELINE.md](M0-BASELINE.md).
 
 ## Quick Start (Third-Party Mode)
 
@@ -67,289 +74,35 @@ echo '{"snapshots": [{"name": "mirror-list", "trust_list": "fixtures/mirror/trus
 
 **The verifier** detects third-party assets and derives every public input from the asset. It decodes the ZK signature strictly (exactly the specified fields, all-zero padding, a fixed-length proof, nothing after it), checks `--issuer` if given, and validates the time-stamp token against the TSA trust list at its attested time (OpenSSL), the `x5chain` issuing chain against the trust list at that time, the claim's assertions and hard binding (c2pa; only the expected failures of the claim signature itself are ignored), and the proof. Not established: revocation of the signer certificate, and the full certificate profile ([shortcuts](THIRD-PARTY-STATEMENT.md#guarantees-and-shortcuts)). Standard C2PA validators reject the ZK signature (unknown critical algorithm).
 
-## M0 Baseline Reproduction (frozen)
-
-The signer-side M0 baseline, kept so its results can be reproduced; for current use, see [Quick Start](#quick-start-third-party-mode) above.
-
-> **Prerequisites**: Complete the [Building Circuits](#building-circuits) setup before running these commands — you need the compiled circuit and trusted setup keys. For testing without that setup, see [Placeholder Mode](#placeholder-mode).
-
-```bash
-# Build
-cargo build --release
-
-# Generate a test PKI and trust lists in fixtures/pki (see Test PKI)
-./generate-test-pki.sh
-
-# 1. Sign an asset with standard X.509/ECDSA (x5chain: signer + issuing CA)
-cargo run --release --bin c2pa-x509-zk-sign -- \
-  --input fixtures/cards.png \
-  --output /tmp/signed.png \
-  --cert fixtures/pki/signer.pem \
-  --key fixtures/pki/signer.key \
-  --ca fixtures/pki/issuing-ca.pem
-
-# 2. Anonymize: Replace signature with a Groth16 ZK proof
-# This step is slow: ~10 minutes and ~12 GB of RAM (see Performance).
-# --cert supplies the original signer cert DER so the circuit sees the exact
-# bytes the CA signed (c2pa-rs may alter encoding when storing in the manifest).
-cargo run --release --bin c2pa-x509-zk-anonymizer -- \
-  --input /tmp/signed.png \
-  --output /tmp/anon.png \
-  --trust-list fixtures/pki/trust-list.json \
-  --signer-key fixtures/pki/signer.key \
-  --cert fixtures/pki/signer.pem
-
-# 3. Verify the anonymized asset against a trust list (PEM or JSON)
-cargo run --release --bin c2pa-x509-zk-verify -- \
-  --input /tmp/anon.png \
-  --trust-list fixtures/pki/trust-list.pem
-```
-
 ## CLI Tools
 
-| Binary | Description |
-|--------|-------------|
-| `c2pa-x509-zk-sign` | Create standard C2PA signed assets (ES256/P-256) |
-| `c2pa-x509-zk-anonymizer` | Anonymize signed assets by replacing COSE signature with ZK proof |
-| `c2pa-x509-zk-verify` | Verify anonymized assets against a trust list |
+| Tool | Description |
+|---|---|
+| `c2pa-x509-zk-sign` | Sign a test asset with standard C2PA (ES256), optionally time-stamped by a local TSA |
+| `c2pa-x509-zk-anonymizer` | Anonymize a signed asset: `--third-party` (with `--hide-issuer`, `--hide-time-stamp`, `--scrub-metadata`), or M0 without it |
+| `c2pa-x509-zk-verify` | Verify an anonymized asset (any mode, detected from the asset) |
+| `c2pa-x509-zk-statement-inputs` | Extract the statement's inputs from a signed asset, for the gnark CLI |
+| `c2pa-x509-zk-bench` | The benchmark harness ([Benchmarks](#benchmarks)) |
+| `c2pa-zk-gnark` (Go) | Set up, prove, and verify the statements; build issuer trees ([gnark/README.md](gnark/README.md)) |
+| `c2pa-x509-zk-setup` | M0's circuit setup ([M0-BASELINE.md](M0-BASELINE.md#building-circuits)) |
 
 ## Project Structure
 
 ```
 zk-proofs/
-├── circuits/                       # Circom ZK circuits
-│   ├── x509_issue_and_possession.circom  # Main proof circuit
-│   ├── x509_parse.circom           # X.509 DER parser (X509Parse, field-placement checks)
-│   ├── circom-ecdsa-p256/          # P-256 ECDSA verification library
-│   └── build/                      # Compiled circuits and keys
-├── crates/
-│   └── c2pa-x509-zk-demo/          # Rust library + CLIs
-└── fixtures/
-    ├── cards.png                   # Test input image
-    └── certs/                      # Test certificates
+├── gnark/                          # The Milestone 1 statements (Go, gnark)
+│   ├── statement/                  # Disclosed, hidden-issuer, hidden-all circuits; the token gadget; the claim-reference spike
+│   ├── issuertree/                 # The issuer and TSA trees (Poseidon2 Merkle trees)
+│   └── cmd/c2pa-zk-gnark/          # The CLI
+├── crates/c2pa-x509-zk-demo/       # Rust: C2PA reading and rewriting, trust lists, ZK signature format,
+│                                   #   anonymizer, verifier, scrubbing, harness; tests
+├── bench/results/                  # Benchmark records (JSON)
+├── experiments/e1-p384/            # E1: P-384, SHA-384, and RSA primitives in gnark
+├── circuits/                       # M0's circom circuits (frozen)
+├── fixtures/                       # Test input image
+├── generate-test-pki.sh            # Test PKIs, including the mirror of a real deployment
+└── *.md                            # Design notes, findings, measurements, history
 ```
-
-## Cryptographic Details
-
-The ZK approach uses a Groth16 zkSNARK to prove that the signer possesses a valid certificate issued by a trusted CA, without revealing which certificate. The primary circuit performs two P-256 ECDSA signature verifications plus in-circuit SHA-256 and UTCTime parsing (~4.8M constraints total). The proof cryptographically binds the signer's private key to a CA-issued certificate, and proves that the certificate was valid when the asset was anonymized.
-
-### ZK Proof Statement
-
-**Public inputs:**
-- `caPubKeyX[6]`, `caPubKeyY[6]`: Trusted CA's P-256 public key (X, Y, each as 6 × 43-bit registers)
-- `claimHash[6]`: Manifest-stripped asset digest SHA-256 (6 × 43-bit registers)
-- `photoTimestamp`: Unix timestamp of when the asset was anonymized/processed
-
-**Private inputs (witness):**
-- `certDer[1500]`: Raw DER-encoded signer certificate bytes (zero-padded to 1500 bytes)
-- `certLen`: Actual byte count of the certificate
-- `tbsOffset`, `tbsLen`: Byte offset and declared length of the TBSCertificate DER field
-- `spkiXOffset`: Byte offset of the 32-byte SPKI X coordinate within certDer
-- `notBeforeOffset`, `notAfterOffset`: Byte offsets of the UTCTime fields within certDer
-- `tbsHashPaddedLen`: Padded byte length of the TBS slice for SHA-256 (multiple of 64)
-- `tbsHashPaddedBytes[1536]`: TBS DER bytes with SHA-256 padding appended, zero-filled to 1536
-- `certSigR[6]`, `certSigS[6]`: CA's ECDSA signature over the TBSCertificate
-- `claimSigR[6]`, `claimSigS[6]`: Signer's ECDSA signature over the manifest-stripped asset digest carried in `claimHash`
-
-**Relations proved:**
-1. `x509_parse.circom` extracts the TBSCertificate hash, the subject public key, and the validity period from `certDer` in-circuit. The public key and validity fields must carry their exact DER encoding and lie inside the TBSCertificate, the bytes the CA signed (see [Certificate field binding](#certificate-field-binding))
-2. `caPubKeyX/Y` verifies the CA signature over the parsed TBSCertificate — the cert was issued by the trusted CA
-3. The parsed subject public key verifies the signer's signature over `claimHash` — the prover holds the corresponding private key
-4. `parser.notBefore ≤ photoTimestamp ≤ parser.notAfter` — the cert was valid when the asset was anonymized/processed (timestamps parsed in-circuit from certDer)
-
-**Pending (required for production soundness):**
-- RFC 5280 field validation (version, algorithm OID, key-usage extensions)
-- A full DER walk of the TBSCertificate (see [Certificate field binding](#certificate-field-binding))
-- Optional: revocation check via short-lived certs or an accumulator commitment
-
-### Certificate field binding
-
-The prover supplies the whole certificate buffer (`certDer`, 1500 bytes) and the byte offsets of the fields the circuit reads. Only the TBSCertificate slice of that buffer is covered by the CA's signature; everything else, including the space after the certificate, is under the prover's control. Each field the circuit uses must therefore be pinned inside the signed slice:
-
-- **Subject public key:** the 27 bytes before `spkiXOffset` must be the DER encoding of a P-256 SubjectPublicKeyInfo (`30 59 30 13 06 07 2A8648CE3D0201 06 08 2A8648CE3D030107 03 42 00 04`), and the whole 91-byte field must lie within `[tbsOffset + 4, tbsOffset + 4 + tbsLen)`.
-- **Validity:** a `30 1E` SEQUENCE header must precede `notBefore`, `notAfter` must immediately follow it, both UTCTimes must end in `Z`, and the whole 32-byte field must lie within the same range.
-- **Offsets** are range-checked to 11 bits so the comparisons cannot wrap around the field, and the TBSCertificate must end within `certLen ≤ 1500`.
-
-Earlier versions checked only the local tags (a `0x04` before the key, `17 0D` before each date) without tying them to the signed slice. A prover with no certificate could then append their own key and arbitrary validity dates after any genuine certificate from the CA and produce a proof that verified. `forged_key_outside_signed_tbs_is_rejected` in the integration tests replays that attack.
-
-Remaining limitation: this is not a full DER walk of the TBSCertificate. A byte sequence matching the SPKI or Validity encoding inside another TBS field (for example, an extension) would also be accepted; exploiting that requires the CA to have signed a certificate containing such content. A full walk is part of [H2](#h2-full-certificate-validation-in-the-circuit).
-
-The placement checks and the in-circuit date conversion (`UTCTimeToUnix`) have fast tests (a few seconds, needs `circom` and `node`):
-
-```bash
-python3 circuits/test/test_placement.py
-```
-
-The in-circuit SHA-256 is implemented via `Sha256Bytes(1536)` from `@zk-email/circuits`.  The prover supplies `tbsHashPaddedBytes[1536]` (the TBS DER bytes with standard SHA-256 padding) and the circuit verifies that the first `4+tbsLen` bytes match `certDer[tbsOffset..]`, then hashes the buffer in-circuit and feeds the result into the CA ECDSA check.
-
-### Constraint Count
-
-The compiled circuit has **4,776,263 constraints** (reported by `circom` and recorded in the `.r1cs` header). Each component below was measured by compiling it on its own:
-
-| Component | Constraints |
-|---|-----------|
-| `ECDSAVerifyNoPubkeyCheck` × 2 (Steps 2 + 4) | 3,945,810 |
-| `Sha256Bytes(1536)` | 758,254 |
-| TBS view: `VarShiftLeft(1536, 1536)` | 16,907 |
-| TBS binding: 1536 × `LessEqThan` + products | ~21,500 |
-| SPKI window: `P256SpkiInRegion(1500)` | 16,547 |
-| Validity window: `ValidityInRegion(1500)` | 16,547 |
-| Register packing, UTCTime parsing, offset and validity range checks | ~760 |
-| **Total** | **4,776,263** |
-
-The two ECDSA verifications are now over 80% of the circuit; see [Efficient ECDSA](#efficient-ecdsa) and the [cryptographic improvements](#cryptographic-improvements) for ways to reduce them.
-
-Variable-index byte reads use `VarShiftLeft` windows from `@zk-email/circuits`, which cost about log2(n) × n constraints for an n-byte buffer regardless of window size. An earlier version read each byte through a per-byte multiplexer (`SelectByte`, ~4,500 constraints per read); with 1,662 such reads, the circuit had 12,208,271 constraints.
-
-For a production multi-party trusted setup (MPC ceremony) this circuit class would require a **2²³** (~8.4M) Powers of Tau file.  **For this demo no ptau download is needed** — `ark-groth16` performs a local single-party setup directly from the `.r1cs` file.
-
-### Potential Optimisations
-
-A note on proof size before listing the ideas: a Groth16 proof over BN254 is ~128 bytes (3 G1 + 1 G2, compressed) regardless of circuit size, so the headline "~1 KB" figure is dominated by serialization and public inputs rather than the SNARK itself. Shrinking the wire-format proof is mostly a public-input problem; shrinking proving time is where the cryptographic wins are.
-
-The first two items below are circuit-level tweaks that keep the current proof statement intact (the first is done). The remaining items are deeper changes that restructure what is proved, switch the proof system, or compress public inputs.
-
-#### TBS binding ✅
-
-Done: the per-byte `SelectByte` reads (TBS binding, SPKI, and Validity) were replaced with `VarShiftLeft` windows from `@zk-email/circuits/utils/array.circom`, taking the circuit from 12,208,271 to 4,776,263 constraints (-61%). See [Cheaper byte reads](#cheaper-byte-reads-).
-
-#### Efficient ECDSA
-
-The **Efficient ECDSA** technique (sometimes called the "NOPE" circuit, from [Personae Labs](https://personaelabs.org/posts/efficient-ecdsa-1/)) eliminates the fixed-base G scalar multiplication from signature verification by computing it off-circuit and supplying the result as a witness T. This would reduce each `ECDSAVerifyNoPubkeyCheck` (~1.3M constraints) to roughly ~700K constraints.
-
-#### Cryptographic improvements
-
-These restructure the protocol rather than the circuit. They generally trade an assumption (CA cooperation, an out-of-band trust artefact, or a different proof system) for a substantially smaller and/or faster proof. Constraint savings below are relative to the 4,776,263-constraint circuit.
-
-##### CA-published accumulator of issued SPKIs
-
-Replace the in-circuit CA signature verification with a Merkle membership proof against a CA-published accumulator over currently-valid subject public keys. The CA periodically publishes a signed root; the ZK proof becomes "the committed SPKI is a leaf under that root, and the prover holds its private key." This eliminates the CA ECDSA verification (~1.97M), the SHA-256 over TBS (~760K), and the TBS view and binding (~40K) — together more than half the circuit. RFC 5280 field validity (`notBefore`, `notAfter`, EKU, key usage) is enforced by the CA at root-publication time rather than in-circuit, and revocation reduces to "drop the leaf from the next root." Trade-off: verifiers must fetch a fresh signed root, and the anonymity set becomes "valid at root time" rather than "ever issued."
-
-##### Sigma-protocol key possession bound to the SNARK
-
-Move part of the second P-256 ECDSA verification (the prover's "key possession" check, ~1.97M constraints) out of the SNARK. The SNARK outputs a commitment to the signer's public key, and outside the SNARK the signer proves knowledge of the matching secret key with a Schnorr-style proof, Fiat–Shamir-bound to the claim. The proof is ~64–96 bytes and verifies in microseconds.
-
-The commitment must live in a group where that proof works. Committing on a SNARK-friendly curve such as Baby Jubjub would need a proof linking two different curves, which is complex. The straightforward variant commits on P-256 itself (`C = pk + r·H`) and proves knowledge of `(sk, r)` with `C = sk·G + r·H`, but the circuit then still computes one P-256 fixed-base multiplication. Expected saving: roughly half of one in-circuit ECDSA verification, not all of it (see [D5](ARCHITECTURE-DECISIONS.md#d5-how-key-possession-is-proved)). Composes with the accumulator approach above.
-
-##### Issuer-side SNARK-friendly credential ("twin signature")
-
-In addition to the standard X.509/ECDSA certificate, have the CA sign each issued SPKI under a SNARK-friendly scheme — for example EdDSA over Baby Jubjub (≈4K constraints to verify), or a Pointcheval–Sanders / BBS-style structure-preserving signature. The X.509 cert is preserved unchanged for C2PA compatibility; the ZK proof only verifies the SNARK-friendly credential. Trade-off: the CA publishes one extra signed blob per cert, but proving cost can drop by an order of magnitude or more because no in-circuit ECDSA-over-non-native-field is required.
-
-##### PLONKish proof system with native-field P-256 chips
-
-The dominant cost driver today is P-256 arithmetic emulated over BN254's scalar field — every multiplication is a non-native big-int operation. Migrating to a PLONKish system (e.g. Halo2 with the 0xPARC P-256 chip, or `halo2_ecc`) provides lookup-table-accelerated SHA-256 and field operations sized for ECDSA. Public benchmarks for ECDSA-in-Halo2 versus ECDSA-in-Circom/Groth16 typically report 5–20× proving-time improvements. Trade-off: proofs grow to a few KB, verification is slower (still well under a second), and the universal Groth16 verifier is replaced. Can be combined with a Groth16 wrapper to recover constant-size proofs.
-
-##### Folding schemes with a final Groth16 wrapper
-
-Fold per-step costs (each ECDSA scalar-multiplication round, or the verification across many photos) using Nova / HyperNova / ProtoStar, then compress the final IVC instance with a Groth16 wrapper to recover a constant-size SNARK proof. Proving is dominated by the folding step, which is linear and FFT-free; the wrapper proof remains small and verifier-friendly. Particularly attractive when a single signer expects to anonymize many photos and the cost amortizes across them.
-
-##### Public-input compression
-
-Today the public inputs are `caPubKeyX[6] + caPubKeyY[6] + claimHash[6] + photoTimestamp`. Hashing these in-circuit to a single field element and publishing only the digest (with the cleartext public inputs carried alongside the proof container) brings the on-wire proof close to the Groth16 floor of ~128 bytes. This is the single change that most affects the headline "~1 KB" figure.
-
-##### Pairing-curve choice
-
-Switching the proving curve from BN254 to BLS12-381 raises the conjectured security margin from ~100 bits (post Kim–Barbulescu) toward ~120 bits. Proof size grows modestly (~192 bytes) and proving slows somewhat. Not a performance win, but worth considering for production soundness.
-
-### Circuit Architecture
-
-```
-circuits/
-├── x509_issue_and_possession.circom  # Main proof circuit (used by Rust prover)
-│   ├── x509_parse.circom             # X.509 DER parser (fully implemented)
-│   └── circom-ecdsa-p256/            # P-256 ECDSA verification (×2)
-│       ├── ecdsa.circom              # ECDSAVerifyNoPubkeyCheck
-│       ├── p256.circom               # Curve operations
-│       └── bigint arithmetic         # 256-bit register arithmetic
-│
-└── x509_parse.circom                 # X.509 DER parser — X509Parse, field-placement checks
-```
-
-`x509_issue_and_possession.circom` is the sole proof circuit. It accepts the raw DER
-certificate bytes and parses them in-circuit via `x509_parse.circom`, which pins the
-subject public key and the validity period inside the TBSCertificate the CA signed (see
-[Certificate field binding](#certificate-field-binding)). This prevents a prover from
-pairing someone else's CA-signed certificate with their own key pair.
-
-### Circuit Statistics
-
-| Metric | Value | Notes |
-|--------|-------|-------|
-| Constraints | **4,776,263** (measured) | Two ECDSA verifs (3.95M) + SHA-256 (758K) + TBS view/binding (~38K) + field windows (~33K) + parsing |
-| Constraints (with Efficient ECDSA for Step 4) | ~4,180,000 (estimated) | See optimisation note above — soundness caveat applies |
-| Proving key size | ~1.0 GB (measured) | Native Rust key generated by `ark-groth16` from `.r1cs` |
-| Verifying key size | 872 bytes (measured) | Constant for Groth16 |
-| Proof size | ~1 KB | Constant for Groth16 |
-| Production ceremony class | pot23 (~8.4M constraints) | Not needed for this demo — `ark-groth16` runs local setup |
-
-### Performance
-
-Measured with the [benchmark harness](#benchmarks) on a 13th Gen Intel Core i7-13800H laptop (20 logical CPUs, 32 GB of RAM, WSL2); full record in [`bench/results/2026-11-03-baseline.json`](bench/results/2026-11-03-baseline.json) and analysis in [FEASIBILITY.md](FEASIBILITY.md#m0-baseline-measured-detail). Each phase ran in its own process.
-
-| Phase | Time | Peak RSS | Notes |
-|-------|------|----------|-------|
-| Circuit compilation | ~3.4 min | ~6.0 GiB | One-time (`circom`) |
-| Trusted setup | ~49 s | ~9.9 GiB | One-time, native Rust |
-| Preparation | ~0.03 s | ~19 MiB | Per asset: read the signed manifest, validate the issuing chain, build the circuit inputs |
-| Witness generation | ~3.8 min | ~4.0 GiB | Per asset; almost all of it running the circuit's WASM witness generator |
-| Proving | ~6.3 min | ~11.1 GiB | Per asset; **~5.8 min of it is loading the 1 GB proving key** (stored compressed and fully validated on load); the Groth16 proof itself takes ~32 s |
-| Packaging | ~0.03 s | ~23 MiB | Per asset: build the assertion, rewrite the manifest, check the digest |
-| Verification | ~0.01 s | ~9 MiB | Per asset; the full verifier CLI (with trust-list chain validation) takes ~0.02 s |
-
-Anonymizing one asset takes ~10.2 minutes, of which the cryptographic proving is about 5%: key deserialization (57%) and WASM witness generation (37%) dominate. Peak memory is ~11 GiB, while loading the proving key, so a 16 GB machine should be enough (not tested). Use [Placeholder Mode](#placeholder-mode) on smaller machines.
-
-### COSE Integration
-
-- Custom algorithm: `alg = -65538`, in the COSE private-use range (below -65536)
-- Critical header: `crit = ["c2pa-x509-zk"]` (COSE header label 2), so verifiers that don't understand the extension must reject the signature
-- Extension map with circuit metadata
-- Padding: a `pad` byte string in the unprotected header fills the space `c2pa-rs` reserves for the signature, as `c2pa-rs` does for its own signatures
-- The `x509-zk-signer-proof` assertion (version 0.2) carries the issuer name and key ID, the asset digest, the proof, the circuit ID and backend, and the SHA-256 of the circuit and verifying key used (diagnostics; version 0.1 assertions without them are still accepted).
-- `x5chain` (in the protected header) carries the issuing CA chain only: the issuing CA first, then any further intermediates, never the signer's certificate, which would reveal the identity the proof hides (decision [D4](ARCHITECTURE-DECISIONS.md#d4-where-the-issuing-ca-chain-lives-decided)). Thanks to Iman Attia (EBU) for reporting the earlier leak of the signer's certificate ([#6](https://github.com/christianpaquin/c2pa-signer-privacy/issues/6)).
-
-## Building Circuits
-
-### 1. Compile circuit and run trusted setup
-
-```bash
-# All commands run from the zk-proofs/ directory
-
-# Initialize submodules (if not already done)
-git submodule update --init --recursive
-
-# Install circuit JS dependencies (circomlib, circom-ecdsa-p256 deps)
-npm install --prefix circuits
-
-# Compile circuit (will run for a while, produces .r1cs and .wasm)
-mkdir -p circuits/build
-circom circuits/x509_issue_and_possession.circom \
-  --r1cs --wasm --sym \
-  -l circuits \
-  -l circuits/node_modules \
-  -o circuits/build/
-
-# Run trusted setup (~1 minute, ~10 GB RAM) — generates proving and verifying keys
-# Must run from zk-proofs/, not circuits/
-cargo run --release --bin c2pa-x509-zk-setup -- --circuits-dir circuits
-```
-
-This generates the proving and verifying keys in `circuits/build/`.
-
-> **Note**: The native Rust prover (`ark-groth16`) generates its own circuit-specific keys
-> directly from the compiled `.r1cs` + `.wasm` files using a local random seed.  No
-> external Powers of Tau ceremony file is needed — `ark-groth16::generate_random_parameters_with_reduction`
-> handles the setup in one pass.
->
-> Setup writes a build manifest next to the keys (`*_native.build.json`: circuit name,
-> SHA-256 of the `.r1cs`, SHA-256 of the verifying key). If the circuit has been
-> recompiled since, setup refuses to reuse the keys and the anonymizer refuses to prove
-> with them, instead of producing a proof that cannot verify. Re-run setup with
-> `--force` to regenerate the keys.
->
-> Verification needs only the verifying key (`*_native.vk`), not the proving key or the
-> `.r1cs`. The anonymizer records the circuit and verifying-key hashes in the assertion;
-> the verifier compares them with its own keys as a diagnostic only, never selects keys
-> from what the asset says, and Groth16 verification decides validity.
 
 ## Test PKI and Trust Lists
 
@@ -369,7 +122,7 @@ Both the root and the issuing CA are trust anchors, as on the C2PA trust list, w
 
 Re-running the script replaces every key and certificate, so assets anonymized earlier no longer validate against the new trust list. When the signer certificate nears expiry, renew it instead with `./generate-test-pki.sh --renew-signer [OUT_DIR]`: it reissues the signer certificate for the same key and subject under the existing issuing CA, leaving the trust anchors untouched. The web UI creates a PKI when none exists and renews the signer this way before signing or anonymizing; verifying never changes the PKI.
 
-The circuit currently requires P-256 keys and ECDSA-SHA256 signatures throughout. Real C2PA CAs sign with P-384 or RSA (see [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md)); [E1](#e1-cost-of-reality-p-384-sha-384-and-rsa-in-circuit) measures what supporting them in-circuit would cost.
+The default profile (P-256 throughout) serves M0; the mirror profile serves Milestone 1, whose statements take P-384 issuing CAs as on the official list.
 
 **Trust lists.** `--trust-list` accepts a PEM bundle of anchors, a single DER certificate, or the C2PA trust list JSON ([`C2PA-TRUST-LIST.json`](https://github.com/c2pa-org/conformance-public/tree/main/trust-list)). From the JSON, only services whose status is `http://c2pa.org/conformance/trust-list/trusted` are loaded; the count of skipped certificates is reported. (The official list currently has two certificates with an empty status, which appear in its PEM version but are skipped from the JSON.) Issuing chains are validated off-circuit, until a certificate is an anchor or is issued by one:
 
@@ -379,50 +132,15 @@ The circuit currently requires P-256 keys and ECDSA-SHA256 signatures throughout
 
 Every candidate anchor or issuer is tried until one yields a fully valid path, so the result does not depend on the order of the trust list (for example, when it holds both an expired and a renewed certificate for the same CA key). The validated path ends at the trust anchor. The anonymizer embeds only that path, and refuses to embed any certificate for the signer's key; the verifier rejects an `x5chain` with certificates after the anchor.
 
-## Placeholder Mode
-
-If you haven't completed the circuit setup, the anonymizer can embed a placeholder proof instead of a real ZK proof. This lets you exercise the full manifest pipeline — sign, anonymize, verify — immediately after `cargo build`, without circuit compilation (~4 min), trusted setup (~1 min), or ~10-minute proof generation, and without needing ~12 GB of RAM.
-
-The verifier will detect a placeholder and exit with a non-zero status (exit code 2) along with a warning. This is intentional: placeholder mode is for development and structural testing only.
-
-```bash
-cargo build --release
-
-# 1. Sign
-./generate-test-pki.sh
-
-cargo run --release --bin c2pa-x509-zk-sign -- \
-  --input fixtures/cards.png \
-  --output /tmp/signed.png \
-  --cert fixtures/pki/signer.pem \
-  --key fixtures/pki/signer.key \
-  --ca fixtures/pki/issuing-ca.pem
-
-# 2. Anonymize with placeholder proof (no circuit setup required)
-cargo run --release --bin c2pa-x509-zk-anonymizer -- \
-  --input /tmp/signed.png \
-  --output /tmp/anon.png \
-  --trust-list fixtures/pki/trust-list.json \
-  --placeholder
-
-# 3. Verify (will print a placeholder warning — expected)
-cargo run --release --bin c2pa-x509-zk-verify -- \
-  --input /tmp/anon.png \
-  --trust-list fixtures/pki/trust-list.pem
-
-# The integration test suite also runs in placeholder mode:
-cargo test --release
-```
-
 ## Testing
 
-Tests run at three layers:
-
-| Layer | Command | Needs | What it covers |
+| Suite | Command | Needs | What it covers |
 |---|---|---|---|
-| Circuit templates | `python3 circuits/test/test_placement.py` | `circom`, `node` | Accept and reject cases for the certificate-placement and date-conversion templates, at the constraint level (seconds) |
-| Rust unit and integration | `cargo test --release` | — | Trust lists and chain validation, COSE encoding, CLI flows in placeholder mode, the witness check and setup manifest on a one-constraint fixture circuit, privacy scans |
-| Real proofs | `cargo test --release -- --ignored` | Built circuit and keys, ~12 GB of RAM | End-to-end proof and verification; the field-binding forgery, rejected both before proving and at verification |
+| Go (gnark) | `(cd gnark && go test ./...)` | Go; ~4 min | The statements' accept and reject cases on BN254 and BLS12-381 (certificate walk, token gadget, trees, roles, windows, claim references); the CLI |
+| Rust | `cargo test --release` | — | Trust lists and eligibility, the ZK signature format, policies, scrubbing, anonymizer refusals, verifier checks with a stand-in gnark CLI, fixtures, M0 in placeholder mode |
+| Real proofs | The filtered command in [REPRODUCING.md](REPRODUCING.md#tests), one test at a time (`--test-threads=1`) | Each statement's keys and the gnark CLI; ~9 GB of RAM | End to end per mode (disclosed, hidden issuer, hidden issuer and time stamp), and an anonymized ingredient |
+| Private real assets | Opt-in tests with environment variables ([REPRODUCING.md](REPRODUCING.md#real-assets)) | The private samples | A real asset end to end; real tokens and claims in the circuits; scrubbing real photos |
+| M0 | [M0-BASELINE.md](M0-BASELINE.md#testing-m0) | M0's circuit and keys; ~12 GB of RAM | M0 end to end and its forgery tests |
 
 Conventions:
 
@@ -431,36 +149,36 @@ Conventions:
 - **Fixes come with their reproduction as a regression test,** confirmed to fail without the fix.
 - **Every anonymized output is privacy-scanned** (`assert_no_signer_identifiers` in the integration tests): no signer certificate, public key, serial number, or subject DN, and no trace of the original manifest. This catches regressions of known identifiers; it does not prove anonymity, since identifiers can be re-encoded or hashed and content can be correlated in other ways (see [E2a](#e2a-third-party-proof-statement-and-privacy-design)).
 
-The prover checks every witness against the circuit's R1CS constraints before proving, because ark-circom's witness generator does not stop on a failing `===` (its exception handler is a no-op, whether or not `sanity_check` is set). Without that check, an input the circuit rejects still yields a proof that only fails verification. The prover computes the witness without ark-circom's `CircomBuilder::build`, whose debug-build assertion would panic on a rejected input before the check can report it, so the behavior is the same in debug and release builds. The check evaluates constraints exactly as Arkworks does when proving (wire 0 is the constant one), and rejects a witness whose constant entry is not 1; tests compare its verdicts with Arkworks' own constraint system on adversarial witnesses.
+M0's circuit tests and its witness check are described in [M0-BASELINE.md](M0-BASELINE.md#testing-m0).
 
 ## Benchmarks
 
-`c2pa-x509-zk-bench` measures the current statement end to end on fixed inputs (a generated test PKI and `fixtures/cards.png`) and writes one JSON record:
+`c2pa-x509-zk-bench` measures a statement end to end on fixed inputs (a generated test PKI and `fixtures/cards.png`) and writes one JSON record. The commands for every mode are in [REPRODUCING.md](REPRODUCING.md#measurements).
 
 ```bash
 cargo build --release
-./target/release/c2pa-x509-zk-bench run --out bench/results/<date>-<variant>.json
-# --variant third-party measures the third-party statement (gnark) instead; needs the c2pa-zk-gnark CLI (--gnark)
-# --reuse-build links circuits/build's compiled circuit instead of compiling (compile is then not measured)
-# --keep keeps the work directory (circuit, keys, witness); by default it is removed
-# --work-dir DIR uses a new directory DIR (refused if it exists); --out must resolve (through symlinks and ..) outside it
+./target/release/c2pa-x509-zk-bench run --variant third-party --keys target/gnark-keys --out bench/results/<date>-<name>.json
+# --hide-issuer, or --hide-issuer --hide-time-stamp, select the hidden modes (with their keys)
+# --pk-format raw --pk-check none: the fast proving-key path (keys from convert-pk); --curve bls12-381 for new keys
+# --asset FILE --trust-list L --tsa-trust-list L: an external signed asset instead of the fixture
+# without --keys, setup runs and is measured
+# --keep keeps the work directory; --work-dir DIR uses a new directory DIR (refused if it exists)
 ```
 
-Every phase runs as a separate process, so its wall time and peak memory (`wait4`'s peak RSS for that process) are its own; steps within a phase, such as loading the proving key or serializing the witness, are timed separately so no cost falls between phases. Phases are grouped into categories, and the record carries their totals:
+Every phase runs as a separate process, so its wall time and peak memory (`wait4`'s peak RSS for that process) are its own; steps inside the gnark CLI's phases come from the timings it prints. For the third-party statements, the phases and totals are:
 
 | Category | Phases | Total |
 |---|---|---|
-| Test fixture | Generate the test PKI, sign the sample asset | Not counted |
-| One-time | Compile the circuit, Groth16 setup | `one_time` |
-| Anonymization (per asset) | Prepare (read the signed manifest, validate the issuing chain, build circuit inputs), witness, prove, package (build the assertion, rewrite the manifest, check the digest) | `anonymization_per_asset`, with `anonymization_witness_plus_prove` as the proof-generation subtotal |
-| Verification | Load and prepare the verifying key, verify the proof | `verification` |
-| Full verification | The verifier CLI on the anonymized asset (trust-list chain validation, assertion and digest checks, the proof) | `verification_full` |
+| Test fixture | Generate the mirror PKI, sign the sample asset with the local TSA | Not counted |
+| One-time | `c2pa-zk-gnark setup`: compile the circuit, Groth16 setup (skipped with `--keys`) | `one_time` |
+| Anonymization (per asset) | Prepare (read the manifest, check the claim, validate the issuing path, build the inputs and, for the hidden modes, the trees, check the size); prove (one `c2pa-zk-gnark prove` process: load the constraint system and proving key, solve the witness, prove), measured cold, three runs; self-verify; package (encode the ZK signature, replace the original in place) | `anonymization_per_asset`, with `anonymization_witness_plus_prove` = prove |
+| Verification | `c2pa-zk-gnark verify` (load the verifying key, verify) | `verification` |
+| Full verification | The verifier CLI on the anonymized asset (time stamp or policy, chain or trees, c2pa checks, the proof) | `verification_full` |
+| Supplementary | Prove again with its files resident (three runs) | In no total |
 
-The harness works in a directory it creates itself, a new one under `target/bench` by default, with its own compiled circuit and keys; `circuits/build` is not touched. A requested `--work-dir` must not exist, and only the directory the run created is removed afterwards.
+"Cold" means the constraint system and proving key are evicted from the page cache before each prove, and the observed residency is recorded; a figure is a cold measurement only when the record says so. The record also carries the statement proved, the environment (CPU, memory, OS, toolchains, git commit and any changed tracked files), artifact hashes and sizes, input sizes, every run, and output sizes (the proof and the ZK signature). A run with existing keys takes 8–12 minutes. Results are compared in [FEASIBILITY.md](FEASIBILITY.md).
 
-The record contains the variant and the exact statement proved, the accounting boundaries above, the environment at the start of the run (CPU, memory, OS, WSL, rustc, circom, git commit and any changed tracked files), artifact hashes and sizes, input sizes, per-phase and per-step measurements with category totals, and output sizes: the Groth16 proof, the embedded proof container, the assertion, `x5chain`, and the whole manifest store added to the asset. A full run takes ~15 minutes and ~11 GiB of RAM. Results are compared in [FEASIBILITY.md](FEASIBILITY.md).
-
-`run --proving-key CONFIG` selects how setup writes the proving key and how the prove phase loads it (by default, compressed and fully checked by arkworks, as the prover does). `c2pa-x509-zk-bench pk-load [--key KEY] [--reps N] [--only CONFIG]...` compares these configurations on their own: it converts a setup key to both encodings, then loads each configuration in its own process, first with the key evicted from the page cache, then warm. Results and a proposal are in [FEASIBILITY.md](FEASIBILITY.md#proving-key-loading).
+M0's accounting (separate witness and assertion phases) and its proving-key loading comparison (`run --proving-key`, `pk-load`) are in [M0-BASELINE.md](M0-BASELINE.md#benchmarks-m0).
 
 ## Current Limitations
 
@@ -468,15 +186,15 @@ What the prototype does not establish, in third-party mode. Every experiment sta
 
 - **No revocation check** of the signer certificate ([H3](#h3-revocation)).
 - **Partial certificate validation in-circuit.** The structural walk checks the certificate's purpose (claim-signing EKU, not a CA) and validity, but not key usage, unknown critical extensions, name constraints, or policies ([H2](#h2-full-certificate-validation-in-the-circuit)). Off-circuit chain validation checks signatures, validity, `CA:TRUE`, `pathLen`, key usage, EKU, and unrecognized critical extensions, but is not full RFC 5280 path validation.
-- **Algorithms and encodings.** ES256 claim signatures, P-384 issuing CAs, and `sigTst2` time stamps only, and the protected-header encoding that real device assets and c2pa-rs use ([E1](#e1-cost-of-reality-p-384-sha-384-and-rsa-in-circuit), [Q10](THIRD-PARTY-STATEMENT.md#q10-first-algorithms)). Measured on a fixture that mirrors a real deployment, not yet on a real asset ([R2](#r2-anonymizing-real-signed-content)).
+- **Algorithms and encodings.** ES256 claim signatures, P-384 issuing CAs, and `sigTst2` time stamps only, and the protected-header encoding that real device assets and c2pa-rs use ([E1](#e1-cost-of-reality-p-384-sha-384-and-rsa-in-circuit), [Q10](THIRD-PARTY-STATEMENT.md#q10-first-algorithms)). Demonstrated on real device photos under the official lists ([R2](#r2-anonymizing-real-signed-content)).
 - **Issuing CA disclosed** by default: the anonymity set is everyone that CA has certified. With `--hide-issuer` ([H4](#h4-hiding-the-issuing-ca)), the CA is one of the trust list's eligible CAs of its key type (28 P-384 CAs from 18 organizations on the official list); the claim and the public time-stamp token may still name the organization.
 - **Time-stamp linkability** by default: the public time-stamp token names the TSA and lets its operator link the anonymized asset to the original request ([Q7](THIRD-PARTY-STATEMENT.md#q7-time-stamp-threat-model)). With `--hide-time-stamp` ([I6](HIDING-THE-TIME-STAMP.md)), the token is verified in the circuit and not disclosed: the TSA is hidden among the TSA list's eligible CAs, and the token's direct request identifiers (serial number, imprint, policy) are gone; the published window (a UTC day by default) remains a correlation channel for the TSA operator.
 - **Unauthenticated trust lists.** Trust lists are read from files; the C2PA lists are not signed.
 - **Proof system.** Groth16 on BN254 (~100-bit security) with a single-party local setup, whose operator could forge proofs ([H5](#h5-production-proving-setup), [E7](#e7-curve-bn254-vs-bls12-381)).
 - **File formats.** TIFF-based formats (TIFF, DNG) are refused: the manifest store cannot be rewritten in them at the same size. Patching the signature bytes in place would work where the store is stored contiguously; not pursued, since these formats are rare for signed content.
 - **Single-manifest assets only.** Assets with ingredients or more than one manifest (edits) are refused, since the ingredients' manifests name their own signers ([E8](#e8-ingredient-manifests)).
-- **Metadata.** Data outside the hard binding (for example EXIF) is reported, not scrubbed ([H6](#h6-metadata-privacy-beyond-the-signature)).
-- **Cost.** 79 s and 7.5 GiB per asset, three quarters of it loading the proving key ([FEASIBILITY.md](FEASIBILITY.md#v1-third-party-e2b-measured-detail)).
+- **Metadata.** Data outside the hard binding (EXIF, XMP) is scrubbed with `--scrub-metadata` (JPEG); metadata the binding covers is signed and stays, and so does the claim ([H6](#h6-metadata-privacy-beyond-the-signature)).
+- **Cost.** 72–97 s and 6.7–8.5 GiB per asset on the benchmark fixture, depending on the mode, most of it loading the proving key; 25–33 s with the fast key path ([MILESTONE-1.md](MILESTONE-1.md#the-modes), [FEASIBILITY.md](FEASIBILITY.md#v1-third-party-e2b-measured-detail)).
 - **Tool display.** Standard C2PA validators reject the ZK signature, an unknown critical algorithm ([H8](#h8-c2patool-support)).
 
 The frozen **M0 baseline** (signer-side) additionally binds only to the asset bytes rather than the claim, makes no historical-validity claim (its timestamp is chosen by the prover), pins certificate fields by byte pattern rather than structure, supports P-256 CAs only, and takes ~10 minutes and ~11 GiB per asset.
@@ -490,7 +208,7 @@ The order follows the method in [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIO
 ### Done
 
 - **Signer certificate removed from anonymized output** ([#6](https://github.com/christianpaquin/c2pa-signer-privacy/issues/6)).
-- **Certificate field binding:** the circuit pins the signer key and validity period inside the CA-signed TBSCertificate; previously a prover with no certificate could forge a proof (see [Certificate field binding](#certificate-field-binding)).
+- **Certificate field binding:** the circuit pins the signer key and validity period inside the CA-signed TBSCertificate; previously a prover with no certificate could forge a proof (see [Certificate field binding](M0-BASELINE.md#certificate-field-binding)).
 - **Certificate dates computed one month late:** the in-circuit UTCTime conversion indexed its days-before-month table off by one, shifting every `notBefore`/`notAfter` 28-31 days later. Certificates less than about a month old could not produce valid proofs, and certificates expired up to about a month earlier were still accepted. Fixed, with tests against Python's calendar for every month, leap days, and both ends of the UTCTime range.
 - **F2. Benchmark harness and the R1 matrix:** `c2pa-x509-zk-bench` measures each phase in its own process (see [Benchmarks](#benchmarks)), and [FEASIBILITY.md](FEASIBILITY.md) holds the R1 matrix with the measured baseline, provisional targets, and stop rules. The baseline showed that the Groth16 proof itself is ~5% of per-asset anonymization time; loading the proving key (57%) and WASM witness generation (37%) dominate.
 - **F3. Minimum correctness infrastructure:** the prover checks every witness against the R1CS before proving and reports a typed `WitnessRejected` (ark-circom's witness generator ignores failing constraints even with `sanity_check` set, contrary to what this roadmap previously assumed); forgery tests at both the constraint and proof levels; a build manifest identifying the circuit and keys, recorded in the assertion (now version 0.2) as diagnostics; verification needs only the verifying key; privacy scans on every anonymized test output; and the [Testing](#testing) conventions and [Current Limitations](#current-limitations).
@@ -508,21 +226,6 @@ Done for both prototypes. The COSE structures previously could not be parsed by 
 Result: `c2patool` now displays BBS-signed assets and reports `algorithm.unsupported`, the correct outcome for a custom algorithm. ZK-anonymized assets at first still failed in `c2patool`'s default (validating) mode with "could not find signing certificate chain", because `c2pa-rs` treats a missing signing certificate as fatal; since F1 added the issuing chain to `x5chain`, they display too. See [H8](#h8-c2patool-support).
 
 The ZK prototype's signer now adds a `c2pa.created` action (E2b fixtures), so its signed assets no longer report `assertion.action.malformed` in `c2patool`; the BBS prototype's manifests still lack one.
-
-#### Cheaper byte reads ✅
-
-
-Done. Measuring each component showed that per-byte `SelectByte` reads (1,662 of them, ~4,500 constraints each) made up ~7.5M of the 12.2M constraints, far more than the earlier estimates suggested. All of them (TBS binding, SPKI, and Validity) now read through `VarShiftLeft` windows, without changing what the circuit proves:
-
-| | Before | After |
-|---|---|---|
-| Constraints | 12,208,271 | 4,776,263 (-61%) |
-| Circuit compilation | ~15 min, ~25 GB | ~4 min, ~6.3 GB |
-| Trusted setup | ~2.5-6.5 min, ~24 GB | ~1 min, ~10.4 GB |
-| Anonymization | ~20 min, ~28 GB | ~10.5 min, ~11.8 GB |
-| Proving key | 2.5 GB | 1.0 GB |
-
-Setup now also records a hash of the `.r1cs` alongside the keys, and setup and the anonymizer refuse keys from an older circuit (see [Building Circuits](#building-circuits)).
 
 ### Foundation
 
@@ -641,7 +344,7 @@ The policy is set in E2a (D7), and the checks needed to claim historical validit
 
 #### H2. Full certificate validation in the circuit
 
-Complete the RFC 5280 / C2PA certificate-profile checks listed under [Pending](#zk-proof-statement): certificate version, signature algorithm OID, key usage, `CA:FALSE`, and an EKU from the set real certificates carry (C2PA claim signing, document signing, email protection, and others; see [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md#interim-trust-list-pre-conformance)). This includes walking the TBSCertificate's DER structure in-circuit, so the public key and validity fields are located by structure rather than by matching their encoding (see [Certificate field binding](#certificate-field-binding)). Trust models B and C move most of this to the registration entity. Until then, experiments state these as limitations (F3).
+Complete the RFC 5280 / C2PA certificate-profile checks listed under [Pending](M0-BASELINE.md#zk-proof-statement): certificate version, signature algorithm OID, key usage, `CA:FALSE`, and an EKU from the set real certificates carry (C2PA claim signing, document signing, email protection, and others; see [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md#interim-trust-list-pre-conformance)). This includes walking the TBSCertificate's DER structure in-circuit, so the public key and validity fields are located by structure rather than by matching their encoding (see [Certificate field binding](M0-BASELINE.md#certificate-field-binding)). Trust models B and C move most of this to the registration entity. Until then, experiments state these as limitations (F3).
 
 #### H3. Revocation
 
@@ -655,7 +358,7 @@ Status: **implemented as an opt-in** (`--hide-issuer`, `--issuer-policy`; [quick
 
 #### H5. Production proving setup
 
-Replace the single-party local setup with a multi-party ceremony, or adopt a proof system without a circuit-specific trusted setup (E6). The remaining [optimisations](#potential-optimisations) (Efficient ECDSA, after a soundness review; folding; public-input compression) apply if the circom/Groth16 stack is kept.
+Replace the single-party local setup with a multi-party ceremony, or adopt a proof system without a circuit-specific trusted setup (E6). M0's remaining [optimisations](M0-BASELINE.md#potential-optimisations) (Efficient ECDSA, after a soundness review; folding; public-input compression) were written for its circom stack; Milestone 1 uses gnark, where the fast key path ([E6](#e6-proof-systems)) is the measured improvement so far.
 
 #### H6. Metadata privacy beyond the signature
 
@@ -676,11 +379,11 @@ Displaying and verifying anonymized assets in `c2patool` (likely in a fork of `c
 ## Toolchain
 
 | Component | Tool | Version |
-|-----------|------|---------|
-| Circuit language | Circom | 2.1+ |
-| Proving system | Groth16 on BN254 | — |
-| Rust prover | ark-circom + ark-groth16 | 0.5 |
-| Powers of Tau | Not needed — `ark-groth16` generates keys locally | — |
+|---|---|---|
+| Circuits and proving (Milestone 1) | Go, gnark and gnark-crypto: Groth16 on BN254 (default) or BLS12-381 | gnark v0.16.4, Go 1.27.3+ |
+| Asset workflow | Rust (stable): c2pa-rs for reading and writing manifests; the anonymizer, verifier, and harness | As in `Cargo.lock` |
+| Time stamps and test PKIs | OpenSSL command line | 3.x |
+| M0 (frozen) | Circom, ark-circom, ark-groth16 | [M0-BASELINE.md](M0-BASELINE.md#toolchain-m0) |
 
 ## References
 
@@ -692,6 +395,8 @@ Displaying and verifying anonymized assets in `c2patool` (likely in a fork of `c
 - [c2pa-rs](https://github.com/contentauth/c2pa-rs)
 
 ## Credits
+
+The circom libraries below are used by M0's circuits.
 
 ### circom-ecdsa-p256
 

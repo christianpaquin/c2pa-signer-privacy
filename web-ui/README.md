@@ -6,7 +6,7 @@ A Flask web interface for the BBS Signatures and X.509 + ZK Proofs prototypes. T
 
 - Python 3.12+
 - Built release binaries for both prototypes (see each project's README), including the gnark CLI (`zk-proofs/target/c2pa-zk-gnark`)
-- The ZK statements' keys, from a one-time setup per mode ([REPRODUCING.md](../zk-proofs/REPRODUCING.md#keys)): `target/gnark-keys` (disclosed), `target/gnark-keys-hidden` (hidden issuer), `target/gnark-keys-hidden-all` (hidden issuer and time stamp), under `zk-proofs/`. Modes without keys are shown as unavailable. Set `C2PA_ZK_KEYS_ROOT` to use key directories elsewhere.
+- The ZK statements' keys, from a one-time setup per mode ([REPRODUCING.md](../zk-proofs/REPRODUCING.md#keys)): `target/gnark-keys` (disclosed), `target/gnark-keys-hidden` (hidden issuer), `target/gnark-keys-hidden-all` (hidden issuer and time stamp), under `zk-proofs/`. Modes without keys are shown as unavailable. Set `C2PA_ZK_KEYS_ROOT` to use key directories elsewhere (a relative path is taken from where the app is started).
 - About 9 GB of free memory for a proof
 
 ## Setup
@@ -35,3 +35,9 @@ Open [http://localhost:5000](http://localhost:5000).
   - **Verify:** detects the mode from the asset and checks the proof, the time stamp, the issuing chain or approved issuer tree, and the claim's hard binding, against the demo's trust lists and a policy approving them.
 - Image preview on upload and after processing
 - Sample image auto-load for quick demos
+
+## Testing
+
+```bash
+python -m unittest test_app      # the ZK form handling, without running proofs
+```

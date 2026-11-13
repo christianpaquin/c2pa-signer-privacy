@@ -41,7 +41,8 @@ ZK_FIXTURES = ROOT / "zk-proofs" / "fixtures"
 # The web demo's own PKI: the mirror profile (P-384 CAs, a P-256 signer, a local TSA).
 ZK_PKI = ZK_FIXTURES / "web-pki"
 # The statements' key directories (override with C2PA_ZK_KEYS_ROOT).
-ZK_KEYS_ROOT = Path(os.environ.get("C2PA_ZK_KEYS_ROOT", ROOT / "zk-proofs" / "target"))
+# Absolute, since the CLIs run from zk-proofs/ and a relative root would name another directory there.
+ZK_KEYS_ROOT = Path(os.environ.get("C2PA_ZK_KEYS_ROOT", ROOT / "zk-proofs" / "target")).resolve()
 
 UPLOAD_DIR = Path(tempfile.mkdtemp(prefix="c2pa_web_"))
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg"}
@@ -299,17 +300,17 @@ ZK_MODES = {
     "disclosed": {
         "label": "Disclosed issuer",
         "keys": ZK_KEYS_ROOT / "gnark-keys",
-        "setup": "./target/c2pa-zk-gnark setup --keys target/gnark-keys",
+        "statement": "disclosed",
     },
     "hidden-issuer": {
         "label": "Hidden issuer",
         "keys": ZK_KEYS_ROOT / "gnark-keys-hidden",
-        "setup": "./target/c2pa-zk-gnark setup --keys target/gnark-keys-hidden --statement hidden-issuer",
+        "statement": "hidden-issuer",
     },
     "hidden-all": {
         "label": "Hidden issuer and time stamp",
         "keys": ZK_KEYS_ROOT / "gnark-keys-hidden-all",
-        "setup": "./target/c2pa-zk-gnark setup --keys target/gnark-keys-hidden-all --statement hidden-all",
+        "statement": "hidden-all",
     },
 }
 # The names the anonymizer writes into hidden-issuer assets as hints, and the
@@ -331,9 +332,15 @@ def issuer_policy() -> Path:
     return path
 
 
+def setup_command(mode: dict) -> str:
+    """The one-time setup for a mode's keys, at the configured path (run from zk-proofs/)."""
+    statement = "" if mode["statement"] == "disclosed" else f" --statement {mode['statement']}"
+    return f"./target/c2pa-zk-gnark setup --keys {mode['keys']}{statement}"
+
+
 def zk_modes_view() -> list[dict]:
     return [{"id": k, "label": m["label"], "ready": (m["keys"] / "statement.pk").exists(),
-             "setup": m["setup"]} for k, m in ZK_MODES.items()]
+             "setup": setup_command(m)} for k, m in ZK_MODES.items()]
 
 
 @app.route("/zk")
@@ -380,23 +387,30 @@ def zk_sign():
 
 @app.route("/zk/anonymize", methods=["GET", "POST"])
 def zk_anonymize():
-    view = {"modes": zk_modes_view(), "time_windows": TIME_WINDOWS}
+    view = {"modes": zk_modes_view(), "time_windows": TIME_WINDOWS,
+            "selected_mode": "disclosed", "selected_window": "1d", "scrub": False}
     if request.method == "POST":
         ensure_zk_pki()
         image = request.files.get("image")
-        mode_id = request.form.get("mode", "disclosed")
+        # No default: a missing mode (such as a disabled option) must not mean "disclosed".
+        mode_id = request.form.get("mode", "")
         window = request.form.get("time_window", "1d")
         scrub = "scrub_metadata" in request.form
+        # Keep the privacy choices when the form comes back with an error, so
+        # that a retry does not silently fall back to disclosing more.
+        view.update(scrub=scrub,
+                    selected_mode=mode_id if mode_id in ZK_MODES else view["selected_mode"],
+                    selected_window=window if window in TIME_WINDOWS else view["selected_window"])
 
         if not image or not allowed_file(image.filename):
             flash("Please upload a signed PNG or JPEG image.", "error")
             return render_template("zk/anonymize.html", **view)
         mode = ZK_MODES.get(mode_id)
         if mode is None or window not in TIME_WINDOWS:
-            flash("Unknown mode or time window.", "error")
+            flash("Choose an available mode and time window.", "error")
             return render_template("zk/anonymize.html", **view)
         if not (mode["keys"] / "statement.pk").exists():
-            flash(f"No keys for this mode in {mode['keys']}. Run once, from zk-proofs/: {mode['setup']}", "error")
+            flash(f"No keys for this mode in {mode['keys']}. Run once, from zk-proofs/: {setup_command(mode)}", "error")
             return render_template("zk/anonymize.html", **view)
 
         suffix = Path(image.filename).suffix

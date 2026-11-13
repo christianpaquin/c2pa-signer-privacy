@@ -143,5 +143,6 @@ The tokens, claims, and hard-binding hashes can be extracted from an asset with 
 | Real-asset result | Figure | Where |
 |---|---|---|
 | Disclosed, first photo | 133 s, single run | [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md#r2-anonymizing-a-real-asset) |
+| Hidden issuer, second photo | 75 s, single run (page cache not controlled) | [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md#with-the-issuer-hidden-h4) |
 | Hidden issuer and time stamp, second photo | 141 s; 129 s with scrubbing; single runs | [DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md#with-the-issuer-and-the-time-stamp-hidden-i6) |
 | Anonymity sets on the official lists | Issuer among 28 CAs (18 organizations); TSA among 19 (14) | [FEASIBILITY.md](FEASIBILITY.md#i6-hiding-the-time-stamp-token) |

@@ -29,6 +29,7 @@ How the X.509 + ZK prototype evolved, for reporting. Details live in the pull re
 | A real photo, issuer and token hidden | Nov 12 | #42 | R2 with the issuer and the time stamp hidden: a real device photo anonymizes and verifies against the official lists; the unchanged claim is now the main disclosure |
 | Claim privacy (design), metadata scrubbing | Nov 12 | #43, #44 | Redaction cannot hide a claim's own generator or actions, so the claim must stay private (proposed, spike measured); EXIF and XMP outside the hard binding scrubbed in place, signed metadata reported |
 | Milestone 1 | Nov 12 | #45 | Implementation paused to present the work: [MILESTONE-1.md](MILESTONE-1.md) summarizes what is reached, measured, and postponed |
+| A real photo, issuer hidden | Nov 13 | #49 | The hidden-issuer mode on a real photo verifies, but the time-stamp token it keeps names the deployment's own TSA: for a vertically integrated deployment, hiding the issuer needs hiding the token too ([findings](DEPLOYMENT-FINDINGS.md#with-the-issuer-hidden-h4)) |
 
 ## Defects found in the original prototype
 

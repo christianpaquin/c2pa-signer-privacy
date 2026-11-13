@@ -265,7 +265,7 @@ The four configurations of [Milestone 1](MILESTONE-1.md) measured back to back, 
 
 - **The baseline drifted by 12% within the session** (81.0 s first, 71.0 s last), mostly in loading the proving key (57.8 s against 51.1 s); comparisons below are with the adjacent runs and that range.
 - **Hiding the issuer costs nothing measurable:** 71.2 s, within the disclosed runs' range (71.0–81.0 s), as in the H4 session.
-- **Hiding the time stamp too costs +28%** over the adjacent hidden-issuer run (91.3 s against 71.2 s), the same as in the I6 session; +13–29% over the disclosed runs. Its slowest and the others' fastest single proves do not overlap (88.4 s against at most 81.9 s).
+- **Hiding the time stamp too costs +28%** over the adjacent hidden-issuer run (91.3 s against 71.2 s), the same as in the I6 session; +13–29% over the disclosed runs. Its fastest single prove exceeds every other configuration's slowest (88.4 s against 81.9 s).
 - **The fast key path** brings the disclosed mode to 28.1 s, 60–65% less than the compressed key, by cutting the key's parse from 51–58 s to 7.8 s; the proof itself (16–18 s) is unchanged.
 - **Peak memory** is 6.6–6.7 GiB for every mode but the hidden time stamp (8.5 GiB); verification costs 31–37 ms for the proof in every mode, and the full verifier 48–108 ms, the hidden modes building the trees from the policy's snapshots.
 - **Consistent with the earlier sessions:** disclosed 72–77 s (H4 session), hidden issuer 75–77 s and hidden-all 97 s (I6 session), fast path 25–33 s (E6, E7): this session runs a few percent faster, and the ratios between modes are unchanged.

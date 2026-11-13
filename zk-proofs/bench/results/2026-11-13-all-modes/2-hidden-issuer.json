@@ -21,7 +21,7 @@
       "entries": 2
     }
   },
-  "statement": "Third-party anonymization, trust model A (THIRD-PARTY-STATEMENT.md): the issuing CA's P-384 key (a public input) signed, with ECDSA-SHA384, a certificate whose DER structure shows a P-256 subject key, validity containing t, exactly one extended key usage including C2PA claim signing, and not a CA; that certificate is the first x5chain entry of the original protected header, and its key signed (ES256) the Sig_structure of the public claim; and the public sigTst2 imprint is the SHA-256 of the countersignature over that signature. Off-circuit: the time-stamp token against the TSA trust list at its time t, the issuing chain against the trust list at t, and the claim's assertions and hard binding with c2pa.",
+  "statement": "Third-party anonymization, hidden issuer (roadmap H4; HIDING-THE-ISSUER.md): as the disclosed statement, except that the issuing CA's P-384 key is private, and a member of the issuer tree (Poseidon2, leaf tag 1) whose root is a public input, its certificate valid at t; the public sigTst2 imprint is the SHA-256 of the countersignature over the original signature. Off-circuit: the time-stamp token against the TSA trust list at its time t, the root against the verifier's issuer policy (approved trust-list snapshots), and the claim's assertions and hard binding with c2pa.",
   "accounting": "As M0: one_time = setup (here one process compiling the circuit and running the Groth16 setup). anonymization_per_asset = prepare + prove + self_verify + package: the complete latency from a signed asset to an anonymized one; prove is measured cold (the constraint system and proving key evicted from the Linux page cache before it, the observed residency recorded) and includes loading both files, solving the witness, and proving, as separate steps; anonymization_witness_plus_prove = prove. verification = the gnark verify process (loading the verifying key and verifying); verification_full = the verifier CLI on the anonymized asset. prove_warm repeats prove with its files resident and is in no total. Each of prove and prove_warm is run three times; the phase reports the median run by wall time (its steps) and the maximum peak memory, with every run and its observed cache state in data.runs. The per-asset total's prove_cache is the prove phase's observed state: the figure is a cold measurement only when it is cold (eviction-failed or mixed otherwise). test_fixture is in no total. Peak memory per category is the maximum over its phases, each a separate process.",
   "environment": {
     "cpu": "13th Gen Intel(R) Core(TM) i7-13800H",
@@ -365,7 +365,7 @@
   ],
   "output": {
     "proof_bytes": 196,
-    "public_inputs": 50,
+    "public_inputs": 39,
     "zk_signature_bytes": 16323,
     "claim_signature_bytes_original": 16323,
     "spare_bytes": 14105,
@@ -374,5 +374,6 @@
     "asset_bytes_signed": 1905086,
     "asset_bytes_anonymized": 1905086,
     "note": "The ZK signature replaces the original claim signature in place at the same size, so the manifest store and the asset keep their sizes; spare_bytes is the padding left. The proof is embedded as raw bytes; its public inputs are derived by the verifier."
-  }
+  },
+  "metadata_correction": "Corrected on 2026-11-13 (PR #50 review): the harness had written the disclosed statement's description, variant.time_stamp, and output.public_inputs (50) for every mode; these three fields now describe this record's statement, as the fixed harness writes them. The measurements and every other field are unchanged."
 }

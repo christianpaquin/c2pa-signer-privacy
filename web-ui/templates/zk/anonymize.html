@@ -1,5 +1,18 @@
 {% extends "base.html" %}
-{% block title %}Anonymize &mdash; ZK{% endblock %}
+{% block title %}Anonymize &mdash; ZK<script>
+const MODE_HELP = {
+    "disclosed": "The proof replaces the signature and the signer certificate; the issuing CA and the time stamp stay visible.",
+    "hidden-issuer": "The issuing CA is hidden too: the proof shows it is one of the trust list's eligible CAs. The time stamp stays visible.",
+    "hidden-all": "The issuing CA and the time-stamp token are hidden: the TSA is one of the TSA trust list's CAs, and only the time window is published.",
+};
+function modeChanged() {
+    const mode = document.getElementById("mode").value;
+    document.getElementById("mode-help").textContent = MODE_HELP[mode] || "";
+    document.getElementById("window-group").style.display = mode === "hidden-all" ? "block" : "none";
+}
+modeChanged();
+</script>
+{% endblock %}
 
 {% block content %}
 <h1>Anonymize Image</h1>
@@ -36,7 +49,42 @@
             <img src="" alt="Preview">
         </div>
 
+        <div class="form-group" style="margin-top:1rem">
+            <label for="mode">Mode</label>
+            <select name="mode" id="mode" onchange="modeChanged()">
+                {% for m in modes %}
+                <option value="{{ m.id }}" {{ 'disabled' if not m.ready }}>{{ m.label }}{{ '' if m.ready else ' (no keys: run setup)' }}</option>
+                {% endfor %}
+            </select>
+            <p class="small muted" id="mode-help" style="margin-top:.4rem"></p>
+        </div>
+        <div class="form-group" id="window-group" style="display:none">
+            <label for="time_window">Published time window</label>
+            <select name="time_window" id="time_window">
+                {% for k, v in time_windows.items() %}
+                <option value="{{ k }}" {{ 'selected' if k == '1d' }}>{{ v }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label><input type="checkbox" name="scrub_metadata"> Scrub unsigned EXIF and XMP (JPEG)</label>
+        </div>
+
         <button type="submit" class="btn btn-lg">Anonymize</button>
+        <p class="small muted" style="margin-top:.5rem">Proving takes about 1.5&ndash;2.5 minutes and up to ~9 GB of memory.</p>
     </form>
 </div>
+<script>
+const MODE_HELP = {
+    "disclosed": "The proof replaces the signature and the signer certificate; the issuing CA and the time stamp stay visible.",
+    "hidden-issuer": "The issuing CA is hidden too: the proof shows it is one of the trust list's eligible CAs. The time stamp stays visible.",
+    "hidden-all": "The issuing CA and the time-stamp token are hidden: the TSA is one of the TSA trust list's CAs, and only the time window is published.",
+};
+function modeChanged() {
+    const mode = document.getElementById("mode").value;
+    document.getElementById("mode-help").textContent = MODE_HELP[mode] || "";
+    document.getElementById("window-group").style.display = mode === "hidden-all" ? "block" : "none";
+}
+modeChanged();
+</script>
 {% endblock %}

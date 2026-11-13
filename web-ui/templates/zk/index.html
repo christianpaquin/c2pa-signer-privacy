@@ -13,15 +13,25 @@
 <div class="card-grid">
     <a href="{{ url_for('zk_sign') }}" class="card" style="text-decoration:none">
         <h2>1. Sign</h2>
-        <p class="muted">Standard X.509/ECDSA-P256 C2PA signature</p>
+        <p class="muted">Standard C2PA signature (ES256, P-384 CA chain) with a time stamp, as on a real device</p>
     </a>
     <a href="{{ url_for('zk_anonymize') }}" class="card" style="text-decoration:none">
         <h2>2. Anonymize</h2>
-        <p class="muted">Replace the signature with a Groth16 ZK proof</p>
+        <p class="muted">A third party replaces the signature with a Groth16 proof (gnark), without the signer's key; optionally hide the issuer and the time stamp</p>
     </a>
     <a href="{{ url_for('zk_verify') }}" class="card" style="text-decoration:none">
         <h2>3. Verify</h2>
-        <p class="muted">Verify ZK proof against the trusted CA</p>
+        <p class="muted">Verify the proof, the claim, and the hard binding against the trust lists</p>
     </a>
+</div>
+
+<div class="panel" style="margin-top:1.5rem">
+    <h2>Milestone 1 modes</h2>
+    <ul class="small">
+        {% for m in modes %}
+        <li><strong>{{ m.label }}</strong>: {% if m.ready %}keys ready{% else %}no keys; run once from <code>zk-proofs/</code>: <code>{{ m.setup }}</code>{% endif %}</li>
+        {% endfor %}
+    </ul>
+    <p class="small muted">The demo's test PKI (in <code>zk-proofs/fixtures/web-pki</code>) mirrors a real device deployment and is created on first use. See <a href="https://github.com/christianpaquin/c2pa-signer-privacy/blob/main/zk-proofs/MILESTONE-1.md">MILESTONE-1.md</a>.</p>
 </div>
 {% endblock %}

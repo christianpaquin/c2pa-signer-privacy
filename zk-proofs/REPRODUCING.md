@@ -18,7 +18,9 @@ cargo build --release
 
 ## Keys
 
-One key set per statement, each from a single-party setup on this machine. No key is committed to the repository: each setup is random, so a clone runs its own, and its proofs verify only with its own keys. The paths below are those the tests and this guide use.
+One key set per statement, each from a single-party setup. No key is committed. For self-contained local reproduction, run setup to generate a matching key pair. Independent setups produce different pairs; proofs verify wherever the corresponding trusted verifying key is installed, so verifying someone else's proofs means obtaining their verifying key through a trusted channel, not running a new setup. The paths below are those the tests and this guide use.
+
+**Updating a checkout from before #47,** which tracked M0's verifying keys: Git removes the tracked copies when it applies the change, and a locally regenerated key counts as a local modification to resolve first. If you have an M0 setup to keep, back up `circuits/build/*_native.vk`, `*_native.build.json`, and `*_native.pk` before updating, and put them back afterwards: the same paths are read, and are now ignored.
 
 ```bash
 ./target/c2pa-zk-gnark setup --keys target/gnark-keys                                  # disclosed: 4,710,820 constraints

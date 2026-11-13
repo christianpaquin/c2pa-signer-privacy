@@ -20,7 +20,7 @@ A real device photo, signed under the official C2PA trust list and time-stamped 
 - **Keeps** the original claim and its hard binding, so the content's integrity is checked as for any C2PA asset; the file keeps its size; the signature is replaced in place.
 - **Scrubs** the photo's EXIF and XMP (outside the hard binding), so that its only remaining mention of the device's maker is in the claim.
 
-On a laptop, anonymizing the benchmark fixture (a test asset mirroring the real deployment's chain) takes about 75–100 seconds and 7–9 GB of memory, depending on what is hidden, in controlled runs; the real photos, in single runs, took 75 seconds with the issuer hidden and 129–141 seconds with everything hidden. Verifying takes 30–50 ms (about 0.1 s with the full verifier).
+On a laptop, anonymizing the benchmark fixture (a test asset mirroring the real deployment's chain) takes about 70–90 seconds and 7–9 GB of memory, depending on what is hidden, measured in one session; the real photos, in single runs, took 75 seconds with the issuer hidden and 129–141 seconds with everything hidden. Verifying takes 30–50 ms (about 0.1 s with the full verifier).
 
 ## The modes
 
@@ -33,14 +33,14 @@ Three statements, each with its own keys; the first is the default, the others o
 | Anonymity set (official lists) | The issuing CA's certificate holders | 28 CAs, 18 organizations | Issuer as before; TSA among 19 CAs, 14 organizations |
 | Verifier needs | Trust list, TSA trust list | An issuer policy (approved trust-list snapshots and their periods), and the TSA trust list: the token is still public, checked outside the proof | The policy, with TSA snapshots; no TSA trust list |
 | Constraints | 4,710,820 | 4,718,946 (+0.17%) | 6,458,939 (+37%) |
-| Per-asset anonymization, fixture (cold, BN254; harness, median of three) | 72–77 s | Within noise of the disclosed one | 97 s, against 75–77 s for the hidden issuer in the same session (+28%) |
+| Per-asset anonymization, fixture (cold, BN254; harness, median of three; [one session](FEASIBILITY.md#milestone-1-every-mode-in-one-session)) | 71–81 s (first and last runs) | 71 s: within the disclosed range | 91 s (+28% over the hidden issuer) |
 | Per-asset anonymization, real photos (single runs) | 133 s (first photo) | 75 s (second photo; page cache not controlled) | 141 s; 129 s with metadata scrubbing (second photo) |
 | Peak memory | 6.7 GiB | 6.7 GiB | 8.5 GiB |
 | Proving key | 1.15 GB | 1.15 GB | 1.49 GB |
-| Verification (full verifier) | 35–48 ms (59–76 ms) | 31–50 ms (80–122 ms) | 32 ms (104 ms) |
+| Verification (full verifier) | 32–48 ms (55–76 ms) | 31–50 ms (80–122 ms) | 31–32 ms (104–108 ms) |
 | Output | A 196-byte proof in a ZK signature of the original's size | Same, no certificate | Same, no certificate and no token |
 
-Further options, measured on the disclosed statement: loading the proving key without point checks, behind a hash recorded at setup, takes per-asset anonymization to 25–33 s ([E6](FEASIBILITY.md#e6-proving-key-loading-in-gnark)); BLS12-381 instead of BN254 raises the security estimate from about 100 to about 120 bits, at 88 s per asset with that key path ([E7](FEASIBILITY.md#e7-bls12-381-as-an-option)).
+Further options, measured on the disclosed statement: loading the proving key without point checks, behind a hash recorded at setup, takes per-asset anonymization to 28 s in the single-session measurement (25–33 s across earlier ones; [E6](FEASIBILITY.md#e6-proving-key-loading-in-gnark)); BLS12-381 instead of BN254 raises the security estimate from about 100 to about 120 bits, at 88 s per asset with that key path ([E7](FEASIBILITY.md#e7-bls12-381-as-an-option)).
 
 ## From M0 to Milestone 1
 
@@ -53,7 +53,7 @@ Further options, measured on the disclosed statement: loading the proving key wi
 | Real content | None | Real device photos, against the official lists |
 | Hidden | The signer | The signer, its CA, its TSA, the exact time; EXIF and XMP |
 | Proof system | circom, Groth16 | gnark, Groth16 (BN254, or BLS12-381) |
-| Per-asset anonymization | 611 s, 11.1 GiB | 72–97 s, 6.7–8.5 GiB (25–33 s with the fast key path) |
+| Per-asset anonymization | 611 s, 11.1 GiB | 71–91 s, 6.7–8.5 GiB (28 s with the fast key path) |
 
 M0, Milestone 0, is the prototype's starting point: the signer-side circom implementation. Earlier documents and the benchmark records call it V0, and the harness still selects it with `--variant v0`. It is kept frozen for comparison ([HISTORY.md](HISTORY.md#decisions)). V1, in the other documents, is Milestone 1's disclosed statement.
 

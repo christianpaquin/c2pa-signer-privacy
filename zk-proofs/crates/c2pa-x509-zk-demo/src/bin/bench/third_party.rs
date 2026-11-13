@@ -49,6 +49,35 @@ public claim; and the public sigTst2 imprint is the SHA-256 of the countersignat
 Off-circuit: the time-stamp token against the TSA trust list at its time t, the issuing chain against the trust \
 list at t, and the claim's assertions and hard binding with c2pa.";
 
+const STATEMENT_HIDDEN_ISSUER: &str = "Third-party anonymization, hidden issuer (roadmap H4; HIDING-THE-ISSUER.md): \
+as the disclosed statement, except that the issuing CA's P-384 key is private, and a member of the issuer tree \
+(Poseidon2, leaf tag 1) whose root is a public input, its certificate valid at t; the public sigTst2 imprint is \
+the SHA-256 of the countersignature over the original signature. Off-circuit: the time-stamp token against the TSA \
+trust list at its time t, the root against the verifier's issuer policy (approved trust-list snapshots), and the \
+claim's assertions and hard binding with c2pa.";
+
+const STATEMENT_HIDDEN_ALL: &str = "Third-party anonymization, hidden issuer and time stamp (roadmap I6; \
+HIDING-THE-TIME-STAMP.md): as the hidden-issuer statement, with the time-stamp token verified in the circuit under \
+a reduced profile: the TSA's ES256 signature over the signed attributes, TSTInfo and its imprint of the original \
+signature, the TSA certificate signed (ECDSA-SHA384) by a TSA CA that is a member of the TSA tree (leaf tag 4) \
+whose root is a public input, and genTime in the public half-open window [t1, t2); the exact time, the imprint, \
+and the token are private. Off-circuit: both roots against the verifier's policy (issuer and TSA snapshots, each \
+containing the window), and the claim's assertions and hard binding with c2pa.";
+
+/// The statement's public inputs, as the verifier supplies them (gnark adds one
+/// internal input for its BSB22 commitment): the claim packed 31 bytes per
+/// element and its length, then the disclosed statement's issuing CA key (P-384,
+/// 12 limbs), time, and imprint (2); the hidden issuer's root, time, and imprint;
+/// or the hidden-all statement's two roots and window. See gnark/statement.
+fn public_inputs(statement: &str, max_claim: u64) -> u64 {
+    let claim = max_claim.div_ceil(31) + 1;
+    match statement {
+        VARIANT_HIDDEN_ISSUER => claim + 1 + 1 + 2,
+        VARIANT_HIDDEN_ALL => claim + 2 + 2,
+        _ => claim + 12 + 1 + 2,
+    }
+}
+
 const ACCOUNTING: &str = "As M0: one_time = setup (here one process compiling the circuit and running the Groth16 \
 setup). anonymization_per_asset = prepare + prove + self_verify + package: the complete latency from a signed \
 asset to an anonymized one; prove is measured cold (the constraint system and proving key evicted from the Linux \
@@ -523,6 +552,8 @@ pub fn measure(
     let mut per_asset = total(&phases, &["prepare", "prove", "self_verify", "package"]);
     per_asset["prove_cache"] = data_of("prove")["cache"].clone();
     let manifest = keys_manifest(&keys)?;
+    let statement = if hide_time_stamp { VARIANT_HIDDEN_ALL } else if hide_issuer { VARIANT_HIDDEN_ISSUER } else { "disclosed" };
+    let max_claim = manifest["sizes"]["MaxClaim"].as_u64().ok_or_else(|| anyhow!("the keys' manifest has no MaxClaim size"))?;
     let size = |f: &str| std::fs::metadata(keys.join(f)).map(|m| m.len()).unwrap_or(0);
 
     Ok(json!({
@@ -532,7 +563,11 @@ pub fn measure(
             "trust_model": "A",
             "signer_key": "P-256 (ES256 claim signature)",
             "ca_signature": "ECDSA P-384 with SHA-384",
-            "time_stamp": "sigTst2, imprint bound in the circuit, token verified off-circuit",
+            "time_stamp": if hide_time_stamp {
+                "sigTst2, token verified in the circuit (TSA hidden in the TSA tree; time disclosed as a window)"
+            } else {
+                "sigTst2, imprint bound in the circuit, token verified off-circuit"
+            },
             "proof_system": "Groth16 (gnark v0.16.4, native Go witness solving, one BSB22 commitment)",
             "proving_key": { "format": key_loading.format, "point_checks": key_loading.check, "file_sha256_checked": true },
             "curve": manifest["curve"].as_str().unwrap_or(DEFAULT_CURVE),
@@ -540,7 +575,11 @@ pub fn measure(
             "time_stamp_hidden": hide_time_stamp,
             "issuer": if hide_issuer { json!({ "hidden": true, "tree": "issuertree format 1 (Poseidon2, depth 8)", "entries": prepare["issuer_tree_entries"] }) } else { json!({ "hidden": false }) },
         },
-        "statement": STATEMENT,
+        "statement": match statement {
+            VARIANT_HIDDEN_ALL => STATEMENT_HIDDEN_ALL,
+            VARIANT_HIDDEN_ISSUER => STATEMENT_HIDDEN_ISSUER,
+            _ => STATEMENT,
+        },
         "accounting": ACCOUNTING,
         "environment": environment,
         "artifacts": {
@@ -572,7 +611,7 @@ pub fn measure(
         "phases": phases,
         "output": {
             "proof_bytes": package["proof_bytes"],
-            "public_inputs": 50,
+            "public_inputs": public_inputs(statement, max_claim),
             "zk_signature_bytes": package["zk_signature_bytes"],
             "claim_signature_bytes_original": prepare["claim_signature_bytes"],
             "spare_bytes": prepare["spare_bytes"],
@@ -615,6 +654,14 @@ mod tests {
         let mixed = aggregate_runs("prove", "anonymization", vec![run(70.0, 1.0, "cold", 1.0), run(71.0, 1.0, "eviction-failed", 1.0)]);
         assert_eq!(mixed["data"]["cache"], json!("mixed"));
         assert_eq!(mixed["data"]["runs"][1]["cache"], json!("eviction-failed"));
+    }
+
+    #[test]
+    fn public_inputs_follow_the_statement() {
+        // As the verifying keys expect, without gnark's commitment input.
+        assert_eq!(public_inputs("disclosed", 1024), 50);
+        assert_eq!(public_inputs(VARIANT_HIDDEN_ISSUER, 1024), 39);
+        assert_eq!(public_inputs(VARIANT_HIDDEN_ALL, 1024), 39);
     }
 
     #[test]

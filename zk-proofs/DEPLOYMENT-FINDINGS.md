@@ -88,6 +88,14 @@ The first Pixel photo, anonymized in third-party mode and verified against the o
 - **What stays visible**: the claim generator ("Google C2PA SDK for Android" and its version), the actions assertion ("Created by Pixel Camera.", computational capture), and the issuing CA; outside the hard binding, the EXIF and XMP (make, model, lens, capture time, a GPS block), reported by the anonymizer and left as they are (H6). None of the signer's certificate, key, serial number, original protected header, or original signature remains in the file.
 - **Standard tools.** `c2patool` reports the anonymized photo as Invalid (`algorithm.unsupported`, `claimSignature.mismatch`) while matching its assertions and hard binding, as expected for the private-use algorithm ([H8](README.md#h8-c2patool-support)).
 
+### With the issuer hidden (H4)
+
+The second photo below, anonymized with `--hide-issuer` alone and the hidden-issuer keys, and verified with the TSA trust list under a policy approving the official trust list (`a95f2c4`, `from: 0`), on 2026-11-13:
+
+- **It works unchanged on the real asset.** The issuer is hidden among the 28 eligible P-384 CAs of the official trust list; the verifier checks the time-stamp token outside the proof, against the TSA trust list. Anonymizing took 75 s (one run, page cache not controlled; 6.7 GiB peak); the ZK signature replaced the 3,753-byte original in place with 1,225 bytes to spare, and the file kept its size.
+- **The signer's certificates are gone; the token's stay.** Checked byte for byte: neither the signer certificate nor the issuing CA's remains. The time-stamp token is kept, as this mode requires, and with it the TSA's two certificates, "Google Pixel Time Stamping Authority" under "Google C2PA Pixel Time-Stamping ICA G3", along with the exact time.
+- **So, for this deployment, hiding the issuer alone does not hide the organization:** its TSA is its own, and the token names it. The proof's membership set contains 28 CAs, but effective anonymity can be narrowed by the public token, claim, and metadata. Hiding the token too (below) removes the token's disclosure, which is why I6 matters for vertically integrated deployments ([What H4 can and cannot hide](HIDING-THE-ISSUER.md#what-h4-can-and-cannot-hide)); the claim's remains, and so does the metadata's unless scrubbed. With a third-party TSA shared across organizations, the hidden issuer alone would hide more.
+
 ### With the issuer and the time stamp hidden (I6)
 
 A second photo from the same samples ("Unedited regular capture", a 4.5 MB JPEG time-stamped on 2025-08-05), anonymized with `--hide-issuer --hide-time-stamp` and the hidden-all keys, and verified under a policy approving the same official lists as issuer and TSA snapshots, on 2026-11-12:

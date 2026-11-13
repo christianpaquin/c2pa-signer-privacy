@@ -20,7 +20,7 @@ A real device photo, signed under the official C2PA trust list and time-stamped 
 - **Keeps** the original claim and its hard binding, so the content's integrity is checked as for any C2PA asset; the file keeps its size; the signature is replaced in place.
 - **Scrubs** the photo's EXIF and XMP (outside the hard binding), so that its only remaining mention of the device's maker is in the claim.
 
-On a laptop, anonymizing the benchmark fixture (a test asset mirroring the real deployment's chain) takes about 75–100 seconds and 7–9 GB of memory, depending on what is hidden, in controlled runs; the real photos, in single runs, took 129–141 seconds with everything hidden. Verifying takes 30–50 ms (about 0.1 s with the full verifier).
+On a laptop, anonymizing the benchmark fixture (a test asset mirroring the real deployment's chain) takes about 75–100 seconds and 7–9 GB of memory, depending on what is hidden, in controlled runs; the real photos, in single runs, took 75 seconds with the issuer hidden and 129–141 seconds with everything hidden. Verifying takes 30–50 ms (about 0.1 s with the full verifier).
 
 ## The modes
 
@@ -34,7 +34,7 @@ Three statements, each with its own keys; the first is the default, the others o
 | Verifier needs | Trust list, TSA trust list | An issuer policy (approved trust-list snapshots and their periods), and the TSA trust list: the token is still public, checked outside the proof | The policy, with TSA snapshots; no TSA trust list |
 | Constraints | 4,710,820 | 4,718,946 (+0.17%) | 6,458,939 (+37%) |
 | Per-asset anonymization, fixture (cold, BN254; harness, median of three) | 72–77 s | Within noise of the disclosed one | 97 s, against 75–77 s for the hidden issuer in the same session (+28%) |
-| Per-asset anonymization, real photos (single runs) | 133 s (first photo) | Not run | 141 s; 129 s with metadata scrubbing (second photo) |
+| Per-asset anonymization, real photos (single runs) | 133 s (first photo) | 75 s (second photo; page cache not controlled) | 141 s; 129 s with metadata scrubbing (second photo) |
 | Peak memory | 6.7 GiB | 6.7 GiB | 8.5 GiB |
 | Proving key | 1.15 GB | 1.15 GB | 1.49 GB |
 | Verification (full verifier) | 35–48 ms (59–76 ms) | 31–50 ms (80–122 ms) | 32 ms (104 ms) |
@@ -61,10 +61,10 @@ M0, Milestone 0, is the prototype's starting point: the signer-side circom imple
 
 Demonstrated on the private samples of one real C2PA deployment ([DEPLOYMENT-FINDINGS.md](DEPLOYMENT-FINDINGS.md#r2-anonymizing-a-real-asset)):
 
-- **Disclosed mode** on a first device photo; **hidden issuer and time stamp** on a second, with and without metadata scrubbing. Both verify against the official lists (`conformance-public` at `a95f2c4`), with the claim's hard binding matching.
+- **Disclosed mode** on a first device photo; **hidden issuer**, and **hidden issuer and time stamp** (with and without metadata scrubbing), on a second. All verify against the official lists (`conformance-public` at `a95f2c4`), with the claim's hard binding matching.
 - **The deployment's encodings match** what the prototype expects (ES256 over the claim's `Sig_structure`, the protected header's layout, `sigTst2` over the countersignature), and its time-stamp chain has the same shape as its signing chain (a P-256 end entity under a listed P-384 CA).
 - **The issuing CAs are directly on the lists,** which the hidden modes require.
-- Not run on a real asset: the hidden-issuer mode alone (its pieces are covered by the hidden-all run).
+- **Hidden issuer alone**, on the second photo: it verifies, but the time-stamp token it keeps names the deployment's own TSA, and so the organization; only hiding the token too removes that ([findings](DEPLOYMENT-FINDINGS.md#with-the-issuer-hidden-h4)).
 - Refused, by design: an edited photo with two manifests ([E8](README.md#e8-ingredient-manifests)), and a raw image (DNG), whose format c2pa-rs cannot rewrite at the same size.
 
 ## What stays visible

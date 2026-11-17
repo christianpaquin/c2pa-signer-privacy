@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 380" width="780" height="380" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" fill="#0b0b0b">
+<rect width="780" height="380" fill="#fcfcfb"/>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#52514e"/></marker></defs>
+<text x="20" y="26" font-size="15" font-weight="600" fill="#0b0b0b" text-anchor="start">Sign as today, anonymize later, verify under the verifier&#x27;s policy</text>
+<rect x="20" y="44" width="230" height="316" rx="4" fill="#ffffff" stroke="#c9c8c2" stroke-width="1"/>
+<text x="32" y="66" font-size="13.5" font-weight="600" fill="#0b0b0b" text-anchor="start">1. Sign</text>
+<text x="32" y="83" font-size="11.5" font-weight="normal" fill="#52514e" text-anchor="start" font-style="italic">the device, unchanged</text>
+<rect x="275" y="44" width="230" height="316" rx="4" fill="#ffffff" stroke="#c9c8c2" stroke-width="1"/>
+<text x="287" y="66" font-size="13.5" font-weight="600" fill="#0b0b0b" text-anchor="start">2. Anonymize</text>
+<text x="287" y="83" font-size="11.5" font-weight="normal" fill="#52514e" text-anchor="start" font-style="italic">any party, without the signer&#x27;s key</text>
+<rect x="530" y="44" width="230" height="316" rx="4" fill="#ffffff" stroke="#c9c8c2" stroke-width="1"/>
+<text x="542" y="66" font-size="13.5" font-weight="600" fill="#0b0b0b" text-anchor="start">3. Verify</text>
+<text x="542" y="83" font-size="11.5" font-weight="normal" fill="#52514e" text-anchor="start" font-style="italic">under the verifier&#x27;s own policy</text>
+<rect x="32" y="98" width="206" height="58" rx="4" fill="#ffffff" stroke="#c9c8c2" stroke-width="1"/>
+<text x="42" y="116" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">C2PA signing</text>
+<text x="42" y="132" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">X.509 certificate under a</text>
+<text x="42" y="146" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">configured trust list (ES256)</text>
+<rect x="32" y="168" width="206" height="44" rx="4" fill="#ffffff" stroke="#c9c8c2" stroke-width="1"/>
+<text x="42" y="186" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">Time stamp</text>
+<text x="42" y="202" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">a TSA countersigns (sigTst2)</text>
+<rect x="32" y="262" width="206" height="74" rx="4" fill="#fcebe3" stroke="#eb6834" stroke-width="1.5"/>
+<text x="42" y="280" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">Signed asset</text>
+<text x="42" y="296" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">claim, assertions, signature,</text>
+<text x="42" y="310" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">certificates, time-stamp token</text>
+<rect x="287" y="98" width="206" height="44" rx="4" fill="#ffffff" stroke="#c9c8c2" stroke-width="1"/>
+<text x="297" y="116" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">Check the asset is in scope</text>
+<text x="297" y="132" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">refuse it otherwise</text>
+<rect x="287" y="154" width="206" height="58" rx="4" fill="#ffffff" stroke="#c9c8c2" stroke-width="1"/>
+<text x="297" y="172" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">Prove the original signature</text>
+<text x="297" y="188" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">zero-knowledge proof, in a</text>
+<text x="297" y="202" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">chosen mode</text>
+<rect x="287" y="224" width="206" height="30" rx="4" fill="#ffffff" stroke="#c9c8c2" stroke-width="1"/>
+<text x="297" y="242" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">Check its own proof</text>
+<rect x="287" y="262" width="206" height="74" rx="4" fill="#e3edf9" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="297" y="280" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">Anonymized asset</text>
+<text x="297" y="296" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">same claim and binding; a ZK</text>
+<text x="297" y="310" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">signature in place, same size</text>
+<rect x="542" y="98" width="206" height="58" rx="4" fill="#ffffff" stroke="#c9c8c2" stroke-width="1"/>
+<text x="552" y="116" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">Policy</text>
+<text x="552" y="132" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">approved trust lists and</text>
+<text x="552" y="146" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">snapshots; coarsest time window</text>
+<rect x="542" y="168" width="206" height="58" rx="4" fill="#ffffff" stroke="#c9c8c2" stroke-width="1"/>
+<text x="552" y="186" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">Check</text>
+<text x="552" y="202" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">claim and hard binding (c2pa);</text>
+<text x="552" y="216" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">the proof, inputs from the asset</text>
+<rect x="542" y="262" width="206" height="74" rx="4" fill="#efefec" stroke="#52514e" stroke-width="1.5"/>
+<text x="552" y="280" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">Result</text>
+<text x="552" y="296" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">signed under an approved list,</text>
+<text x="552" y="310" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">when valid; signer not disclosed</text>
+<line x1="238" y1="299" x2="287" y2="299" stroke="#52514e" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="493" y1="299" x2="542" y2="299" stroke="#52514e" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="123" y1="156" x2="123" y2="167" stroke="#52514e" stroke-width="1.2" marker-end="url(#arrow)"/>
+<line x1="123" y1="212" x2="123" y2="261" stroke="#52514e" stroke-width="1.2" marker-end="url(#arrow)"/>
+<line x1="378" y1="142" x2="378" y2="153" stroke="#52514e" stroke-width="1.2" marker-end="url(#arrow)"/>
+<line x1="378" y1="212" x2="378" y2="223" stroke="#52514e" stroke-width="1.2" marker-end="url(#arrow)"/>
+<line x1="378" y1="254" x2="378" y2="261" stroke="#52514e" stroke-width="1.2" marker-end="url(#arrow)"/>
+<line x1="633" y1="156" x2="633" y2="167" stroke="#52514e" stroke-width="1.2" marker-end="url(#arrow)"/>
+<line x1="633" y1="226" x2="633" y2="261" stroke="#52514e" stroke-width="1.2" marker-end="url(#arrow)"/>
+<text x="20" y="374" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start" font-style="italic">Trust lists feed the anonymizer (to build the proof) and the verifier (which approves its own); the signer&#x27;s key never leaves the device.</text>
+</svg>

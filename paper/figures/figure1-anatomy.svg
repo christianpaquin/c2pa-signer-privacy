@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 830 560" width="830" height="560" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12" fill="#0b0b0b">
+<rect width="830" height="560" fill="#fcfcfb"/>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#52514e"/></marker></defs>
+<text x="20" y="26" font-size="15" font-weight="600" fill="#0b0b0b" text-anchor="start">A signed photo: its parts, and what each discloses</text>
+<rect x="20" y="44" width="330" height="500" rx="4" fill="#ffffff" stroke="#52514e" stroke-width="1"/>
+<text x="32" y="64" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">JPEG file</text>
+<rect x="32" y="140" width="306" height="356" rx="4" fill="#fafaf8" stroke="#52514e" stroke-width="1"/>
+<text x="44" y="158" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">C2PA manifest store</text>
+<rect x="44" y="310" width="282" height="182" rx="4" fill="#f4f4f1" stroke="#8a8984" stroke-width="1"/>
+<text x="56" y="326" font-size="11.5" font-weight="600" fill="#52514e" text-anchor="start">Claim signature (COSE)</text>
+<rect x="32" y="506" width="306" height="28" rx="4" fill="#efefec" stroke="#c9c8c2" stroke-width="1"/>
+<text x="44" y="524" font-size="11.5" font-weight="normal" fill="#52514e" text-anchor="start">Image data (covered by the hard binding)</text>
+<rect x="32" y="76" width="306" height="52" rx="4" fill="#ffffff" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="42" y="95" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">EXIF and XMP metadata</text>
+<text x="42" y="111" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">outside the hard binding: not signed</text>
+<line x1="338" y1="102.0" x2="372" y2="102.0" stroke="#c9c8c2" stroke-width="1"/>
+<circle cx="372" cy="102.0" r="2.5" fill="#52514e"/>
+<text x="384" y="92.0" font-size="11.5" font-weight="normal" fill="#0b0b0b" text-anchor="start">Make, model, lens, capture time,</text>
+<text x="384" y="106.0" font-size="11.5" font-weight="normal" fill="#0b0b0b" text-anchor="start">location</text>
+<rect x="610" y="92.0" width="156" height="20" rx="10" fill="#e3edf9" stroke="#2a78d6" stroke-width="1"/>
+<text x="688.0" y="106.0" font-size="11" font-weight="600" fill="#0b0b0b" text-anchor="middle">Removed by scrubbing</text>
+<rect x="44" y="172" width="282" height="60" rx="4" fill="#ffffff" stroke="#eb6834" stroke-width="1.5"/>
+<text x="54" y="191" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">Claim</text>
+<text x="54" y="207" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">claim generator; instance ID;</text>
+<text x="54" y="221" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">references to the assertions</text>
+<line x1="326" y1="202.0" x2="372" y2="202.0" stroke="#c9c8c2" stroke-width="1"/>
+<circle cx="372" cy="202.0" r="2.5" fill="#52514e"/>
+<text x="384" y="192.0" font-size="11.5" font-weight="normal" fill="#0b0b0b" text-anchor="start">The signing software and its build;</text>
+<text x="384" y="206.0" font-size="11.5" font-weight="normal" fill="#0b0b0b" text-anchor="start">an identifier unique to the asset</text>
+<rect x="610" y="192.0" width="107" height="20" rx="10" fill="#fcebe3" stroke="#eb6834" stroke-width="1"/>
+<text x="663.5" y="206.0" font-size="11" font-weight="600" fill="#0b0b0b" text-anchor="middle">Stays visible</text>
+<rect x="44" y="240" width="282" height="60" rx="4" fill="#ffffff" stroke="#eb6834" stroke-width="1.5"/>
+<text x="54" y="259" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">Assertions</text>
+<text x="54" y="275" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">hard binding: the content&#x27;s hash;</text>
+<text x="54" y="289" font-size="11" font-weight="normal" fill="#52514e" text-anchor="start">actions: &quot;created by&quot;, source type</text>
+<line x1="326" y1="270.0" x2="372" y2="270.0" stroke="#c9c8c2" stroke-width="1"/>
+<circle cx="372" cy="270.0" r="2.5" fill="#52514e"/>
+<text x="384" y="260.0" font-size="11.5" font-weight="normal" fill="#0b0b0b" text-anchor="start">The product; whether the content is</text>
+<text x="384" y="274.0" font-size="11.5" font-weight="normal" fill="#0b0b0b" text-anchor="start">a capture or AI-generated</text>
+<rect x="610" y="260.0" width="107" height="20" rx="10" fill="#fcebe3" stroke="#eb6834" stroke-width="1"/>
+<text x="663.5" y="274.0" font-size="11" font-weight="600" fill="#0b0b0b" text-anchor="middle">Stays visible</text>
+<rect x="56" y="332" width="258" height="34" rx="4" fill="#ffffff" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="66" y="351" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">Signer certificate</text>
+<line x1="314" y1="349.0" x2="372" y2="349.0" stroke="#c9c8c2" stroke-width="1"/>
+<circle cx="372" cy="349.0" r="2.5" fill="#52514e"/>
+<text x="384" y="339.0" font-size="11.5" font-weight="normal" fill="#0b0b0b" text-anchor="start">A certificate unique to the device</text>
+<text x="384" y="353.0" font-size="11.5" font-weight="normal" fill="#0b0b0b" text-anchor="start">or session</text>
+<rect x="610" y="339.0" width="156" height="20" rx="10" fill="#e3edf9" stroke="#2a78d6" stroke-width="1"/>
+<text x="688.0" y="353.0" font-size="11" font-weight="600" fill="#0b0b0b" text-anchor="middle">Hidden in every mode</text>
+<rect x="56" y="372" width="258" height="34" rx="4" fill="#ffffff" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="66" y="391" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">Issuing CA certificate</text>
+<line x1="314" y1="389.0" x2="372" y2="389.0" stroke="#c9c8c2" stroke-width="1"/>
+<circle cx="372" cy="389.0" r="2.5" fill="#52514e"/>
+<text x="384" y="379.0" font-size="11.5" font-weight="normal" fill="#0b0b0b" text-anchor="start">The organization, often the</text>
+<text x="384" y="393.0" font-size="11.5" font-weight="normal" fill="#0b0b0b" text-anchor="start">product line</text>
+<rect x="610" y="379.0" width="170" height="20" rx="10" fill="#e3edf9" stroke="#2a78d6" stroke-width="1"/>
+<text x="695.0" y="393.0" font-size="11" font-weight="600" fill="#0b0b0b" text-anchor="middle">Hidden with the issuer</text>
+<rect x="56" y="412" width="258" height="34" rx="4" fill="#ffffff" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="66" y="431" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">Signature</text>
+<line x1="314" y1="429.0" x2="372" y2="429.0" stroke="#c9c8c2" stroke-width="1"/>
+<circle cx="372" cy="429.0" r="2.5" fill="#52514e"/>
+<text x="384" y="425.0" font-size="11.5" font-weight="normal" fill="#0b0b0b" text-anchor="start">Checkable only with the signer&#x27;s key</text>
+<rect x="610" y="419.0" width="156" height="20" rx="10" fill="#e3edf9" stroke="#2a78d6" stroke-width="1"/>
+<text x="688.0" y="433.0" font-size="11" font-weight="600" fill="#0b0b0b" text-anchor="middle">Hidden in every mode</text>
+<rect x="56" y="452" width="258" height="34" rx="4" fill="#ffffff" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="66" y="471" font-size="12" font-weight="600" fill="#0b0b0b" text-anchor="start">Time-stamp token (sigTst2)</text>
+<line x1="314" y1="469.0" x2="372" y2="469.0" stroke="#c9c8c2" stroke-width="1"/>
+<circle cx="372" cy="469.0" r="2.5" fill="#52514e"/>
+<text x="384" y="459.0" font-size="11.5" font-weight="normal" fill="#0b0b0b" text-anchor="start">The time-stamp authority; the exact</text>
+<text x="384" y="473.0" font-size="11.5" font-weight="normal" fill="#0b0b0b" text-anchor="start">time; values the authority can match</text>
+<rect x="610" y="459.0" width="191" height="20" rx="10" fill="#e3edf9" stroke="#2a78d6" stroke-width="1"/>
+<text x="705.5" y="473.0" font-size="11" font-weight="600" fill="#0b0b0b" text-anchor="middle">Hidden; only the day kept</text>
+</svg>

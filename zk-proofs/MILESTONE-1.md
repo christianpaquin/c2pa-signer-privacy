@@ -107,6 +107,7 @@ Demonstrated on the private samples of one real C2PA deployment ([DEPLOYMENT-FIN
 - **Trust models:** signer membership in a Merkle tree (E3), a SNARK-friendly credential (E4), the interim list's allowed signers (R3).
 - **Production:** time-stamping operations (H1), revocation (H3), a setup ceremony or a proof system without one (H5, E6), the full certificate profile in the circuit (H2, with the signer certificate's calendar-date check), CI (H7), c2patool support (H8).
 - **Coverage:** RSA and P-521 CAs and TSAs (9 certificates of the official lists), scrubbing other formats, anonymizing multi-manifest provenance (E8), key possession for the signer-side mode (E5).
+- **Quantum safety (E9):** a post-quantum, transparent proof system, measured against Groth16 on today's statement; and, separately, what quantum-resistant authenticity would need (post-quantum signatures, certificates, time stamps, and trust lists throughout the chain). Its proofs are larger than in-place replacement allows.
 
 ## Questions for C2PA
 

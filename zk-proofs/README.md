@@ -310,6 +310,17 @@ Status: **"anonymize first, then edit" works with c2pa-rs 0.77** (tests `anonymi
 The cost of this honesty: c2pa-rs rates the whole edited asset **Invalid**, because the ingredient's failures propagate to the overall state, although the editor's manifest is valid; it does so whether or not the link to the ingredient is intact, so only the validation codes tell the two apart. A validator that understands ZK signatures (H8) would report the ingredient's proof instead. Not covered yet: the verifier CLI checks only the active manifest (`verify_ingredient` is a library function), and only one editing tool was tried.
 
 
+#### E9. Post-quantum proof systems
+
+To explore: a proof system that stays sound against a quantum attacker. The current proofs are Groth16 on pairing-friendly curves (BN254, BLS12-381), whose soundness rests on discrete-logarithm-type assumptions that a large quantum computer would break. Such an attacker could forge proofs, making a verifier accept anonymized content that was never validly signed. Privacy is not at risk: Groth16 proofs are perfectly zero-knowledge, so proofs published today reveal nothing to a future quantum adversary.
+
+Candidates: proof systems whose soundness relies only on hash functions (STARK-style systems, or Ligero-based ones such as Longfellow ZK), which are also transparent, so H5's trusted setup would go away; lattice-based proof systems are still research. Each would be measured on the same statement and accounting as [E6](#e6-proof-systems): proving time and memory, verification time, the security level, and proof size, which grows from 196 bytes to tens or hundreds of kilobytes.
+
+Two constraints shape the experiment:
+
+- **Size.** In-place replacement needs the proof to fit in the original signature's space (about 3.7 KB on real ES256 assets), which a large post-quantum proof would not. The output format would have to change, for example to reference the proof externally, or to have signers reserve more space.
+- **What is proved.** A post-quantum proof protects an anonymized asset only as far as the signature it proves is itself quantum-safe. Today's C2PA claim signatures and certificates use ECDSA and RSA, which a quantum attacker could forge directly, so a post-quantum proof over them adds little until C2PA adopts post-quantum signatures (such as ML-DSA). The experiment should therefore also cost verifying an ML-DSA signature and certificate in the proof, the case that matters once the ecosystem migrates.
+
 ### Goal 2: what works today
 
 #### R1. Feasibility matrix

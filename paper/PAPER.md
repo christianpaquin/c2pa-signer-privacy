@@ -1,6 +1,6 @@
 # Signer Privacy for C2PA: Anonymizing Signed Content with Zero-Knowledge Proofs
 
-*Draft, November 17, 2026*
+*Draft, November 23, 2026*
 
 ## Executive summary
 
@@ -363,6 +363,15 @@ Both need a party to publish the tree or issue the credentials. It need not be a
 - **Other formats** for metadata scrubbing, and in-place rewriting for TIFF-based formats.
 - **Edited content:** proving a provenance chain whose ingredients were anonymized.
 - **Signing devices:** anonymizing on a phone needs a several-fold reduction in memory.
+
+### Quantum safety
+
+The proofs rely on pairing-friendly curves, whose security a large quantum computer would break. The threat is to soundness: such an attacker could forge proofs, and have content accepted that was never validly signed. The proofs' zero knowledge does not depend on that hardness, so proofs published today stay private against a future quantum attacker; the output's other disclosures are unchanged either way. Two objectives are worth keeping apart:
+
+- **A quantum-resistant proof of today's statement:** a hash-based proof system (STARK-style, or Ligero-based such as Longfellow ZK), which would also remove the trusted setup, measured on the same statement. It would not make the content's authenticity quantum-resistant, since today's claim, CA, and time-stamp signatures (ECDSA, RSA) could themselves be forged.
+- **Quantum-resistant authenticity:** this needs every link of the chain to be post-quantum (claim signatures such as ML-DSA, CA issuance, time-stamp authorities and their chains, trust-list authentication, hashes and commitments), and the proof to verify those signatures.
+
+Candidates would be compared with concrete parameters, on soundness and zero knowledge against quantum attackers, the security of their non-interactive transform, and cost. Their proofs are expected to run to tens or hundreds of kilobytes, more than the space in-place replacement offers, so the output format would likely change, for example to a proof referenced externally, bound to the statement and inputs, and failing closed when unavailable.
 
 ## 9. Questions for the C2PA community
 

@@ -312,14 +312,23 @@ The cost of this honesty: c2pa-rs rates the whole edited asset **Invalid**, beca
 
 #### E9. Post-quantum proof systems
 
-To explore: a proof system that stays sound against a quantum attacker. The current proofs are Groth16 on pairing-friendly curves (BN254, BLS12-381), whose soundness rests on discrete-logarithm-type assumptions that a large quantum computer would break. Such an attacker could forge proofs, making a verifier accept anonymized content that was never validly signed. Privacy is not at risk: Groth16 proofs are perfectly zero-knowledge, so proofs published today reveal nothing to a future quantum adversary.
+To explore: a proof system that stays sound against a quantum attacker. The current proofs are Groth16 on pairing-friendly curves (BN254, BLS12-381), whose soundness rests on discrete-logarithm-type assumptions that a large quantum computer would break. Such an attacker could forge proofs, making a verifier accept anonymized content that was never validly signed.
 
-Candidates: proof systems whose soundness relies only on hash functions (STARK-style systems, or Ligero-based ones such as Longfellow ZK), which are also transparent, so H5's trusted setup would go away; lattice-based proof systems are still research. Each would be measured on the same statement and accounting as [E6](#e6-proof-systems): proving time and memory, verification time, the security level, and proof size, which grows from 196 bytes to tens or hundreds of kilobytes.
+Quantum attacks threaten the proofs' soundness; the proofs' zero knowledge does not rely on discrete-logarithm hardness (Groth16 is perfectly zero-knowledge, and in the pinned gnark version, the BSB22 commitment it adds is masked with randomness, per the review of #53). This covers the proof only: it does not remove the disclosures elsewhere in the output (the claim, metadata, a visible time-stamp token, the content hash), nor the computational assumptions they rely on.
 
-Two constraints shape the experiment:
+Two objectives, to be kept apart:
 
-- **Size.** In-place replacement needs the proof to fit in the original signature's space (about 3.7 KB on real ES256 assets), which a large post-quantum proof would not. The output format would have to change, for example to reference the proof externally, or to have signers reserve more space.
-- **What is proved.** A post-quantum proof protects an anonymized asset only as far as the signature it proves is itself quantum-safe. Today's C2PA claim signatures and certificates use ECDSA and RSA, which a quantum attacker could forge directly, so a post-quantum proof over them adds little until C2PA adopts post-quantum signatures (such as ML-DSA). The experiment should therefore also cost verifying an ML-DSA signature and certificate in the proof, the case that matters once the ecosystem migrates.
+1. **A quantum-resistant proof of today's statement.** A post-quantum proof system over the existing ECDSA-based workflow, measured for compatibility and cost. Useful before any ecosystem migration, but it does not give quantum-resistant authenticity: today's claim signatures, CA signatures, and time-stamp signatures (ECDSA, RSA) could themselves be forged by a quantum attacker.
+2. **Quantum-resistant authenticity.** This needs every link of the chain to be post-quantum: the claim signature, the CAs' issuance signatures, the time-stamp authority's signature and certificate chain, the trust lists' authentication, and the hashes and Merkle commitments, with adequate parameters. A post-quantum signer under a quantum-vulnerable CA is not enough, and classical time-stamp evidence remains an attack surface: backdated certificate fields cannot tell an authentic historical signature from a quantum forgery. This objective costs verifying post-quantum signatures (such as ML-DSA) and certificates in the proof.
+
+Candidates: hash-based proof systems (STARK-style, or Ligero-based such as Longfellow ZK, whose specification is an IRTF draft), which are also transparent, so H5's trusted setup would go away; lattice-based systems are still research. Transparency and hashing are not a security assessment on their own, so the comparison would fix concrete implementations, versions, and parameter sets, and evaluate for each:
+
+- soundness against quantum attackers, and zero knowledge (not every STARK configuration is zero-knowledge);
+- the non-interactive transform and its Fiat-Shamir assumptions, including their treatment in the quantum random-oracle model;
+- hash sizes and security targets, and the resulting trade-off between proof size and performance;
+- the measures of [E6](#e6-proof-systems): proving time and memory, verification time, and proof size.
+
+**Size and format.** Proofs are expected to grow from 196 bytes to tens or hundreds of kilobytes, a range to measure for the chosen systems and statement. In-place replacement needs the proof to fit in the original signature's space (about 3.7 KB on real ES256 assets), so the output format would likely change: signers reserving more space, or the proof referenced externally. An external reference must be bound to the exact proof, statement, and verifier-derived public inputs, and verification must fail closed when the proof is missing or cannot be retrieved: a reference is not a verification result.
 
 ### Goal 2: what works today
 
